@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { OctagonX, Wifi, WifiOff, LogOut, Menu } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useMarketStore } from '@/stores/market-store';
-import { feedBadge } from '@/services/feed-health';
+import { feedBadge, type FeedTone } from '@/services/feed-health';
 import { useAuthStore } from '@/stores/auth-store';
 import { ThemeToggle } from '@/components/common';
 
@@ -36,10 +36,11 @@ function useIST() {
 }
 
 /** Health tone -> colour token. Stale gets its own colour; it is its own state. */
-const FEED_TONE: Record<'positive' | 'warning' | 'negative', string> = {
+const FEED_TONE: Record<FeedTone, string> = {
   positive: 'text-[var(--color-accent-green)]',
   warning: 'text-[var(--color-accent-yellow)]',
   negative: 'text-[var(--color-accent-red)]',
+  neutral: 'text-[var(--color-text-muted)]',
 };
 
 export default function Header({ onMenuClick }: HeaderProps) {

@@ -6,7 +6,7 @@ import {
   shouldResetRetries,
   shouldRetryServerDisconnect,
 } from './ws-retry';
-import { classifyFeed, type FeedHealth } from './feed-health';
+import { classifyFeed, isAnyMarketOpen, type FeedHealth } from './feed-health';
 import { feedKey, isFeedSource, moreUrgent, type FeedPurpose, type FeedRef, type FeedSource } from './browser-feed';
 
 /**
@@ -384,6 +384,7 @@ class WebSocketService {
       otherNamespacesUp: [...this.nsConnected.entries()].filter(
         ([path, up]) => path !== '/ws' && up,
       ).length,
+      marketOpen: isAnyMarketOpen(Date.now()),
     });
   }
 
@@ -416,8 +417,12 @@ class WebSocketService {
       const previous = this.lastHealth;
       this.lastHealth = health;
 
-      const entering = health !== 'live';
-      const recovering = health === 'live' && previous !== 'live';
+      // Only stale/offline are stalls. `closed` is the expected overnight
+      // silence: not reported as a stall (the report DTO only knows
+      // stale/offline), and leaving a stall into it counts as a recovery.
+      const isStall = (h: FeedHealth) => h === 'stale' || h === 'offline';
+      const entering = isStall(health);
+      const recovering = !isStall(health) && isStall(previous);
       if (!entering && !recovering) return;
 
       // Imported lazily and only when a stall is actually reported. A static

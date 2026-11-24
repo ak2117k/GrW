@@ -82,8 +82,15 @@ export function tickMatches(tick: unknown, token: string, exchange: string): tic
  * every number arrives as a tick. Any other state — the socket down, no tick
  * for 6 s, a legacy user, or the server not having said yet — keeps today's
  * cadence, so a stall can never freeze a screen.
+ *
+ * `closed` (socket up, silent, outside session hours) slows to at most once a
+ * minute: nothing trades, so fast polling buys nothing — but it never stops, in
+ * case the clock is wrong (a holiday is shown as open, never the reverse).
  */
+export const CLOSED_POLL_MS = 60_000;
+
 export function livePollMs(baseMs: number, feed: { source: FeedSource | null; health: FeedHealth }): number | false {
+  if (feed.health === 'closed') return Math.max(baseMs, CLOSED_POLL_MS);
   return feed.source === 'hub' && feed.health === 'live' ? false : baseMs;
 }
 

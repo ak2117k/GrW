@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, Globe, Wifi, WifiOff, Loader2 } from 'lucide-react';
 import { useMarketStore } from '@/stores/market-store';
-import { feedBadge } from '@/services/feed-health';
+import { feedBadge, type FeedTone } from '@/services/feed-health';
 import { useWatchlist } from '@/hooks/useWatchlist';
 import { useInstrumentSearch } from '@/hooks/useInstrumentSearch';
 import { useCommodities } from '@/hooks/useCommodities';
@@ -25,10 +25,11 @@ const TABS: { key: Tab; label: string }[] = [
 ];
 
 /** Health tone -> colour token. Stale gets its own colour; it is its own state. */
-const FEED_TONE: Record<'positive' | 'warning' | 'negative', string> = {
+const FEED_TONE: Record<FeedTone, string> = {
   positive: 'text-[var(--color-accent-green)]',
   warning: 'text-[var(--color-accent-yellow)]',
   negative: 'text-[var(--color-accent-red)]',
+  neutral: 'text-[var(--color-text-muted)]',
 };
 
 export default function MarketPage() {

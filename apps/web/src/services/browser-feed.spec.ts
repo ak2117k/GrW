@@ -21,6 +21,14 @@ describe('livePollMs', () => {
   });
 });
 
+describe('livePollMs when the market is closed', () => {
+  it('slows to at most once a minute: nothing trades, so fast polling buys nothing', () => {
+    expect(livePollMs(3000, { source: 'hub', health: 'closed' })).toBe(60_000);
+    expect(livePollMs(3000, { source: 'legacy', health: 'closed' })).toBe(60_000);
+    expect(livePollMs(120_000, { source: null, health: 'closed' })).toBe(120_000);
+  });
+});
+
 describe('tickMatches', () => {
   const tick = { token: '35001', exchange: 'NFO', symbol: 'X', ltp: 1, open: 0, high: 0, low: 0, close: 0, volume: 0, timestamp: '' };
 

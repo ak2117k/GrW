@@ -3575,6 +3575,42 @@ model ChannelInfo {
   @@map("channel_infos")
 }
 
+/// The AI reader's reading of one Telegram post (apps/api/src/modules/message-reader): what it says
+/// (kind, scope, claims) and each claim checked against the live packet, with the evidence cited.
+/// One row per message, upserted on edit.
+model MessageReading {
+  messageId       String    @id @map("message_id") // telegram_messages.id
+  channelId       String    @map("channel_id") // telegram_channels.id
+  postedAt        DateTime  @map("posted_at") @db.Timestamptz(6)
+  sessionDate     String    @map("session_date") // IST 'YYYY-MM-DD' of postedAt
+  readAt          DateTime? @map("read_at") @db.Timestamptz(6)
+  status          String // READ | FAILED | STALE | CACHED
+  kind            String? // CALL | UPDATE | INFO | RECAP | NOISE
+  scope           String? // MARKET | SECTOR | INSTRUMENT
+  claims          Json // Claim[]: {text, subject, bias, horizon, claimType, verdict, evidence[], evidenceMissing?}
+  call            Json? // ReaderCall when kind = CALL / UPDATE
+  parseAgrees     Boolean?  @map("parse_agrees") // rule parser's call matches the reader's (null = n/a)
+  missedByRules   Boolean   @default(false) @map("missed_by_rules")
+  summary         String?
+  model           String?
+  packet          Json? // the market packet the AI saw
+  queuedMs        Int?      @map("queued_ms")
+  packetMs        Int?      @map("packet_ms")
+  aiMs            Int?      @map("ai_ms")
+  textHash        String    @map("text_hash") // reading cache key
+  outcomes        Json?
+  outcomeFilledAt DateTime? @map("outcome_filled_at") @db.Timestamptz(6)
+  error           String?
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([postedAt])
+  @@index([scope, postedAt])
+  @@index([textHash])
+  @@index([outcomeFilledAt])
+  @@map("message_readings")
+}
+
 /// A breakout level a channel posted ("Radico breakout above 4330"), watched on the underlying's LTP
 /// until it is crossed (→ a trade_signals row + signal.ready, judged like any call) or expires (owner 2026-10-27).
 model SignalWatch {

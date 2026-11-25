@@ -147,10 +147,12 @@ describe('per-class catastrophe ceilings (HARD_LOSS_CEILING_BY_CLASS, owner 2026
     expect(instrumentClass('SBIN23NOV261020CE', 'NFO')).toBe('STOCK_OPT');
     expect(instrumentClass('NIFTYBEES', 'NSE')).toBe('OTHER');
     expect(instrumentClass('GOLD27NOV26125000PE', 'MCX')).toBe('GOLD');
-    expect(instrumentClass('GOLDM05DEC26FUT', 'MCX')).toBe('GOLD');
+    expect(instrumentClass('GOLDM05DEC26FUT', 'MCX')).toBe('GOLD_MINI');
     expect(instrumentClass('SILVER05DEC26FUT', 'MCX')).toBe('SILVER');
-    expect(instrumentClass('SILVERM27FEB26FUT', 'mcx')).toBe('SILVER');
+    expect(instrumentClass('SILVERM27FEB26FUT', 'mcx')).toBe('SILVER_MINI');
     expect(instrumentClass('GOLDGUINEA28NOV26FUT', 'MCX')).toBe('MCX');
+    expect(instrumentClass('GOLDPETAL28NOV26FUT', 'MCX')).toBe('MCX');
+    expect(instrumentClass('SILVERMIC27FEB26FUT', 'MCX')).toBe('MCX');
     expect(instrumentClass('CRUDEOILM17NOV269350PE', 'MCX')).toBe('MCX');
     expect(instrumentClass('NATURALGAS25NOV26300CE', 'MCX')).toBe('MCX');
     expect(instrumentClass('SBIN-EQ', 'NSE')).toBe('OTHER');
@@ -264,5 +266,65 @@ describe('per-class catastrophe ceilings (HARD_LOSS_CEILING_BY_CLASS, owner 2026
     expect(chartAbsLossRupees('NIFTY25NOV2623750CE', 'NFO', { ...ON, HARD_LOSS_ABS_RUPEES: '3500' })).toBe(5000);
     expect(chartAbsLossRupees('GOLD27NOV26125000PE', 'MCX', { ...ON, HARD_LOSS_ABS_RUPEES: '3500' })).toBe(7500);
     expect(chartAbsLossRupees('SBIN-EQ', 'NSE', { ...ON, HARD_LOSS_ABS_RUPEES: '3500' })).toBe(3500);
+  });
+});
+
+describe('GOLD_MINI / SILVER_MINI ceiling classes (owner 2026-11-25: GOLDM, SILVERM ₹4,000)', () => {
+  const ENV = { HARD_LOSS_EXIT_RUPEES: '2000' };
+  const OLD_TABLE = 'INDEX_OPT:5000,STOCK_OPT:5000,GOLD:7500,SILVER:7500,MCX:5000';
+  const NEW_TABLE = `${OLD_TABLE},GOLD_MINI:4000,SILVER_MINI:4000`;
+  const OLD = { ...ENV, HARD_LOSS_CEILING_BY_CLASS: OLD_TABLE };
+  const NEW = { ...ENV, HARD_LOSS_CEILING_BY_CLASS: NEW_TABLE };
+  const GOLDM = 'GOLDM05DEC26125000CE';
+  const SILVERM = 'SILVERM27FEB26100000CE';
+
+  it('parse accepts GOLD_MINI and SILVER_MINI', () => {
+    expect(parseCeilingByClass('gold_mini:4000, SILVER_MINI:4000')).toEqual({ GOLD_MINI: 4000, SILVER_MINI: 4000 });
+  });
+
+  it.each([[GOLDM], [SILVERM]])('%s with the mini key listed → cap 4000, limit 2000, N15 band on', (sym) => {
+    const lim = lossLimitForTrade(sym, 20_000, 'MCX', NEW);
+    expect(lim).toEqual({ limit: 2000, cap: 4000 });
+    expect(lossLimitFor(sym, 'MCX', NEW)).toEqual({ limit: 2000, cap: 4000 });
+    const cfg = hardLossConfig(NEW, lim);
+    expect(cfg).toEqual({ limit: 2000, cap: 4000, noiseN: 3 });
+    expect(hardLossBandOn(cfg)).toBe(true);
+    expect(usesN15Band(sym, 'MCX', NEW)).toBe(true);
+    expect(hardLossNoiseUnit(NEW, sym, 'MCX', 10.73, 31.5)).toBe(31.5);
+    expect(chartAbsLossRupees(sym, 'MCX', { ...NEW, HARD_LOSS_ABS_RUPEES: '3500' })).toBe(4000);
+  });
+
+  it.each([[GOLDM], [SILVERM]])('%s with a table WITHOUT the mini key → its metal\'s ceiling (7500), as before', (sym) => {
+    expect(lossLimitForTrade(sym, 20_000, 'MCX', OLD)).toEqual({ limit: 2000, cap: 7500 });
+    expect(usesN15Band(sym, 'MCX', OLD)).toBe(true);
+    expect(chartAbsLossRupees(sym, 'MCX', OLD)).toBe(7500);
+  });
+
+  it('the fallback is to the metal only, never MCX; neither listed → today\'s figures', () => {
+    const mcxOnly = { ...ENV, HARD_LOSS_CEILING_BY_CLASS: 'MCX:5000' };
+    expect(lossLimitFor(GOLDM, 'MCX', mcxOnly)).toEqual({ limit: 2000, cap: 3000 });
+    expect(usesN15Band(SILVERM, 'MCX', mcxOnly)).toBe(false);
+    expect(lossLimitFor(GOLDM, 'MCX', { ...ENV, HARD_LOSS_CEILING_BY_CLASS: 'SILVER:7500' })).toEqual({ limit: 2000, cap: 3000 });
+  });
+
+  it('full GOLD / SILVER unaffected by the mini keys (7500)', () => {
+    expect(lossLimitForTrade('GOLD27NOV26125000PE', 90_000, 'MCX', NEW)).toEqual({ limit: 2000, cap: 7500 });
+    expect(lossLimitForTrade('SILVER05DEC26100000CE', 90_000, 'MCX', NEW)).toEqual({ limit: 2000, cap: 7500 });
+    // a mini-only table does not touch the full contracts
+    const miniOnly = { ...ENV, HARD_LOSS_CEILING_BY_CLASS: 'GOLD_MINI:4000' };
+    expect(lossLimitForTrade('GOLD27NOV26125000PE', 90_000, 'MCX', miniOnly)).toEqual({ limit: 7500, cap: 7500 });
+    expect(lossLimitForTrade(GOLDM, 20_000, 'MCX', miniOnly)).toEqual({ limit: 2000, cap: 4000 });
+  });
+
+  it("table unset → today's figures for the minis", () => {
+    expect(lossLimitFor(GOLDM, 'MCX', ENV)).toEqual({ limit: 2000, cap: 3000 });
+    expect(lossLimitFor(SILVERM, 'MCX', ENV)).toEqual({ limit: 2000, cap: 3000 });
+    expect(lossLimitForTrade(GOLDM, 20_000, 'MCX', ENV)).toEqual(lossLimitForTrade(GOLDM, 20_000, ENV));
+    expect(usesN15Band(GOLDM, 'MCX', ENV)).toBe(false);
+  });
+
+  it('lossLimitBeforeCeilings (exit gate HARD_MAX_LOSS) is table-blind for the minis', () => {
+    expect(lossLimitBeforeCeilings(GOLDM, NEW)).toEqual({ limit: 2000, cap: 3000 });
+    expect(lossLimitBeforeCeilings(SILVERM, NEW)).toEqual(lossLimitBeforeCeilings(SILVERM, ENV));
   });
 });

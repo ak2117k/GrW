@@ -67,16 +67,21 @@ function underlyingKey(underlying: string | null | undefined): string | null {
  * unconditionally. This replaces, for a listed class, both HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING (GOLD's plain
  * ₹7,500) and the trade-value stops of lossLimitForTrade.
  *
- *   HARD_LOSS_CEILING_BY_CLASS  `INDEX_OPT:5000,STOCK_OPT:5000,GOLD:7500,SILVER:7500,MCX:5000`.
+ *   HARD_LOSS_CEILING_BY_CLASS  `INDEX_OPT:5000,STOCK_OPT:5000,GOLD:7500,SILVER:7500,GOLD_MINI:4000,SILVER_MINI:4000,MCX:5000`.
  *                               Unset / blank / `off` = no table = today's behaviour, exactly. Junk entries
  *                               (unknown class, OTHER, non-positive / non-numeric value, wrong shape) are
  *                               ignored, valid ones kept; no valid entry = no table. A class not listed keeps
  *                               today's figures. A bad table can only fall back to today's figures — never "no cap".
  *
+ * MINIS (owner 2026-11-25): GOLDM ⇒ GOLD_MINI and SILVERM ⇒ SILVER_MINI, their own classes (₹4,000 vs the full
+ * contract's ₹7,500). A table WITHOUT the mini key keeps the old behaviour: GOLD_MINI absent ⇒ a GOLDM position
+ * reads the GOLD entry (SILVER_MINI absent ⇒ SILVER), exactly as when the minis were classed as their metal, so an
+ * existing table neither loosens nor tightens. Neither the mini key nor the metal listed ⇒ today's figures.
+ *
  * HARD_LOSS_EXIT_RUPEES stays the master switch (unset ⇒ limit null everywhere). The entry risk check
  * (signal-trader gate riskCapFor) does not read this table: widening the exit floor never lets bigger trades in.
  */
-export const CEILING_CLASSES = ['INDEX_OPT', 'STOCK_OPT', 'GOLD', 'SILVER', 'MCX'] as const;
+export const CEILING_CLASSES = ['INDEX_OPT', 'STOCK_OPT', 'GOLD', 'SILVER', 'GOLD_MINI', 'SILVER_MINI', 'MCX'] as const;
 export type CeilingClass = (typeof CEILING_CLASSES)[number];
 export type InstrumentClass = CeilingClass | 'OTHER';
 
@@ -113,8 +118,9 @@ const isIndexName = (s: string): boolean =>
 
 /**
  * The ceiling class of a tradingsymbol (or underlying name) on an exchange.
- *  - MCX: GOLD and GOLDM ⇒ GOLD, SILVER and SILVERM ⇒ SILVER (the minis count as their metal HERE, unlike
- *    HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING's exact names); every other MCX name (GOLDGUINEA, CRUDEOIL, …) ⇒ MCX.
+ *  - MCX: GOLD ⇒ GOLD, SILVER ⇒ SILVER, GOLDM ⇒ GOLD_MINI, SILVERM ⇒ SILVER_MINI (classCeilingFor falls a mini
+ *    back to its metal's entry when the mini key is not listed); every other MCX name (GOLDGUINEA, GOLDPETAL,
+ *    SILVERMIC, CRUDEOIL, …) ⇒ MCX.
  *  - NFO / BFO: an index name (INDEX_ALIASES keys) followed by a digit or nothing ⇒ INDEX_OPT, else STOCK_OPT.
  *    Futures on those exchanges classify by the same rule.
  *  - Exchange unknown (null / blank): an MCX name or an index name is still classified; anything else ⇒ OTHER.
@@ -126,8 +132,10 @@ export function instrumentClass(symbol: string | null | undefined, exchange: str
   const ex = String(exchange ?? '').trim().toUpperCase();
   const mcx = mcxUnderlyingOf(s);
   if (ex === 'MCX' || (ex === '' && mcx !== null)) {
-    if (mcx === 'GOLD' || mcx === 'GOLDM') return 'GOLD';
-    if (mcx === 'SILVER' || mcx === 'SILVERM') return 'SILVER';
+    if (mcx === 'GOLD') return 'GOLD';
+    if (mcx === 'GOLDM') return 'GOLD_MINI';
+    if (mcx === 'SILVER') return 'SILVER';
+    if (mcx === 'SILVERM') return 'SILVER_MINI';
     return 'MCX';
   }
   const fno = ex === 'NFO' || ex === 'BFO';
@@ -135,11 +143,20 @@ export function instrumentClass(symbol: string | null | undefined, exchange: str
   return fno ? 'STOCK_OPT' : 'OTHER';
 }
 
-/** The class ceiling in rupees when the table is on and lists this position's class; else null (today's figures). */
+/** A mini class with no entry of its own reads its metal's entry (the pre-2026-11-25 classing). */
+const MINI_FALLBACK: Partial<Record<CeilingClass, CeilingClass>> = { GOLD_MINI: 'GOLD', SILVER_MINI: 'SILVER' };
+
+/**
+ * The class ceiling in rupees when the table is on and lists this position's class; else null (today's figures).
+ * GOLD_MINI / SILVER_MINI not listed ⇒ the GOLD / SILVER entry (never MCX), so a table written before the mini
+ * classes existed means exactly what it meant then.
+ */
 export function classCeilingFor(symbol: string | null | undefined, exchange: string | null | undefined, env: Env = process.env): number | null {
   const cls = instrumentClass(symbol, exchange);
   if (cls === 'OTHER') return null;
-  return parseCeilingByClass(env.HARD_LOSS_CEILING_BY_CLASS)[cls] ?? null;
+  const table = parseCeilingByClass(env.HARD_LOSS_CEILING_BY_CLASS);
+  const fallback = MINI_FALLBACK[cls];
+  return table[cls] ?? (fallback !== undefined ? table[fallback] : undefined) ?? null;
 }
 
 /**

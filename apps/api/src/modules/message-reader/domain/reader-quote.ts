@@ -48,6 +48,27 @@ export interface ReaderQuote {
   missing?: string[];
 }
 
+/** A quote older than this during its venue's session is stale (e.g. the resolver's daily-candle fallback). */
+export const STALE_QUOTE_MS = 5 * 60_000;
+const IST_OFFSET_MS = 330 * 60_000;
+/** Session window in IST minutes: NSE / BSE cash 09:15–15:30, MCX 09:00–23:30. */
+const SESSION_MIN: Record<string, [number, number]> = { NSE: [555, 930], BSE: [555, 930], MCX: [540, 1410] };
+
+/**
+ * True when `now` is inside the venue's weekday session and the quote's timestamp is more than 5 minutes
+ * older than `now`. Outside the session an old timestamp is normal (the last close) and not stale.
+ */
+export function quoteIsStale(exchange: string, quotedAt: Date, now: Date): boolean {
+  const ist = new Date(now.getTime() + IST_OFFSET_MS);
+  const dow = ist.getUTCDay();
+  if (dow === 0 || dow === 6) return false;
+  const [open, close] = SESSION_MIN[exchange.toUpperCase()] ?? SESSION_MIN.NSE;
+  const min = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  if (min < open || min > close) return false;
+  const t = quotedAt.getTime();
+  return !Number.isFinite(t) || now.getTime() - t > STALE_QUOTE_MS;
+}
+
 const pos = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0;
 
 /**

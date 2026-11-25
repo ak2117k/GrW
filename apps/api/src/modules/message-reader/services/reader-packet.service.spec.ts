@@ -28,7 +28,7 @@ function setup(
   };
   const bars = over.bars ?? { daily: jest.fn().mockResolvedValue([]), intraday15m: jest.fn().mockResolvedValue([]) };
   const master = { rows: jest.fn().mockResolvedValue(over.master === undefined ? MASTER : over.master) };
-  const vocab = { get: jest.fn().mockResolvedValue({ names: new Map(), classOf: new Map([['DABUR', 'STOCK']]) }) };
+  const vocab = { get: jest.fn().mockResolvedValue({ names: new Map(), classOf: new Map([['DABUR', 'STOCK'], ['CRUDEOIL', 'COMMODITY']]) }) };
   const context = {
     build: over.contextBuild ?? jest.fn().mockResolvedValue({ market: { status: 'present', source: 'x', value: 1 } }),
     underlyingQuote: over.underlyingQuote ?? jest.fn().mockResolvedValue(6_500),
@@ -369,6 +369,111 @@ describe('ReaderPacketService', () => {
       expect(quotes.resolveQuotes).toHaveBeenCalledWith('owner-1', [{ token: '99926000', exchange: 'NSE', symbol: 'NIFTY' }]);
       expect((packet.instruments.NIFTY.quote as { status: string }).status).toBe('present');
       expect(master.rows).not.toHaveBeenCalled();
+    });
+
+    it('an index or MCX future gets no 15m fetch (its context block has the 15m view)', async () => {
+      const { svc, bars } = setup({ master: [...MASTER, { exch_seg: 'MCX', symbol: 'CRUDEOILDEC26FUT', name: 'CRUDEOIL', token: '500', instrumenttype: 'FUTCOM', expiry: '18DEC2026' }] });
+      const { packet } = await svc.build(input(['NIFTY', 'CRUDEOIL']));
+      expect(bars.daily).toHaveBeenCalledWith('MCX', '500', expect.any(Date), NOW); // the MCX future did resolve
+      expect(bars.intraday15m).not.toHaveBeenCalled();
+      for (const u of ['NIFTY', 'CRUDEOIL']) {
+        expect((packet.instruments[u].quote as { value: { missing: string[] } }).value.missing).toContainEqual(expect.stringContaining('15m bars: not fetched'));
+      }
+    });
+
+    describe('review fix: broker lane caps and stale quotes', () => {
+      const STOCKS = Array.from({ length: 10 }, (_, i) => ({ exch_seg: 'NSE', symbol: `S${i}-EQ`, token: String(100 + i), name: `S${i}` }));
+      const stockCalls = (m: jest.Mock, idx: number) => m.mock.calls.filter((c: unknown[]) => c[1] === String(100 + idx)).length;
+      const quoted = (m: jest.Mock, idx: number) => m.mock.calls.filter(([, refs]: [string, Array<{ token: string }>]) => refs[0]?.token === String(100 + idx)).length;
+      const reasonOf = (b: unknown) => (b as { reason?: string }).reason ?? '';
+
+      it('a burst of 10 new stocks fetches at most 6 in the minute; the rest are "reader quote budget" with no broker call', async () => {
+        const { svc, quotes, bars } = setup({ master: STOCKS, bars: { daily: jest.fn().mockResolvedValue(daburDaily()), intraday15m: jest.fn().mockResolvedValue(dabur15m()) } });
+        const posts = [['S0', 'S1', 'S2'], ['S3', 'S4', 'S5'], ['S6', 'S7', 'S8'], ['S9']];
+        const results = await Promise.all(posts.map((u) => svc.build(input(u))));
+        const blocks = results.flatMap((r) => Object.values(r.packet.instruments).map((x) => x.quote as { status: string; reason?: string }));
+        expect(blocks.filter((b) => b.status === 'present')).toHaveLength(6);
+        const refused = blocks.filter((b) => b.status === 'unavailable');
+        expect(refused).toHaveLength(4);
+        for (const b of refused) expect(b.reason).toContain('reader quote budget');
+        let fetched = 0;
+        for (let i = 0; i < 10; i++) {
+          const name = `S${i}`;
+          const block = results.find((r) => r.packet.instruments[name])!.packet.instruments[name].quote as { status: string };
+          const calls = quoted(quotes.resolveQuotes, i) + stockCalls(bars.daily, i) + stockCalls(bars.intraday15m!, i);
+          if (block.status === 'present') {
+            fetched++;
+            expect(calls).toBe(3);
+          } else {
+            expect(calls).toBe(0); // no quote and no historical lane work for an over-budget underlying
+          }
+        }
+        expect(fetched).toBe(6);
+        // The budget rolls: a minute later a refused name is fetched.
+        const refusedName = Array.from({ length: 10 }, (_, i) => `S${i}`).find((n) => (results.find((r) => r.packet.instruments[n])!.packet.instruments[n].quote as { status: string }).status === 'unavailable')!;
+        jest.setSystemTime(NOW.getTime() + 60_001);
+        const later = await svc.build(input([refusedName]));
+        expect((later.packet.instruments[refusedName].quote as { status: string }).status).toBe('present');
+      });
+
+      it('at most 2 quote fetches in flight; a third still waiting at the deadline is "reader quote limit" and never reaches the broker; permits free at the timeout', async () => {
+        let hang = true;
+        const resolveQuotes = jest.fn().mockImplementation((_u: string, refs: { token: string }[]) =>
+          hang && refs.length === 1 ? new Promise(() => undefined) : Promise.resolve(new Map(refs.map((r) => [r.token, quote(r.token, 100)]))),
+        );
+        const { svc, bars } = setup({ master: STOCKS, resolveQuotes, bars: { daily: jest.fn().mockResolvedValue(daburDaily()), intraday15m: jest.fn().mockResolvedValue(dabur15m()) } });
+        const p = svc.build(input(['S0', 'S1', 'S2']));
+        await jest.advanceTimersByTimeAsync(0);
+        expect(resolveQuotes.mock.calls.filter(([, refs]: [string, unknown[]]) => refs.length === 1)).toHaveLength(2);
+        await jest.advanceTimersByTimeAsync(3_000);
+        const { packet } = await p;
+        expect(reasonOf(packet.instruments.S0.quote)).toMatch(/timed out after 3000/);
+        expect(reasonOf(packet.instruments.S1.quote)).toMatch(/timed out after 3000/);
+        expect(reasonOf(packet.instruments.S2.quote)).toContain('reader quote limit');
+        expect(quoted(resolveQuotes, 2) + stockCalls(bars.daily, 2) + stockCalls(bars.intraday15m!, 2)).toBe(0);
+        // Both permits were released at the timeout: a new name is fetched at once.
+        hang = false;
+        const q = await svc.build(input(['S3']));
+        expect((q.packet.instruments.S3.quote as { status: string }).status).toBe('present');
+      });
+
+      it('a failed quote frees its permit at once for the next underlying', async () => {
+        const resolveQuotes = jest.fn().mockImplementation(async (_u: string, refs: { token: string }[]) => {
+          if (refs.length === 1 && (refs[0].token === '100' || refs[0].token === '101')) throw new Error('session expired');
+          return new Map(refs.map((r) => [r.token, quote(r.token, 100)]));
+        });
+        const daily = jest.fn(() => new Promise(() => undefined)); // would hold a permit to the deadline if it were not failure-released
+        const { svc } = setup({ master: STOCKS, resolveQuotes, bars: { daily, intraday15m: jest.fn().mockResolvedValue([]) } });
+        const p = svc.build(input(['S0', 'S1', 'S2']));
+        await jest.advanceTimersByTimeAsync(3_000);
+        const { packet } = await p;
+        expect(reasonOf(packet.instruments.S0.quote)).toContain('session expired');
+        // A failed quote enqueues no historical-lane read.
+        expect(stockCalls(daily as jest.Mock, 0) + stockCalls(daily as jest.Mock, 1)).toBe(0);
+        // S2 got a permit (it made its quote call) rather than being refused as over the limit.
+        expect(quoted(resolveQuotes, 2)).toBe(1);
+        expect(reasonOf(packet.instruments.S2.quote)).not.toContain('reader quote limit');
+      });
+
+      it('a quote more than 5 min old during the session (the daily-candle fallback) is "stale quote"', async () => {
+        const old = { ...daburQuote, timestamp: new Date(NOW.getTime() - 6 * 60_000) };
+        const { svc } = dabur({ resolveQuotes: jest.fn().mockImplementation(async (_u: string, refs: { token: string }[]) => new Map(refs.map((r) => [r.token, r.token === '772' ? old : quote(r.token, 100)]))) });
+        const { packet } = await svc.build(input(['DABUR']));
+        expect(packet.instruments.DABUR.quote).toEqual({ status: 'unavailable', source: expect.any(String), reason: expect.stringContaining('stale quote') });
+
+        const fallback = { ...daburQuote, timestamp: new Date('2026-11-24T18:30:00Z') }; // a daily candle's 00:00 IST
+        const b = dabur({ resolveQuotes: jest.fn().mockImplementation(async (_u: string, refs: { token: string }[]) => new Map(refs.map((r) => [r.token, r.token === '772' ? fallback : quote(r.token, 100)]))) });
+        expect(reasonOf((await b.svc.build(input(['DABUR']))).packet.instruments.DABUR.quote)).toContain('stale quote');
+      });
+
+      it('after the close an old quote timestamp is normal, not stale', async () => {
+        const after = new Date('2026-11-25T10:30:00Z'); // 16:00 IST
+        jest.setSystemTime(after);
+        const closeQuote = { ...daburQuote, timestamp: new Date('2026-11-25T10:00:00Z') }; // 15:30 IST
+        const { svc } = dabur({ resolveQuotes: jest.fn().mockImplementation(async (_u: string, refs: { token: string }[]) => new Map(refs.map((r) => [r.token, r.token === '772' ? closeQuote : quote(r.token, 100)]))) });
+        const { packet } = await svc.build({ ...input(['DABUR']), now: after });
+        expect((packet.instruments.DABUR.quote as { status: string }).status).toBe('present');
+      });
     });
   });
 });

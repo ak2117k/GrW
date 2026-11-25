@@ -10,7 +10,8 @@ import type { DailyBar } from '../../signal-intake/domain/info-outcome';
 import type { Vocabulary } from '../../signal-intake/domain/vocabulary';
 import { SignalVocabularyService } from '../../signal-intake/services/signal-vocabulary.service';
 import { infoRefOf, SIGNAL_INFO_BARS, SIGNAL_INFO_MASTER, type InfoBars } from '../../signal-intake/services/signal-outcome.service';
-import { readerQuote, type Bar15m, type QuoteLtp } from '../domain/reader-quote';
+import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
+import { quoteIsStale, readerQuote, type Bar15m, type QuoteLtp } from '../domain/reader-quote';
 import { MESSAGE_READER_CONFIG, type MessageReaderConfig } from '../message-reader.config';
 import { READER_PACKET_SOURCES, type ReaderPacketSources } from './reader-packet.sources';
 
@@ -45,6 +46,11 @@ const QUOTE_DAILY_DAYS = 100;
 /** 15m bars fetched for the quote: enough to reach the last 8 closed bars across a weekend / holiday. */
 const QUOTE_15M_DAYS = 5;
 const DAY_MS = 86_400_000;
+/** Reader quote fetches in flight at once, process-wide (each uses the owner's single historical lane). */
+const MAX_QUOTE_FETCHES = 2;
+/** NEW (uncached) underlyings the reader may quote in any rolling minute; more → `reader quote budget`. */
+const QUOTE_BUDGET_PER_MIN = 6;
+const QUOTE_BUDGET_WINDOW_MS = 60_000;
 const MAX_ROWS = 10;
 
 /** Index quotes for the pulse (tokens as in market-context's UNDERLYING_TOKEN_MAP). */
@@ -74,6 +80,54 @@ const isUnavailable = (b: unknown) => !!b && typeof b === 'object' && (b as { st
 const hasUnavailable = (r: object) => Object.values(r).some(isUnavailable);
 
 /**
+ * At most `max` holders at once; a waiter gives up at its deadline (null). `acquire` resolves to an
+ * idempotent release that admits the next waiter.
+ */
+class DeadlinePermits {
+  private inFlight = 0;
+  /** Each returns true when it took the freed permit, false when its deadline had already passed. */
+  private readonly waiters: Array<() => boolean> = [];
+
+  constructor(private readonly max: number) {}
+
+  acquire(deadlineAt: number): Promise<(() => void) | null> {
+    const permit = () => {
+      this.inFlight++;
+      let done = false;
+      return () => {
+        if (done) return;
+        done = true;
+        this.inFlight--;
+        while (this.waiters.length > 0 && !this.waiters.shift()!()) {
+          /* a waiter past its deadline declines; offer the permit to the next */
+        }
+      };
+    };
+    if (this.inFlight < this.max && this.waiters.length === 0) return Promise.resolve(permit());
+    const waitMs = deadlineAt - Date.now();
+    if (waitMs <= 0) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const admit = () => {
+        clearTimeout(timer);
+        if (Date.now() >= deadlineAt) {
+          resolve(null);
+          return false;
+        }
+        resolve(permit());
+        return true;
+      };
+      const timer = setTimeout(() => {
+        const i = this.waiters.indexOf(admit);
+        if (i >= 0) this.waiters.splice(i, 1);
+        resolve(null);
+      }, waitMs);
+      timer.unref?.();
+      this.waiters.push(admit);
+    });
+  }
+}
+
+/**
  * Builds the data packet the AI reader checks a post against: market pulse, the instruments the post
  * names, the channel's recent posts and today's settled market notes. Every source runs in parallel and
  * is raced against MESSAGE_READER_PACKET_MS; a slow or failing source becomes an `unavailable` block,
@@ -90,6 +144,9 @@ export class ReaderPacketService {
   private readonly quoteCache = new Map<string, CacheEntry<PacketBlock>>();
   /** Daily bars per EXCHANGE:token for one IST session day (the previous-session stats do not move intraday). */
   private readonly dailyCache = new Map<string, { day: string; promise: Promise<DailyBar[]> }>();
+  private readonly quotePermits = new DeadlinePermits(MAX_QUOTE_FETCHES);
+  /** Start times of the new-underlying quote fetches admitted in the last minute (the budget). */
+  private quoteFetchTimes: number[] = [];
 
   constructor(
     private readonly breadth: BreadthSectorService,
@@ -201,18 +258,55 @@ export class ReaderPacketService {
     if (!owner) throw new Error('no owner user id (HUB_OWNER_USER_ID) to quote with');
     const ref = infoRefOf(underlying, null, null, now) ?? (await this.lookupRef(underlying, now));
     if (!ref) throw new Error(`no instrument for ${underlying} in the instrument master (index / NSE cash / MCX front future)`);
-    const ms = Math.max(1, packetStartedAt + this.cfg.packetMs - Date.now());
+    // Budget, then permit: an over-budget / over-limit underlying never reaches the broker (no quote, no lane work).
+    const t = Date.now();
+    this.quoteFetchTimes = this.quoteFetchTimes.filter((x) => t - x < QUOTE_BUDGET_WINDOW_MS);
+    if (this.quoteFetchTimes.length >= QUOTE_BUDGET_PER_MIN) {
+      throw new Error(`reader quote budget: ${QUOTE_BUDGET_PER_MIN} new underlyings already quoted in the last minute`);
+    }
+    this.quoteFetchTimes.push(t);
+    const deadlineAt = packetStartedAt + this.cfg.packetMs;
+    const release = await this.quotePermits.acquire(deadlineAt);
+    if (!release) {
+      // Refund the budget slot: nothing was fetched.
+      const i = this.quoteFetchTimes.lastIndexOf(t);
+      if (i >= 0) this.quoteFetchTimes.splice(i, 1);
+      throw new Error(`reader quote limit: ${MAX_QUOTE_FETCHES} quote fetches still in flight at the packet deadline`);
+    }
+    try {
+      return await this.readQuote(underlying, owner, ref, now, deadlineAt);
+    } finally {
+      // Released on success, failure and at the deadline (every read in readQuote is raced against it).
+      release();
+    }
+  }
+
+  /**
+   * The live quote first (one REST call); the historical-lane reads (daily, 15m) are enqueued only after a
+   * fresh quote arrived, so a failed / stale / hung quote never puts work on the owner's historical lane.
+   * Every read is raced against `deadlineAt`.
+   */
+  private async readQuote(underlying: string, owner: string, ref: { exchange: string; token: string }, now: Date, deadlineAt: number): Promise<unknown> {
+    const left = () => Math.max(1, deadlineAt - Date.now());
+    const ltp = await this.block(
+      SRC.quote,
+      async () => {
+        const q = (await this.quotes.resolveQuotes(owner, [{ token: ref.token, exchange: ref.exchange, symbol: underlying }])).get(ref.token);
+        if (!q || !(q.ltp > 0)) throw new Error(`no live quote for ${ref.exchange}:${ref.token}`);
+        // The resolver's daily-candle fallback (ltp = a daily close, timestamp the candle's day) lands here too.
+        if (quoteIsStale(ref.exchange, new Date(q.timestamp), now)) {
+          throw new Error(`stale quote: last update ${new Date(q.timestamp).toISOString()} is over 5 min old during the session (daily-candle fallback or no ticks)`);
+        }
+        return q;
+      },
+      left(),
+    );
+    if (ltp.status !== 'present') throw new Error(ltp.reason);
     const bars = this.bars;
-    const [ltp, daily, m15] = await Promise.all([
-      this.block(
-        SRC.quote,
-        async () => {
-          const q = (await this.quotes.resolveQuotes(owner, [{ token: ref.token, exchange: ref.exchange, symbol: underlying }])).get(ref.token);
-          if (!q || !(q.ltp > 0)) throw new Error(`no live quote for ${ref.exchange}:${ref.token}`);
-          return q;
-        },
-        ms,
-      ),
+    // Indices and MCX futures: their context block already carries the 15m view, so no extra lane call.
+    const skip15m = !!INDEX_UNDERLYINGS[underlying] || ref.exchange === 'MCX';
+    const ms = left();
+    const [daily, m15] = await Promise.all([
       this.block(
         'daily bars',
         async () => {
@@ -224,13 +318,13 @@ export class ReaderPacketService {
       this.block(
         '15m bars',
         async () => {
+          if (skip15m) throw new Error('not fetched for an index / MCX future (its context block has the 15m view)');
           if (!bars?.intraday15m) throw new Error('no 15m bar loader');
           return bars.intraday15m(ref.exchange, ref.token, new Date(now.getTime() - QUOTE_15M_DAYS * DAY_MS), now);
         },
         ms,
       ),
     ]);
-    if (ltp.status !== 'present') throw new Error(ltp.reason);
     const missing: string[] = [];
     if (daily.status !== 'present') missing.push(`daily bars: ${daily.reason}`);
     if (m15.status !== 'present') missing.push(`15m bars: ${m15.reason}`);

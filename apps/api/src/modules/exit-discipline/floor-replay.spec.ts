@@ -222,4 +222,30 @@ describe('floor replay — ₹2k rule (old) vs the catastrophe floor (new), on 1
     expect(out.counted.map((c) => c.row.trackerId)).toEqual(['trkCounted']);
     expect(out.summary.total.count).toBe(1);
   });
+
+  it('--include-manual counts manual trades like signal ones (no SL / target), split by origin; HOLD stays excluded', () => {
+    // A walk past a hard-loss exit; the same numbers with a signal SL 80 would exit at the SL.
+    const bars: Array<[number, number, number, number]> = [[100, 102, 95, 98], [98, 99, 70, 75], [75, 90, 72, 88], [88, 101, 87, 100]];
+    const held = row({ bars, trackerId: 'trkHold', symbol: 'MAZDOCK29DEC261760PE', name: 'MAZDOCK', signal: null, underlyingRef: { exchange: 'NSE', token: '1' } });
+    const manual = row({ bars, trackerId: 'trkManual', signal: null });
+    const signal = row({ bars, trackerId: 'trkSignal' });
+    const out = replayFixture([held, manual, signal], { ...opts, hold: ['MAZDOCK29DEC261760PE'], includeManual: true });
+    expect(out.excluded.map((e) => [e.row.trackerId, e.reason])).toEqual([['trkHold', 'HOLD']]);
+    expect(out.counted.map((c) => [c.row.trackerId, c.origin])).toEqual([['trkManual', 'MANUAL'], ['trkSignal', 'SIGNAL']]);
+    const m = out.counted[0];
+    expect(m.old.kind).toBe('FLOOR');
+    expect(m.new.kind).toBe('HORIZON'); // no SL / target for a manual trade: the walk ends at the mark
+    expect(m.tag).toBe('CUT_THEN_RECOVERED_NEW_BETTER');
+    expect(out.summary.byOrigin.MANUAL?.count).toBe(1);
+    expect(out.summary.byOrigin.SIGNAL?.count).toBe(1);
+    expect(out.summary.total.count).toBe(2);
+
+    // The SL is the signal's alone: the same path with a signal SL 80 exits there.
+    const withSl = replayTrade({ ...manual, signal: { decisionId: 'x', side: 'BUY', targets: [130], sl: 80, source: 'signal' } }, opts);
+    if (withSl.status !== 'COUNTED') throw new Error('not counted');
+    expect(withSl.new.kind).toBe('SIGNAL_SL');
+
+    // Flag absent: manual still excluded.
+    expect(replayFixture([manual], opts).excluded.map((e) => e.reason)).toEqual(['MANUAL']);
+  });
 });

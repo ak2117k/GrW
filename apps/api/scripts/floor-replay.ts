@@ -38,7 +38,9 @@
  * TAGS: CUT_THEN_RECOVERED_NEW_BETTER / _NEW_WORSE (old exited at a loss; on a later bar, before the new walk's floor
  * or SL bar, the price reached entry or the first target; split by new ₹ ≥ / < old ₹); NEW_LOSES_MORE (new ₹ < old ₹); NEW_LOSES_LESS (new ₹ > old ₹: the band exited sooner, or
  * the mark is better without a recovery); SAME; NOT_REACHED (neither rule fired). ₹ = net after charges (charges.ts).
- * HOLD-list (--hold, prod AI_AUTO_EXIT_HOLD) and manual trades (no live signal order) are listed, never counted.
+ * HOLD-list trades (--hold, prod AI_AUTO_EXIT_HOLD) are listed, never counted. Manual trades (no live signal order)
+ * are listed, not counted — unless --include-manual, which counts them like signal trades (no SL / targets) and adds
+ * a SIGNAL vs MANUAL summary.
  */
 import { readFileSync } from 'fs';
 import { contractValueFactor } from '@td/shared';
@@ -103,6 +105,8 @@ export interface CountedTrade {
   status: 'COUNTED';
   row: FloorFixtureRow;
   cls: InstrumentClass;
+  /** SIGNAL = opened by a live signal order; MANUAL = anything else (counted only with --include-manual). */
+  origin: TradeOrigin;
   side: 'LONG' | 'SHORT';
   actual: { price: number; net: number; reason: string };
   /** True when the walk continued past the real exit (the real exit was the hard loss). */
@@ -121,7 +125,18 @@ export type ExcludeReason = 'HOLD' | 'MANUAL' | 'NO_BARS';
 export interface ExcludedTrade { status: 'EXCLUDED'; row: FloorFixtureRow; reason: ExcludeReason; detail: string }
 export type TradeResult = CountedTrade | ExcludedTrade;
 
-export interface ReplayOptions { oldEnv: Env; newEnv: Env; hold: readonly string[] }
+export interface ReplayOptions {
+  oldEnv: Env;
+  newEnv: Env;
+  hold: readonly string[];
+  /**
+   * --include-manual: replay and count MANUAL trades (no live signal order) like signal trades — the exit system
+   * manages them too. They have no signal SL / targets, so a walk past the real exit ends at a floor or the horizon
+   * mark. Absent / false = MANUAL listed, not counted (as before). HOLD-list trades stay excluded either way.
+   */
+  includeManual?: boolean;
+}
+export type TradeOrigin = 'SIGNAL' | 'MANUAL';
 
 const MIN = 60_000;
 const M15 = 15 * MIN;
@@ -171,7 +186,8 @@ function ruleCfgOf(env: Env, r: FloorFixtureRow, vf: number): HardLossConfig {
 
 export function replayTrade(r: FloorFixtureRow, o: ReplayOptions): TradeResult {
   if (isHeld(o.hold, r)) return { status: 'EXCLUDED', row: r, reason: 'HOLD', detail: 'owner HOLD list: no floor action' };
-  if (!r.signal) return { status: 'EXCLUDED', row: r, reason: 'MANUAL', detail: 'no live signal order opened it' };
+  if (!r.signal && !o.includeManual) return { status: 'EXCLUDED', row: r, reason: 'MANUAL', detail: 'no live signal order opened it' };
+  const origin: TradeOrigin = r.signal ? 'SIGNAL' : 'MANUAL';
 
   const side: 'LONG' | 'SHORT' = r.qty < 0 ? 'SHORT' : 'LONG';
   const dir = side === 'LONG' ? 1 : -1;
@@ -216,10 +232,10 @@ export function replayTrade(r: FloorFixtureRow, o: ReplayOptions): TradeResult {
   };
   const n15At = (t: number): number | null => n15FromBars(u15, uEx, t)?.n ?? null;
   const exposure = exposureOf(r.symbol, side);
-  const targets = orderedTargets(side === 'LONG' ? 'BUY' : 'SELL', r.entryPrice, r.signal.targets);
+  const targets = orderedTargets(side === 'LONG' ? 'BUY' : 'SELL', r.entryPrice, r.signal?.targets ?? []);
   const target = targets[0] ?? null;
   // The signal's SL, when it is on the losing side of entry (a live exit trigger in prod).
-  const rawSl = Number(r.signal.sl);
+  const rawSl = r.signal?.sl == null ? NaN : Number(r.signal.sl);
   const sl = Number.isFinite(rawSl) && rawSl > 0 && (r.entryPrice - rawSl) * dir > 0 ? rawSl : null;
 
   /** The contract price at which net P&L = −rupees (null when that loss is out of reach, e.g. a long below zero). */
@@ -319,7 +335,7 @@ export function replayTrade(r: FloorFixtureRow, o: ReplayOptions): TradeResult {
           : diff >= 1 ? 'NEW_LOSES_LESS'
             : 'SAME';
   return {
-    status: 'COUNTED', row: r, cls: instrumentClass(r.symbol, r.exchange), side,
+    status: 'COUNTED', row: r, cls: instrumentClass(r.symbol, r.exchange), origin, side,
     actual: { price: r.exitPrice, net: r2(net(r.exitPrice)), reason: r.exitReason ? `${r.exitReason.status}: ${r.exitReason.reason}` : 'actual reason unknown' },
     pastExit, oldCfg: oldW.cfg, newCfg: newW.cfg, old, new: neu, tag, recoveredBar, n15AtEntry: n15At(entryMs), bars: bars.length,
   };
@@ -338,7 +354,7 @@ export interface GroupSummary {
 export interface FixtureReplay {
   counted: CountedTrade[];
   excluded: ExcludedTrade[];
-  summary: { byClass: Partial<Record<InstrumentClass, GroupSummary>>; total: GroupSummary };
+  summary: { byClass: Partial<Record<InstrumentClass, GroupSummary>>; byOrigin: Partial<Record<TradeOrigin, GroupSummary>>; total: GroupSummary };
 }
 
 function group(rows: CountedTrade[]): GroupSummary {
@@ -361,7 +377,12 @@ export function replayFixture(rows: FloorFixtureRow[], o: ReplayOptions): Fixtur
   const excluded = results.filter((x): x is ExcludedTrade => x.status === 'EXCLUDED');
   const byClass: Partial<Record<InstrumentClass, GroupSummary>> = {};
   for (const cls of [...new Set(counted.map((c) => c.cls))].sort()) byClass[cls] = group(counted.filter((c) => c.cls === cls));
-  return { counted, excluded, summary: { byClass, total: group(counted) } };
+  const byOrigin: Partial<Record<TradeOrigin, GroupSummary>> = {};
+  for (const og of ['SIGNAL', 'MANUAL'] as const) {
+    const rows = counted.filter((c) => c.origin === og);
+    if (rows.length > 0) byOrigin[og] = group(rows);
+  }
+  return { counted, excluded, summary: { byClass, byOrigin, total: group(counted) } };
 }
 
 // ---------------------------------------------------------------- report ----
@@ -388,6 +409,9 @@ export function renderReport(res: FixtureReplay, o: ReplayOptions & { file: stri
   L.push('- **The old rule is env-only.** Since 2026-11-23 prod HOLDS a MAX_LOSS exit while the loss-side chart check (act mode) says the chart is intact; that chart gate is not modelled — the replayed old rule always fires at its rupee figure. Trades after 2026-11-23 may therefore differ from what prod actually did (compare the actual-exit column).');
   L.push('- ₹ is net after charges (trade-sentinel charges model). The 20 s two-read confirmation is below 15m resolution and not modelled.');
   L.push('- Times: a touch exit shows its 15m bar\'s START (it happened inside that bar); a close decision shows the bar\'s END; "recovered bar n" is the 0-based 15m bar from entry.');
+  L.push(o.includeManual
+    ? '- **Manual trades are counted** (--include-manual): the exit system manages them too. They have no signal SL / targets, so a walk past their real exit ends at a floor or the horizon mark. Origin SIGNAL vs MANUAL is split below.'
+    : '- Manual trades (no live signal order) are listed under "Not counted"; pass --include-manual to count them.');
   L.push(`- HOLD list: ${o.hold.length ? o.hold.join(', ') : '(none given — pass --hold with prod AI_AUTO_EXIT_HOLD)'}.`);
   L.push('');
   L.push('## Summary');
@@ -399,15 +423,22 @@ export function renderReport(res: FixtureReplay, o: ReplayOptions & { file: stri
   for (const [cls, g] of Object.entries(res.summary.byClass)) L.push(line(cls, g as GroupSummary));
   L.push(line('**total**', res.summary.total));
   L.push('');
+  L.push('### By origin');
+  L.push('');
+  L.push(`| origin | trades | ${FLOOR_TAGS.join(' | ')} | old ₹ | new ₹ | new − old | worst single under new |`);
+  L.push(`|---|---|${FLOOR_TAGS.map(() => '---').join('|')}|---|---|---|---|`);
+  for (const [og, g] of Object.entries(res.summary.byOrigin)) L.push(line(og, g as GroupSummary));
+  L.push(line('**total**', res.summary.total));
+  L.push('');
   L.push('## Per trade');
   L.push('');
-  L.push('| entry (IST) | symbol | class | side×qty @ entry | N15 at entry | old rule | new rule | actual exit | old-rule exit | new-rule exit | tag | actual reason |');
-  L.push('|---|---|---|---|---|---|---|---|---|---|---|---|');
+  L.push('| entry (IST) | symbol | origin | class | side×qty @ entry | N15 at entry | old rule | new rule | actual exit | old-rule exit | new-rule exit | tag | actual reason |');
+  L.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|');
   for (const c of res.counted) {
     const r = c.row;
     const rec = c.recoveredBar !== null ? ` (recovered bar ${c.recoveredBar})` : '';
     L.push(
-      `| ${ist(r.entryTime)} | ${r.symbol} | ${c.cls} | ${c.side}×${Math.abs(r.qty)} @ ${r.entryPrice} | ${c.n15AtEntry ?? '—'} | ${cfgText(c.oldCfg)} | ${cfgText(c.newCfg)} | ` +
+      `| ${ist(r.entryTime)} | ${r.symbol} | ${c.origin} | ${c.cls} | ${c.side}×${Math.abs(r.qty)} @ ${r.entryPrice} | ${c.n15AtEntry ?? '—'} | ${cfgText(c.oldCfg)} | ${cfgText(c.newCfg)} | ` +
         `${r.exitPrice} (${ist(r.exitTime)}) ${inr(c.actual.net)} | ${outcome(c.old)} | ${outcome(c.new)} | **${c.tag}**${rec} | ${cell(c.actual.reason).slice(0, 140)} |`,
     );
   }
@@ -425,13 +456,14 @@ export function renderReport(res: FixtureReplay, o: ReplayOptions & { file: stri
 
 // ------------------------------------------------------------------- CLI ----
 
-const USAGE = 'Usage: npx tsx apps/api/scripts/floor-replay.ts <floor-replay.fixture.json> [--hold SYM,SYM] [--set KEY=VALUE]... [--ceilings CLASS:₹,...]';
+const USAGE = 'Usage: npx tsx apps/api/scripts/floor-replay.ts <floor-replay.fixture.json> [--hold SYM,SYM] [--set KEY=VALUE]... [--ceilings CLASS:₹,...] [--include-manual]';
 
 export function main(argv: string[]): number {
   let file: string | null = null;
   const hold: string[] = [];
   const set: Env = {};
   let ceilings = FLOOR_REPLAY_NEW_CEILINGS;
+  let includeManual = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--hold') hold.push(...String(argv[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean));
@@ -440,6 +472,7 @@ export function main(argv: string[]): number {
       if (!k || v.length === 0) { console.error(`--set needs KEY=VALUE\n${USAGE}`); return 1; }
       set[k.trim()] = v.join('=').trim();
     } else if (a === '--ceilings') ceilings = String(argv[++i] ?? '');
+    else if (a === '--include-manual') includeManual = true;
     else if (a.startsWith('--')) { console.error(`unknown option ${a}\n${USAGE}`); return 1; }
     else file = a;
   }
@@ -454,7 +487,7 @@ export function main(argv: string[]): number {
   }
   const oldEnv: Env = { ...FLOOR_REPLAY_OLD_ENV, ...set };
   const newEnv: Env = { ...oldEnv, HARD_LOSS_CEILING_BY_CLASS: ceilings };
-  const opts = { oldEnv, newEnv, hold };
+  const opts: ReplayOptions = { oldEnv, newEnv, hold, includeManual };
   console.log(renderReport(replayFixture(rows, opts), { ...opts, file }));
   return 0;
 }

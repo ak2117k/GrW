@@ -207,7 +207,7 @@ Each step needs the owner's OK after its graded report.
 - **Never open or add.** The watcher and trade agents can only cut, tighten, close. Entries stay with
   the signal judge and the entry engine.
 - **Catastrophe floor per trade** = 3 × the instrument's 15m noise unit, in rupees for the contract,
-  clamped to **min ₹2,000** and **max ceiling**: index options ₹5,000; stock options ₹5,000;
+  clamped to **min ₹2,000** and **max ceiling**: index options ₹5,000; stock options ₹3,000 (changed after the replay, see below);
   GOLD / SILVER ₹7,500; CRUDE / NATURALGAS / other MCX ₹5,000. Daily max loss and kill switch unchanged,
   above everything. First rollout step: replay the last month's live trades under the new floor
   (how many ₹2,000 cuts recovered; how many trades would have lost more) before it goes live.
@@ -258,3 +258,17 @@ Exact schemas (`trade_agent_state`, `watcher_orders`, `watcher_day_log`, level b
 thresholds' code shape, the desk screen layout, how signal-trader's serial queue becomes per-underlying
 locks, migration of the sentinel cycle, test strategy (replays of 11-09, 11-13, 11-18, 11-20 as golden
 days for the watcher).
+
+### Replay result and final ceilings (owner 2026-11-25: "go with the recommendation")
+
+Replay of 194 live trades, last 30 days (188 manual, 6 signal; HOLD excluded), 15m bars:
+today's rule −₹56,330; new floor with stock options at ₹5,000 −₹52,222 (+₹4,109); with stock options at
+₹3,000 **−₹48,402 (+₹7,929)**. By class: GOLD +₹5,008, MCX +₹2,654, index options +₹711, stock options
+−₹4,265 at ₹5,000 / −₹445 at ₹3,000. 156 of 194 trades never reach the floor. Limits: one month; AI exits
+after the real exit and the 11-23 chart gate not modelled; 15m resolution.
+
+**Final ceilings:** INDEX_OPT ₹5,000 · STOCK_OPT ₹3,000 · GOLD/SILVER ₹7,500 · other MCX ₹5,000; band 3×N15
+from ₹2,000. Env: `HARD_LOSS_CEILING_BY_CLASS=INDEX_OPT:5000,STOCK_OPT:3000,GOLD:7500,SILVER:7500,MCX:5000`.
+
+**Broker stop live is blocked** until owner resting orders can no longer cancel/block it (executor
+`OTHER_OPEN_ORDER`); same root as the resting-order exit fix (SENSEX 11-25).

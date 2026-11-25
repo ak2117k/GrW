@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
-import { OnEvent } from '@nestjs/event-emitter';
+import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { agentsOn } from '../../ai-gateway/agents/agent-registry';
 import { prefilter } from '../../signal-intake/domain/prefilter';
@@ -8,7 +8,7 @@ import { textHash, type VocabularySource } from '../../signal-intake/services/si
 import { SignalVocabularyService } from '../../signal-intake/services/signal-vocabulary.service';
 import { parseAgrees } from '../domain/parse-compare';
 import { marketNoteClaims, marketNoteText } from '../domain/reader-health';
-import type { Claim, ReaderCall, ReadKind } from '../domain/reading.types';
+import type { Claim, ReaderCall, ReadKind, ReadScope } from '../domain/reading.types';
 import { MESSAGE_READER_CONFIG, type MessageReaderConfig } from '../message-reader.config';
 import { MessageReaderRepository, type ReadingWrite } from '../repositories/message-reader.repository';
 import { MessageReaderLlm } from './message-reader-llm.service';
@@ -19,6 +19,22 @@ export const MESSAGE_READER_AGENTS_ON = Symbol('MESSAGE_READER_AGENTS_ON');
 /** Owner / ops alert sender (default sendOpsAlert, which sends each key at most once per 30 min). */
 export const MESSAGE_READER_ALERT = Symbol('MESSAGE_READER_ALERT');
 export type ReaderAlert = (key: string, text: string) => Promise<boolean>;
+
+/** Emitted once after a fresh READ row is stored (never for CACHED / FAILED / STALE). The AI setups module listens. */
+export const READER_READING_STORED_EVENT = 'reader.reading.stored';
+export interface ReadingStoredEvent {
+  messageId: string;
+  channelId: string;
+  postedAt: Date;
+  readAt: Date;
+  status: 'READ';
+  kind: ReadKind | null;
+  scope: ReadScope | null;
+  claims: Claim[];
+  summary: string | null;
+  /** The post text the reader read (untrusted channel content). */
+  postText: string;
+}
 
 export type ReaderStore = Pick<MessageReaderRepository, 'upsertReading' | 'readingOf' | 'cachedByHash' | 'ruleClassOf' | 'channelTitle' | 'updateRuleComparison'>;
 export type ReaderPacketPort = Pick<ReaderPacketService, 'build'>;
@@ -92,7 +108,7 @@ function imageUnderlyings(reading: unknown): string[] {
  * messageId, new text) again into the same row. Per job: older than MESSAGE_READER_MAX_AGE_MIN → STALE;
  * the same text read in the last 15 min → CACHED (no AI call); else packet → AI → rule-parse comparison →
  * READ. A failure is stored FAILED and retried once while the post is under 5 min old.
- * Shadow only: it creates no signal and emits nothing. Off with MESSAGE_READER=off or AI agents off.
+ * Shadow only: it creates no signal; its one event is reader.reading.stored after a fresh READ row (AI setups). Off with MESSAGE_READER=off or AI agents off.
  */
 @Injectable()
 export class MessageReaderService implements OnModuleDestroy {
@@ -117,6 +133,7 @@ export class MessageReaderService implements OnModuleDestroy {
     @Optional() @Inject(MESSAGE_READER_NOW) private readonly nowFn?: () => Date,
     @Optional() @Inject(MESSAGE_READER_AGENTS_ON) private readonly agentsOnFn?: () => boolean,
     @Optional() @Inject(MESSAGE_READER_ALERT) private readonly alertFn?: ReaderAlert,
+    @Optional() @Inject(EventEmitter2) private readonly events?: Pick<EventEmitter2, 'emit'>,
   ) {}
 
   private now(): Date {
@@ -296,7 +313,30 @@ export class MessageReaderService implements OnModuleDestroy {
     }
     // Outside the try: nothing after the READ row is stored may turn it into FAILED or cause a second AI call.
     this.afterStore(stored);
+    this.emitStored(stored, j.text);
     return false;
+  }
+
+  /** The single post-store hook: `reader.reading.stored` for a fresh READ row. Never throws into the reader. */
+  private emitStored(row: ReadingWrite, postText: string): void {
+    if (!this.events || row.status !== 'READ') return;
+    try {
+      const evt: ReadingStoredEvent = {
+        messageId: row.messageId,
+        channelId: row.channelId,
+        postedAt: row.postedAt,
+        readAt: row.readAt,
+        status: 'READ',
+        kind: row.kind ?? null,
+        scope: row.scope ?? null,
+        claims: row.claims,
+        summary: row.summary ?? null,
+        postText,
+      };
+      this.events.emit(READER_READING_STORED_EVENT, evt);
+    } catch (e) {
+      this.logger.warn(`[message-reader] ${READER_READING_STORED_EVENT} for ${row.messageId} failed: ${errText(e)}`);
+    }
   }
 
   /**

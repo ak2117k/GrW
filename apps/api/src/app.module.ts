@@ -66,6 +66,7 @@ import { HealthModule } from './modules/health/health.module';
 import { TradeCoreModule } from './modules/trade-core/trade-core.module';
 import { SignalTraderModule } from './modules/signal-trader/signal-trader.module';
 import { MessageReaderModule } from './modules/message-reader/message-reader.module';
+import { AiSetupsModule } from './modules/ai-setups/ai-setups.module';
 import { ExitNoiseModule } from './modules/exit-noise/exit-noise.module';
 import { EntryEngineModule } from './modules/entry-engine/entry-engine.module';
 import { ReentryWatchModule } from './modules/reentry-watch/reentry-watch.module';
@@ -334,6 +335,10 @@ import { PortfolioReviewModule } from './modules/portfolio-review/portfolio-revi
     // AI message reader: every Telegram post read by the AI and checked against our live data → message_readings.
     // MESSAGE_READER=off (default) | shadow | on; inert unless AI agents are on. Never creates a signal or an order.
     MessageReaderModule,
+
+    // AI setups: a CONFIRMED instrument claim from the reader → guards → packet → Opus → code checks → ai_setups.
+    // AI_SETUPS=off (default) | paper. No live mode; never a broker order.
+    AiSetupsModule,
 
     // "Noise or real?" read at every AI exit (paper, signal paper, real) — RECORD ONLY, fired after the
     // exit decision and never awaited; a 5-min sweep fills the 15 / 30-min follow-up for the night review.

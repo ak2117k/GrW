@@ -7,7 +7,7 @@ import { parseMessageReaderConfig } from '../message-reader.config';
 import type { CachedReading, ReadingWrite, RuleClass } from '../repositories/message-reader.repository';
 import type { ReaderInput } from './message-reader-llm.service';
 import type { ReaderPacket } from './reader-packet.service';
-import { MessageReaderService } from './message-reader.service';
+import { MessageReaderService, READER_READING_STORED_EVENT } from './message-reader.service';
 import { __resetOpsAlerts, sendOpsAlert } from '../../../common/utils/ops-alert';
 
 const NOW = new Date('2026-11-25T04:01:00Z'); // 09:31 IST
@@ -35,6 +35,7 @@ type Fakes = {
   rule?: RuleClass | null;
   alert?: (key: string, text: string) => Promise<boolean>;
   env?: Record<string, string>;
+  events?: { emit: (event: string, payload: unknown) => boolean };
 };
 
 function make(o: Fakes = {}) {
@@ -66,7 +67,7 @@ function make(o: Fakes = {}) {
   let now = NOW;
   const cfg = parseMessageReaderConfig({ MESSAGE_READER: o.mode ?? 'shadow', ...(o.env ?? {}) });
   const alert = jest.fn(o.alert ?? (async () => true));
-  const svc = new MessageReaderService(repo, packet, llm, { get: async () => vocab }, cfg, () => now, () => o.agents ?? true, alert);
+  const svc = new MessageReaderService(repo, packet, llm, { get: async () => vocab }, cfg, () => now, () => o.agents ?? true, alert, o.events);
   const post = (id: string, text: string, agoMin = 1, extra: Record<string, unknown> = {}) => ({
     messageId: id, channelId: 'ch1', text, postedAt: new Date(NOW.getTime() - agoMin * 60_000), hasMedia: false, ...extra,
   });
@@ -474,6 +475,59 @@ describe('MessageReaderService', () => {
       expect(m.alert).toHaveBeenCalledTimes(3);
       expect(fetch).toHaveBeenCalledTimes(2); // ch1 once (the second within 30 min is held back), ch2 once
       __resetOpsAlerts();
+    });
+  });
+
+  describe('reader.reading.stored (the AI setups hook)', () => {
+    it('emits once after a READ row is stored, with the reading and the post text', async () => {
+      const emit = jest.fn(() => true);
+      const m = make({ events: { emit } });
+      m.svc.onTelegramMessage(m.post('m1', 'Stay cautious, only index showing strength'));
+      await m.svc.whenIdle();
+      expect(READER_READING_STORED_EVENT).toBe('reader.reading.stored');
+      expect(emit).toHaveBeenCalledTimes(1);
+      expect(emit).toHaveBeenCalledWith(READER_READING_STORED_EVENT, {
+        messageId: 'm1',
+        channelId: 'ch1',
+        postedAt: new Date(NOW.getTime() - 60_000),
+        readAt: NOW,
+        status: 'READ',
+        kind: 'INFO',
+        scope: 'MARKET',
+        claims: INFO.claims,
+        summary: 'stay cautious',
+        postText: 'Stay cautious, only index showing strength',
+      });
+    });
+
+    it('no emit for FAILED, STALE or CACHED rows', async () => {
+      const emit = jest.fn(() => true);
+      const m = make({ events: { emit }, read: async () => Promise.reject(new Error('boom')) });
+      m.svc.onTelegramMessage(m.post('f1', 'a post that fails', 10));
+      m.svc.onTelegramMessage(m.post('s1', 'an old post', 45));
+      await m.svc.whenIdle();
+      expect(m.rows.get('f1')).toMatchObject({ status: 'FAILED' });
+      expect(m.rows.get('s1')).toMatchObject({ status: 'STALE' });
+      expect(emit).not.toHaveBeenCalled();
+      m.llm.read.mockImplementation(async () => ({ reply: INFO, ms: 900, model: 'claude-sonnet-5' }));
+      m.svc.onTelegramMessage(m.post('m1', 'Stay cautious, only index showing strength'));
+      await m.svc.whenIdle();
+      m.svc.onTelegramMessage({ ...m.post('m2', 'Stay cautious, only index showing strength'), channelId: 'ch2' });
+      await m.svc.whenIdle();
+      expect(m.rows.get('m2')).toMatchObject({ status: 'CACHED' });
+      expect(emit).toHaveBeenCalledTimes(1);
+    });
+
+    it('an emitter that throws leaves the READ row as stored and makes no second AI call', async () => {
+      const emit = jest.fn((): boolean => {
+        throw new Error('listener boom');
+      });
+      const m = make({ events: { emit } });
+      m.svc.onTelegramMessage(m.post('m1', 'Stay cautious, only index showing strength'));
+      await m.svc.whenIdle();
+      expect(emit).toHaveBeenCalledTimes(1);
+      expect(m.llm.read).toHaveBeenCalledTimes(1);
+      expect(m.upserts.map((u) => u.status)).toEqual(['READ']);
     });
   });
 });

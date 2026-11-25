@@ -13,6 +13,7 @@ import {
   directionOf,
   SIGNAL_READY_EVENT,
   SIGNAL_UPDATE_EVENT,
+  SIGNAL_VISION_DONE_EVENT,
   TELEGRAM_MESSAGE_EVENT,
   type MessageStatus,
   type ParsedSignal,
@@ -21,6 +22,7 @@ import {
   type SignalUpdateEvent,
   type TelegramMediaRef,
   type TelegramMessageEvent,
+  type VisionDoneEvent,
 } from '../domain/types';
 import { detectUpdate } from '../domain/updates';
 import type { Vocabulary } from '../domain/vocabulary';
@@ -288,7 +290,7 @@ export class SignalIntakeService {
   /**
    * Only kind SIGNAL can become a TradeSignal (and so `signal.ready`, under the same age rule as text);
    * UPDATE / INFO (legacy VIEW) / NOISE are stored and never emitted; INFO items go to channel_infos. The reply is kept with the image's sha256 —
-   * that is the cache.
+   * that is the cache. Every exit that saves a result then emits `signal.vision.done` (the AI message reader).
    */
   private async applyVision(
     evt: TelegramMessageEvent,
@@ -303,17 +305,27 @@ export class SignalIntakeService {
     if (prior?.status === 'SIGNAL' && prior.signalId) return;
     const shown = clockOrNull(reply.shownTime);
     const stored = { kind: reply.kind, isSignal: reply.isSignal, signals: reply.signals, ...(reply.items ? { items: reply.items } : {}), ...(shown ? { shownTime: shown } : {}), imageSha256: media.sha256 };
-    const save = (status: MessageStatus, reason: string) =>
+    // The AI message reader reads image posts from this stored result: emitted after every exit that saves one.
+    const done = () => {
+      const payload: VisionDoneEvent = { messageId: evt.messageId, channelId: evt.channelId, postedAt, text: String(evt.text ?? ''), reading: stored };
+      this.emit(SIGNAL_VISION_DONE_EVENT, payload);
+    };
+    const saveClass = (status: MessageStatus, reason: string) =>
       this.repo.saveClass({ ...base, status, parser: 'vision', llmResult: stored, reason: `vision (${via}): ${reason}`.slice(0, 500) });
+    const save = async (status: MessageStatus, reason: string) => {
+      await saveClass(status, reason);
+      done();
+    };
     if (reply.kind === 'INFO' || reply.kind === 'VIEW') {
       const vocab = await this.vocab.get();
       const items = validateInfoItems(reply.items ?? [], vocab);
-      await save('INFO', `image is market information (${items.length} item${items.length === 1 ? '' : 's'})`);
+      await saveClass('INFO', `image is market information (${items.length} item${items.length === 1 ? '' : 's'})`);
       if (items.length) {
         await this.repo.saveInfo({
           messageId: evt.messageId, channelId: evt.channelId, postedAt, sessionDate: istYmd(postedAt), textHash: base.textHash, items, extractor: 'llm', confidence: 0.6,
         });
       }
+      done();
       return;
     }
     if (reply.kind === 'NOISE') return save('NOISE', 'image is noise');
@@ -327,6 +339,7 @@ export class SignalIntakeService {
         // CALL_AT: the call's own time on a screenshot; signal-trader measures a re-post's delay from it.
         const tags = [...v.signal.tags, 'VISION', ...(shown ? [`${CALL_AT_TAG}${shown}`] : [])];
         await this.createFromParsed(evt, postedAt, { ...v.signal, tags }, 'llm', base, stored);
+        done();
         return;
       }
       reasons.push(v.reason);

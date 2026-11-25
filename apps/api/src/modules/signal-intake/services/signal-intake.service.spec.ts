@@ -61,7 +61,7 @@ function memStore() {
 const vocab = buildVocabulary(['RELIANCE-EQ', 'TATAMOTORS-EQ', 'SBIN-EQ']);
 const T0 = new Date('2026-10-23T04:30:00Z'); // Fri 10:00 IST
 
-function make(o: { llm?: jest.Mock; master?: unknown[] | null; now?: Date; env?: Record<string, string>; vision?: SignalVision; infoLlm?: SignalInfoLlm } = {}) {
+function make(o: { llm?: jest.Mock; master?: unknown[] | null; now?: Date; env?: Record<string, string>; vision?: SignalVision; infoLlm?: SignalInfoLlm; onEmit?: (e: string, p: unknown) => void } = {}) {
   const mem = memStore();
   const emitted: Array<[string, Record<string, unknown>]> = [];
   const llm = o.llm ?? jest.fn(async (): Promise<LlmParseReply> => ({ isSignal: false, signals: [] }));
@@ -72,7 +72,12 @@ function make(o: { llm?: jest.Mock; master?: unknown[] | null; now?: Date; env?:
     { rows: async () => (o.master === undefined ? null : o.master) },
     { parse: llm },
     parseSignalIntakeConfig(o.env ?? {}),
-    { emit: (e: string, p: unknown) => emitted.push([e, p as Record<string, unknown>]) },
+    {
+      emit: (e: string, p: unknown) => {
+        o.onEmit?.(e, p);
+        emitted.push([e, p as Record<string, unknown>]);
+      },
+    },
     () => now,
     o.vision,
     o.infoLlm,
@@ -290,6 +295,8 @@ describe('SignalIntakeService — image posts (vision)', () => {
     const v = { unavailable: () => o.unavailable ?? null, usedSince: jest.fn(async () => o.used ?? 0), classify };
     return { v: v as SignalVision & typeof v, classify };
   }
+  /** The stream-X events (signal.ready / signal.update); signal.vision.done is the AI reader's, not a signal. */
+  const signalEvents = (m: ReturnType<typeof make>) => m.emitted.filter(([e]) => e !== 'signal.vision.done');
   const img = (m: ReturnType<typeof make>, id: string, ch: string, text = '', atMin = 0, media = IMG) => ({ ...m.msg(id, ch, text, atMin), hasMedia: true, media });
 
   it('an image-only call → vision SIGNAL → TradeSignal (tag VISION) + signal.ready', async () => {
@@ -317,7 +324,7 @@ describe('SignalIntakeService — image posts (vision)', () => {
     await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
     expect(m.mem.classes.get('m1')).toMatchObject({ status, parser: 'vision' });
     expect(m.mem.signals).toHaveLength(0);
-    expect(m.emitted).toEqual([]);
+    expect(signalEvents(m)).toEqual([]);
   });
 
   it('a caption that is itself a call is parsed by the rules; the image is not sent', async () => {
@@ -433,7 +440,34 @@ describe('SignalIntakeService — image posts (vision)', () => {
     await flush();
     await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
     expect(m.mem.classes.get('m1')).toMatchObject({ status: 'LLM_NOT_SIGNAL', reason: expect.stringContaining('sl on the wrong side') });
-    expect(m.emitted).toEqual([]);
+    expect(signalEvents(m)).toEqual([]);
+  });
+
+  it('emits signal.vision.done after an image is read (after the class row is saved)', async () => {
+    const savedAtEmit: Array<string | undefined> = [];
+    const { v } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] });
+    const m: ReturnType<typeof make> = make({
+      vision: v,
+      onEmit: (e, p) => {
+        if (e === 'signal.vision.done') savedAtEmit.push(m.mem.classes.get((p as { messageId: string }).messageId)?.status);
+      },
+    });
+    await m.svc.handle(img(m, 'm1', 'A', 'Crude chart for today'));
+    await flush();
+    await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
+    expect(m.emitted).toEqual([
+      ['signal.vision.done', { messageId: 'm1', channelId: 'A', postedAt: T0, text: 'Crude chart for today', reading: expect.objectContaining({ kind: 'NOISE', imageSha256: IMG.sha256 }) }],
+    ]);
+    expect(savedAtEmit).toEqual(['NOISE']);
+  });
+
+  it('a vision call emits signal.ready, then signal.vision.done', async () => {
+    const { v } = fakeVision({ kind: 'SIGNAL', isSignal: true, signals: [call] });
+    const m = make({ vision: v });
+    await m.svc.handle(img(m, 'm1', 'A'));
+    await flush();
+    await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
+    expect(m.emitted.map(([e]) => e)).toEqual(['signal.ready', 'signal.vision.done']);
   });
 
   describe('ingestImageSetup (chart-screenshot setups, IMAGE_SETUPS=signal)', () => {
@@ -453,7 +487,7 @@ describe('SignalIntakeService — image posts (vision)', () => {
       expect(id).toBe('sig1');
       expect(m.mem.signals[0]).toMatchObject({ rawText: TEXT, tags: ['IMAGE_SETUP'], side: 'SELL', instrumentKind: 'PE', strike: 23200, sl: 100.5, targets: [48], expiry: '2026-11-03' });
       expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', signalId: 'sig1' });
-      expect(m.emitted).toEqual([['signal.ready', expect.objectContaining({ signalId: 'sig1', agreeCount: 1 })]]);
+      expect(signalEvents(m)).toEqual([['signal.ready', expect.objectContaining({ signalId: 'sig1', agreeCount: 1 })]]);
     });
 
     it('a message already a call is left alone; a late generic vision reply never overwrites the image-setup call', async () => {

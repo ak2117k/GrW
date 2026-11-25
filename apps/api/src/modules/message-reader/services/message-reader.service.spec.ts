@@ -1,0 +1,252 @@
+import { Logger } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { buildVocabulary } from '../../signal-intake/domain/vocabulary';
+import { SIGNAL_READY_EVENT, SIGNAL_VISION_DONE_EVENT, TELEGRAM_MESSAGE_EVENT } from '../../signal-intake/domain/types';
+import type { ReaderReply } from '../domain/reading.types';
+import { parseMessageReaderConfig } from '../message-reader.config';
+import type { CachedReading, ReadingWrite, RuleClass } from '../repositories/message-reader.repository';
+import type { ReaderInput } from './message-reader-llm.service';
+import type { ReaderPacket } from './reader-packet.service';
+import { MessageReaderService } from './message-reader.service';
+
+const NOW = new Date('2026-11-25T04:01:00Z'); // 09:31 IST
+const vocab = buildVocabulary(['RELIANCE-EQ']);
+
+const INFO: ReaderReply = {
+  kind: 'INFO',
+  scope: 'MARKET',
+  claims: [{ text: 'stocks weak, index strong', subject: 'MARKET', bias: 'CAUTION', horizon: 'INTRADAY', claimType: 'RELATIVE_BREADTH', verdict: 'CONFIRMED', evidence: [{ fact: 'A/D', value: '0.6', source: 'breadth' }] }],
+  call: null,
+  summary: 'stay cautious',
+};
+const CALL: ReaderReply = {
+  kind: 'CALL',
+  scope: 'INSTRUMENT',
+  claims: [],
+  call: { underlying: ' nifty ', side: 'BUY', optionType: 'CE', strike: 24000, entryLow: 120, entryHigh: 120, stopLoss: 100, targets: [140, 160] },
+  summary: 'buy nifty 24000 ce',
+};
+
+type Fakes = {
+  mode?: 'off' | 'shadow' | 'on';
+  agents?: boolean;
+  read?: (i: ReaderInput) => Promise<{ reply: ReaderReply; ms: number; model: string }>;
+  rule?: RuleClass | null;
+};
+
+function make(o: Fakes = {}) {
+  const rows = new Map<string, ReadingWrite>();
+  const upserts: ReadingWrite[] = [];
+  const repo = {
+    upsertReading: jest.fn(async (r: ReadingWrite) => {
+      upserts.push(r);
+      rows.set(r.messageId, r);
+    }),
+    readingOf: jest.fn(async (id: string) => {
+      const r = rows.get(id);
+      return r ? { status: r.status, textHash: r.textHash } : null;
+    }),
+    cachedByHash: jest.fn(async (hash: string, since: Date, exclude?: string): Promise<CachedReading | null> => {
+      const hit = [...rows.values()].reverse().find((r) => r.textHash === hash && r.status === 'READ' && r.readAt >= since && r.messageId !== exclude);
+      return hit ? { messageId: hit.messageId, kind: hit.kind!, scope: hit.scope!, claims: hit.claims, call: hit.call ?? null, summary: hit.summary ?? null, model: hit.model ?? null } : null;
+    }),
+    ruleClassOf: jest.fn(async () => o.rule ?? null),
+    channelTitle: jest.fn(async () => 'Stock Gainers (SEBI Registered)'),
+  };
+  const packet = { build: jest.fn(async () => ({ packet: { at: NOW.toISOString() } as unknown as ReaderPacket, ms: 7 })) };
+  const llm = { read: jest.fn(o.read ?? (async () => ({ reply: INFO, ms: 900, model: 'claude-sonnet-5' }))) };
+  let now = NOW;
+  const cfg = parseMessageReaderConfig({ MESSAGE_READER: o.mode ?? 'shadow' });
+  const svc = new MessageReaderService(repo, packet, llm, { get: async () => vocab }, cfg, () => now, () => o.agents ?? true);
+  const post = (id: string, text: string, agoMin = 1, extra: Record<string, unknown> = {}) => ({
+    messageId: id, channelId: 'ch1', text, postedAt: new Date(NOW.getTime() - agoMin * 60_000), hasMedia: false, ...extra,
+  });
+  return { svc, repo, packet, llm, rows, upserts, post, setNow: (d: Date) => (now = d) };
+}
+
+const tick = () => new Promise((r) => setImmediate(r));
+
+describe('MessageReaderService', () => {
+  // Failure paths log a warning by design; keep the test output clean.
+  beforeEach(() => jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined));
+  afterEach(() => jest.restoreAllMocks());
+
+  it('reads a burst of 10 with at most 8 in flight', async () => {
+    let inFlight = 0;
+    let max = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const m = make({
+      read: async () => {
+        inFlight++;
+        max = Math.max(max, inFlight);
+        await gate;
+        inFlight--;
+        return { reply: INFO, ms: 900, model: 'claude-sonnet-5' };
+      },
+    });
+    for (let i = 0; i < 10; i++) m.svc.onTelegramMessage(m.post(`m${i}`, `post number ${i}`));
+    for (let i = 0; i < 10; i++) await tick();
+    expect(m.llm.read).toHaveBeenCalledTimes(8);
+    release();
+    await m.svc.whenIdle();
+    expect(max).toBe(8);
+    expect(m.llm.read).toHaveBeenCalledTimes(10);
+    expect([...m.rows.values()].map((r) => r.status)).toEqual(Array(10).fill('READ'));
+  });
+
+  it('the same messageId twice while queued is read once', async () => {
+    const m = make();
+    m.svc.onTelegramMessage(m.post('m1', 'Stay cautious, only index showing strength'));
+    m.svc.onTelegramMessage(m.post('m1', 'Stay cautious, only index showing strength'));
+    await m.svc.whenIdle();
+    expect(m.llm.read).toHaveBeenCalledTimes(1);
+    expect(m.repo.upsertReading).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-reads an edited post into the same row', async () => {
+    const m = make();
+    m.llm.read
+      .mockImplementationOnce(async () => ({ reply: INFO, ms: 900, model: 'claude-sonnet-5' }))
+      .mockImplementationOnce(async () => ({ reply: { ...INFO, summary: 'edited: be careful' }, ms: 900, model: 'claude-sonnet-5' }));
+    m.svc.onTelegramMessage(m.post('m1', 'Stay cautious'));
+    await m.svc.whenIdle();
+    m.svc.onTelegramMessage(m.post('m1', 'Stay cautious, edited', 1, { edited: true }));
+    await m.svc.whenIdle();
+    expect(m.upserts.map((u) => u.messageId)).toEqual(['m1', 'm1']);
+    expect(m.upserts[1]).toMatchObject({ status: 'READ', summary: 'edited: be careful' });
+  });
+
+  it('an edit that arrives while the post is being read is read after it', async () => {
+    const m = make();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    m.llm.read
+      .mockImplementationOnce(async () => {
+        await gate;
+        return { reply: INFO, ms: 900, model: 'claude-sonnet-5' };
+      })
+      .mockImplementationOnce(async () => ({ reply: { ...INFO, summary: 'second' }, ms: 900, model: 'claude-sonnet-5' }));
+    m.svc.onTelegramMessage(m.post('m1', 'first text'));
+    for (let i = 0; i < 5; i++) await tick();
+    m.svc.onTelegramMessage(m.post('m1', 'second text', 1, { edited: true }));
+    release();
+    await m.svc.whenIdle();
+    expect(m.llm.read).toHaveBeenCalledTimes(2);
+    expect(m.rows.get('m1')).toMatchObject({ summary: 'second' });
+  });
+
+  it('a post older than 30 min at dequeue is STALE and not read', async () => {
+    const m = make();
+    m.svc.onTelegramMessage(m.post('m1', 'Nifty looks strong', 31));
+    await m.svc.whenIdle();
+    expect(m.llm.read).not.toHaveBeenCalled();
+    expect(m.rows.get('m1')).toMatchObject({ status: 'STALE', claims: [] });
+  });
+
+  it('a forwarded duplicate within 15 min is CACHED, no AI call', async () => {
+    const m = make();
+    m.svc.onTelegramMessage(m.post('m1', 'Stay cautious, only index showing strength'));
+    await m.svc.whenIdle();
+    m.svc.onTelegramMessage({ ...m.post('m2', '  Stay cautious, only index showing strength  '), channelId: 'ch2' });
+    await m.svc.whenIdle();
+    expect(m.llm.read).toHaveBeenCalledTimes(1);
+    expect(m.rows.get('m2')).toMatchObject({ status: 'CACHED', channelId: 'ch2', summary: 'stay cautious', claims: INFO.claims });
+  });
+
+  it('an AI failure stores FAILED and retries once while fresh', async () => {
+    const m = make();
+    m.llm.read.mockImplementationOnce(async () => {
+      throw new Error('message reader timed out after 25000 ms');
+    });
+    m.svc.onTelegramMessage(m.post('m1', 'Stay cautious', 1));
+    await m.svc.whenIdle();
+    expect(m.llm.read).toHaveBeenCalledTimes(2);
+    expect(m.upserts.map((u) => u.status)).toEqual(['FAILED', 'READ']);
+    expect(m.upserts[0]).toMatchObject({ claims: [], error: expect.stringContaining('timed out') });
+  });
+
+  it('does not retry a post older than 5 min', async () => {
+    const m = make({
+      read: async () => {
+        throw new Error('busy');
+      },
+    });
+    m.svc.onTelegramMessage(m.post('m1', 'Stay cautious', 6));
+    await m.svc.whenIdle();
+    expect(m.llm.read).toHaveBeenCalledTimes(1);
+    expect(m.upserts.map((u) => u.status)).toEqual(['FAILED']);
+  });
+
+  it('a CALL the rules dropped as NOISE is missedByRules', async () => {
+    const m = make({ read: async () => ({ reply: CALL, ms: 900, model: 'claude-sonnet-5' }), rule: { status: 'NOISE', signal: null } });
+    m.svc.onTelegramMessage(m.post('m1', 'nifty 24000 ce buy now 120 sl 100'));
+    await m.svc.whenIdle();
+    expect(m.rows.get('m1')).toMatchObject({ status: 'READ', kind: 'CALL', missedByRules: true, parseAgrees: null });
+  });
+
+  it('a CALL matching the rule parse has parseAgrees true (underlying stored trimmed + uppercase)', async () => {
+    const rule: RuleClass = {
+      status: 'SIGNAL',
+      signal: { underlying: 'NIFTY', side: 'BUY', optionType: 'CE', strike: 24000, entryLow: 120, entryHigh: 120, stopLoss: 100, targets: [140, 160] },
+    };
+    const m = make({ read: async () => ({ reply: CALL, ms: 900, model: 'claude-sonnet-5' }), rule });
+    m.svc.onTelegramMessage(m.post('m1', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140/160'));
+    await m.svc.whenIdle();
+    expect(m.rows.get('m1')).toMatchObject({ status: 'READ', parseAgrees: true, missedByRules: false, call: expect.objectContaining({ underlying: 'NIFTY' }) });
+  });
+
+  it('passes the named underlyings, channel title and IST time to the packet and the AI; stores latencies', async () => {
+    const m = make();
+    m.svc.onTelegramMessage(m.post('m1', 'Reliance looking weak below 1400', 1));
+    await m.svc.whenIdle();
+    expect(m.packet.build).toHaveBeenCalledWith(expect.objectContaining({ channelId: 'ch1', underlyings: ['RELIANCE'] }));
+    expect(m.llm.read).toHaveBeenCalledWith(expect.objectContaining({ channelTitle: 'Stock Gainers (SEBI Registered)', postedAtIst: '2026-11-25 09:30 IST' }));
+    expect(m.rows.get('m1')).toMatchObject({ status: 'READ', packetMs: 7, aiMs: 900, model: 'claude-sonnet-5', queuedMs: 0 });
+  });
+
+  it('image posts are read only after vision done', async () => {
+    const m = make();
+    const media = { kind: 'photo', path: '/x.jpg', sha256: 'a'.repeat(64), mimeType: 'image/jpeg', bytes: 1 };
+    m.svc.onTelegramMessage(m.post('m1', 'Crude chart', 1, { hasMedia: true, media }));
+    await m.svc.whenIdle();
+    expect(m.llm.read).not.toHaveBeenCalled();
+    const reading = { kind: 'INFO', isSignal: false, signals: [], imageSha256: 'a'.repeat(64) };
+    m.svc.onVisionDone({ messageId: 'm1', channelId: 'ch1', postedAt: new Date(NOW.getTime() - 60_000), text: 'Crude chart', reading });
+    await m.svc.whenIdle();
+    expect(m.llm.read).toHaveBeenCalledWith(expect.objectContaining({ text: 'Crude chart', imageReading: reading }));
+    expect(m.rows.get('m1')).toMatchObject({ status: 'READ' });
+  });
+
+  it('off mode reads nothing', async () => {
+    const m = make({ mode: 'off' });
+    m.svc.onTelegramMessage(m.post('m1', 'Stay cautious'));
+    m.svc.onVisionDone({ messageId: 'm2', channelId: 'ch1', postedAt: NOW, text: '', reading: {} });
+    await m.svc.whenIdle();
+    expect(m.llm.read).not.toHaveBeenCalled();
+    expect(m.repo.upsertReading).not.toHaveBeenCalled();
+  });
+
+  it('agents off reads nothing', async () => {
+    const m = make({ agents: false });
+    m.svc.onTelegramMessage(m.post('m1', 'Stay cautious'));
+    m.svc.onVisionDone({ messageId: 'm2', channelId: 'ch1', postedAt: NOW, text: '', reading: {} });
+    await m.svc.whenIdle();
+    expect(m.llm.read).not.toHaveBeenCalled();
+    expect(m.repo.upsertReading).not.toHaveBeenCalled();
+  });
+
+  it('never emits signal.ready', async () => {
+    const m = make({ read: async () => ({ reply: CALL, ms: 900, model: 'claude-sonnet-5' }), rule: { status: 'NOISE', signal: null } });
+    const ee = new EventEmitter2();
+    const seen: string[] = [];
+    ee.onAny((e) => void seen.push(String(e)));
+    ee.on(TELEGRAM_MESSAGE_EVENT, (e) => m.svc.onTelegramMessage(e));
+    ee.on(SIGNAL_VISION_DONE_EVENT, (e) => m.svc.onVisionDone(e));
+    ee.emit(TELEGRAM_MESSAGE_EVENT, m.post('m1', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+    await m.svc.whenIdle();
+    expect(m.rows.get('m1')).toMatchObject({ kind: 'CALL' });
+    expect(seen).toEqual([TELEGRAM_MESSAGE_EVENT]);
+    expect(seen).not.toContain(SIGNAL_READY_EVENT);
+  });
+});

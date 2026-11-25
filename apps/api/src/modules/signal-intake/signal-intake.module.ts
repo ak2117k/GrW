@@ -116,6 +116,6 @@ import { parseSignalIntakeConfig, SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig 
     SignalWatchService,
     SetupWatchService,
   ],
-  exports: [SignalIntakeService, SIGNAL_INTAKE_CONFIG],
+  exports: [SignalIntakeService, SIGNAL_INTAKE_CONFIG, SignalVocabularyService],
 })
 export class SignalIntakeModule {}

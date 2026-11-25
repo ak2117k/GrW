@@ -71,6 +71,18 @@ export const directionOf = (kind: InstrumentKind, side: Side): Direction => {
 export const TELEGRAM_MESSAGE_EVENT = 'telegram.message';
 export const SIGNAL_READY_EVENT = 'signal.ready';
 export const SIGNAL_UPDATE_EVENT = 'signal.update';
+/** An image post's vision read is stored (every outcome that saves a result); the AI message reader listens. */
+export const SIGNAL_VISION_DONE_EVENT = 'signal.vision.done';
+
+export interface VisionDoneEvent {
+  messageId: string;
+  channelId: string;
+  postedAt: Date;
+  /** The post's caption. */
+  text: string;
+  /** The vision reply as stored in signal_message_classes.llm_result. */
+  reading: unknown;
+}
 
 export interface TelegramMessageEvent {
   messageId: string;

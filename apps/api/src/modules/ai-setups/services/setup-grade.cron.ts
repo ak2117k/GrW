@@ -61,8 +61,8 @@ export class SetupGradeCron {
 
   private async nightJob(family: ExchangeFamily): Promise<void> {
     const now = this.nowFn ? this.nowFn() : new Date();
-    if (!this.clock.isTradingDay(family, now)) return;
     try {
+      if (!this.clock.isTradingDay(family, now)) return;
       if (!bootJobsEnabled()) return void this.logger.log(BOOT_JOBS_DISABLED);
       const job = () => this.grade(family, now);
       if (this.lease) await this.lease.runExclusiveFailClosed(`ai-setup-grade-${family}`, LEASE_TTL_MS, job);
@@ -77,7 +77,7 @@ export class SetupGradeCron {
     const session = istYmd(now);
     const rows = (await this.store.gradeCandidates(new Date(now.getTime() - LOOKBACK_MS), now)).filter((r) => familyOf(r) === family);
     const bars = new Map<string, Promise<{ bars: Bar15m[] | null; error: string | null }>>();
-    const written: SetupGrade[] = [];
+    const written: Array<{ prev: unknown; grade: SetupGrade }> = [];
     for (const row of rows) {
       try {
         const key = `${row.underlying}|${istYmd(row.createdAt)}`;
@@ -86,7 +86,7 @@ export class SetupGradeCron {
         const trade = row.tradeId ? await this.store.gradeTrade(row.tradeId) : null;
         const grade = buildGrade({ row, trade, bars: b.bars, barsError: b.error, now, session });
         if (!grade) continue;
-        if (await this.store.writeGrade(row.id, row.updatedAt, grade)) written.push(grade);
+        if (await this.store.writeGrade(row.id, row.updatedAt, grade)) written.push({ prev: row.grade, grade });
         else this.logger.warn(`[ai-setup-grade] ${row.underlying} ${row.id}: row changed while grading — retried next run`);
       } catch (e) {
         this.logger.warn(`[ai-setup-grade] ${row.underlying} ${row.id}: ${errText(e)}`);
@@ -94,7 +94,7 @@ export class SetupGradeCron {
     }
     const totals = gateTotals(await this.store.gradedSetupGrades());
     this.logger.log(gradeSummaryLine(family, written, totals));
-    return written;
+    return written.map((w) => w.grade);
   }
 
   /** The underlying's 15m bars over the row's IST session day (closed bars only are used by the replay). */

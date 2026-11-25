@@ -252,8 +252,9 @@ export class AiSetupsRepository implements SetupPacketSources {
   // ---- The nightly grader (services/setup-grade.cron.ts). ----
 
   /**
-   * SETUP / NO_TRADE rows created in [since, until) with no grade yet or a PENDING one, oldest first. GRADED and
-   * UNGRADABLE rows are never selected again (re-running never double-grades); SKIPPED rows are never graded.
+   * SETUP / NO_TRADE rows created in [since, until) with no grade yet, or whose grade / plan-only part / what-if part
+   * is still PENDING, oldest first. Anything else is never selected again (re-running never double-grades; a graded
+   * actual result is kept as it is); SKIPPED rows are never graded.
    */
   gradeCandidates(since: Date, until: Date): Promise<GradeCandidateRow[]> {
     return this.prisma.aiSetup.findMany({
@@ -261,7 +262,12 @@ export class AiSetupsRepository implements SetupPacketSources {
         decision: { in: ['SETUP', 'NO_TRADE'] },
         status: { not: 'SKIPPED' },
         createdAt: { gte: since, lt: until },
-        OR: [{ grade: { equals: Prisma.AnyNull } }, { grade: { path: ['status'], equals: 'PENDING' } }],
+        OR: [
+          { grade: { equals: Prisma.AnyNull } },
+          { grade: { path: ['status'], equals: 'PENDING' } },
+          { grade: { path: ['plan', 'status'], equals: 'PENDING' } },
+          { grade: { path: ['whatIf', 'status'], equals: 'PENDING' } },
+        ],
       },
       select: {
         id: true, underlying: true, decision: true, status: true, setup: true, checks: true, packet: true, tradeId: true,

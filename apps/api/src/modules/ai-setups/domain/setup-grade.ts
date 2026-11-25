@@ -22,15 +22,17 @@ import type { SetupPlan } from './setup.types';
  * Plan-only / what-if ₹ = (exit − fill underlying, signed for the view) × |delta| × lot size — the same delta × lot
  * approximation the ceiling check uses; GROSS, no charges, no premium decay. Missing delta / lot ⇒ ₹ null (said why).
  *
- * Missing bars (a gap, bars not yet in, the loader failing) ⇒ the grade stays PENDING and is retried on later
- * sessions; after MAX_GRADE_SESSIONS distinct sessions it is UNGRADABLE with the reason — never a guessed result.
+ * The ACTUAL result is graded on its own readiness: a SETUP row is GRADED (and counts toward the gate) as soon as its
+ * trade is closed or it expired unfilled. Missing bars (a gap, bars not yet in, the loader failing) keep only the
+ * plan-only / what-if PART pending, retried on later sessions; after MAX_GRADE_SESSIONS distinct sessions that part is
+ * UNGRADABLE with the reason — never a guessed result. The live gate counts FILLED setups only (LIVE_GATE_MIN_TRADED).
  */
 
 export const GRADE_VERSION = 1;
 /** Distinct sessions a grade may stay pending before it is UNGRADABLE. */
 export const MAX_GRADE_SESSIONS = 5;
-/** The live gate (spec §7): at least this many graded setups, cumulative actual net > 0, owner OK. */
-export const LIVE_GATE_MIN_GRADED = 20;
+/** The live gate (spec §7 + controller ruling): at least this many FILLED (traded) setups, cumulative actual net > 0, owner OK. */
+export const LIVE_GATE_MIN_TRADED = 20;
 
 export const REFERENCE_DEFINITION =
   'neutral reference (no AI setup): MARKET_NOW at the setup packet LTP in the claim direction (BULL = CE, BEAR = PE), ' +
@@ -125,10 +127,15 @@ export interface SetupGrade {
   sessionsTried: string[];
   reason?: string;
   actual?: ActualResult;
-  plan?: PlanResult;
-  whatIf?: PlanResult & { hypothetical: true; reference?: string };
+  plan?: PlanPart;
+  whatIf?: PlanPart & { hypothetical: true; reference?: string };
   rupeesFormula?: string;
 }
+
+/** The plan-only / what-if part, graded on its own (bars) readiness. */
+export type PlanPart =
+  | (PlanResult & { status: 'GRADED' })
+  | { status: 'PENDING' | 'UNGRADABLE'; reason: string; sessionsTried: string[] };
 
 export const RUPEES_FORMULA = '(exit − fill underlying, signed for the view) × |delta| × lot size; gross, no charges';
 
@@ -252,7 +259,8 @@ export function replayPlan(i: { setup: SetupPlan; createdAt: Date; validUntil: D
   let lastClose: number | null = null;
   const slot0 = Math.floor(created / BAR_15M_MS) * BAR_15M_MS;
   for (let slot = slot0; ; slot += BAR_15M_MS) {
-    if (slot >= end) {
+    // Only bars that END by validUntil are walked: no price from after validUntil is used.
+    if (slot + BAR_15M_MS > end) {
       if (!fill || !watch) {
         const step = pendingStep({ setup: s, ltp: null, now: new Date(Math.max(slot, end)), validUntil: i.validUntil, createdAt: i.createdAt });
         return { status: 'DONE', filled: false, reason: step.reason };
@@ -313,103 +321,145 @@ export function actualResult(row: GradeRow, trade: GradeTrade | null): { ready: 
 }
 
 const priorSessions = (g: unknown): string[] => (isRec(g) && Array.isArray(g.sessionsTried) ? g.sessionsTried.filter((x): x is string => typeof x === 'string') : []);
+const partOf = (g: unknown, key: 'plan' | 'whatIf'): Record<string, unknown> | null => (isRec(g) && isRec(g[key]) ? g[key] : null);
+const withSession = (xs: string[], session: string) => (xs.includes(session) ? xs : [...xs, session]);
 
-/**
- * The row's grade this run (null = not a graded kind). GRADED rows are never re-selected by the cron; a PENDING
- * grade records the session it was tried on (a re-run the same session counts once).
- */
-export function buildGrade(i: { row: GradeRow; trade: GradeTrade | null; bars: readonly Bar15m[] | null; barsError: string | null; now: Date; session: string }): SetupGrade | null {
-  const { row } = i;
-  const kind = gradeKindOf(row);
-  if (!kind) return null;
-  const tried = priorSessions(row.grade);
-  const sessionsTried = tried.includes(i.session) ? tried : [...tried, i.session];
-  const head = { version: GRADE_VERSION, kind, session: i.session, at: i.now.toISOString(), sessionsTried };
-  const ungradable = (reason: string, extra: Partial<SetupGrade> = {}): SetupGrade => ({ status: 'UNGRADABLE', ...head, reason, ...extra });
+type ReplayInputs =
+  | { ok: true; plan: SetupPlan; marketFill: number | null; delta: number | null; lotSize: number | null; validUntil: Date; reference?: string }
+  | { ok: false; reason: string; reference?: string };
+
+/** What to replay: the setup itself (SETUP / vetoed) or the neutral reference (plain NO_TRADE). */
+function replayInputs(row: GradeRow, kind: GradeKind): ReplayInputs {
   const family = familyOf(row);
-
-  // What to replay.
-  let plan: SetupPlan;
-  let marketFill: number | null;
-  let delta: number | null;
-  let lotSize: number | null;
-  let validUntil: Date;
-  let reference: string | undefined;
   if (kind === 'NO_TRADE_REFERENCE') {
     const p = isRec(row.packet) ? row.packet : {};
     const c = isRec(row.checks) ? row.checks : {};
     const bias = (isRec(p.claim) ? p.claim.bias : undefined) ?? (isRec(c.claim) ? c.claim.bias : undefined);
     const ref = referencePlan({ ...p, underlying: p.underlying ?? row.underlying }, bias, family);
-    if (!ref.ok) return ungradable(ref.reason);
-    plan = ref.setup;
-    marketFill = ref.fill;
-    delta = ref.delta;
-    lotSize = ref.lotSize;
-    validUntil = validUntilFor(row.createdAt, plan.validUntil, family);
-    reference = ref.definition;
-  } else {
-    if (!isPlan(row.setup)) return ungradable('the stored setup has no readable instrument / entry / SL / targets');
-    plan = row.setup;
-    const ctx = isRec(row.checks) && isRec(row.checks.context) ? row.checks.context : {};
-    marketFill = num(ctx.ltpUnderlying) ?? null;
-    delta = num(ctx.delta);
-    lotSize = num(ctx.lotSize);
-    validUntil = kind === 'SETUP' && row.validUntil ? row.validUntil : validUntilFor(row.createdAt, plan.validUntil, family);
+    if (!ref.ok) return { ok: false, reason: ref.reason, reference: REFERENCE_DEFINITION };
+    return { ok: true, plan: ref.setup, marketFill: ref.fill, delta: ref.delta, lotSize: ref.lotSize, validUntil: validUntilFor(row.createdAt, ref.setup.validUntil, family), reference: ref.definition };
   }
-
-  // Readiness: the actual result (SETUP) and the bars.
-  const waits: string[] = [];
-  let actual: ActualResult | undefined;
-  if (kind === 'SETUP') {
-    const a = actualResult(row, i.trade);
-    if (a.ready) actual = a.actual;
-    else waits.push(a.reason);
-  }
-  let replay: ReplayResult | null = null;
-  if (!i.bars) waits.push(`15m bars unavailable: ${i.barsError ?? 'not read'}`);
-  else {
-    replay = replayPlan({ setup: plan, createdAt: row.createdAt, validUntil, bars: i.bars, now: i.now, marketFill });
-    if (replay.status === 'MISSING_BARS') waits.push(replay.reason);
-  }
-  if (waits.length > 0 || !replay || replay.status === 'MISSING_BARS') {
-    const reason = waits.join('; ');
-    if (sessionsTried.length >= MAX_GRADE_SESSIONS) {
-      return ungradable(`still not gradable after ${sessionsTried.length} sessions: ${reason}`, actual ? { actual } : {});
-    }
-    return { status: 'PENDING', ...head, reason };
-  }
-  const result = planResult(replay, delta, lotSize);
-  if (kind === 'SETUP') return { status: 'GRADED', ...head, actual, plan: result, rupeesFormula: RUPEES_FORMULA };
-  return { status: 'GRADED', ...head, whatIf: { ...result, hypothetical: true, ...(reference ? { reference } : {}) }, rupeesFormula: RUPEES_FORMULA };
+  if (!isPlan(row.setup)) return { ok: false, reason: 'the stored setup has no readable instrument / entry / SL / targets' };
+  const ctx = isRec(row.checks) && isRec(row.checks.context) ? row.checks.context : {};
+  return {
+    ok: true,
+    plan: row.setup,
+    marketFill: num(ctx.ltpUnderlying),
+    delta: num(ctx.delta),
+    lotSize: num(ctx.lotSize),
+    validUntil: kind === 'SETUP' && row.validUntil ? row.validUntil : validUntilFor(row.createdAt, row.setup.validUntil, family),
+  };
 }
 
-/** The running totals toward the live gate: graded SETUPs with a known actual net, and its sum. */
-export function gateTotals(grades: readonly unknown[]): { gradedSetups: number; actualNet: number; gateMin: number; gateMet: boolean } {
-  let n = 0;
+interface BuildInput {
+  row: GradeRow;
+  trade: GradeTrade | null;
+  bars: readonly Bar15m[] | null;
+  barsError: string | null;
+  now: Date;
+  session: string;
+}
+
+/**
+ * The plan-only / what-if part: a prior GRADED or UNGRADABLE part is kept as it was; otherwise replayed — PENDING
+ * (its own sessions counted) while bars are missing, UNGRADABLE after MAX_GRADE_SESSIONS of them.
+ */
+function replayPart(i: BuildInput, kind: GradeKind, prior: Record<string, unknown> | null): { part: PlanPart; reference?: string } {
+  const priorRef = typeof prior?.reference === 'string' ? prior.reference : undefined;
+  if (prior && (prior.status === 'GRADED' || prior.status === 'UNGRADABLE')) return { part: prior as unknown as PlanPart, reference: priorRef };
+  const sessionsTried = withSession(priorSessions(prior), i.session);
+  const inp = replayInputs(i.row, kind);
+  if (!inp.ok) return { part: { status: 'UNGRADABLE', reason: inp.reason, sessionsTried }, reference: inp.reference };
+  let wait: string;
+  if (!i.bars) wait = `15m bars unavailable: ${i.barsError ?? 'not read'}`;
+  else {
+    const r = replayPlan({ setup: inp.plan, createdAt: i.row.createdAt, validUntil: inp.validUntil, bars: i.bars, now: i.now, marketFill: inp.marketFill });
+    if (r.status === 'DONE') return { part: { status: 'GRADED', ...planResult(r, inp.delta, inp.lotSize) }, reference: inp.reference };
+    wait = r.reason;
+  }
+  if (sessionsTried.length >= MAX_GRADE_SESSIONS) {
+    return { part: { status: 'UNGRADABLE', reason: `still no 15m bars after ${sessionsTried.length} sessions: ${wait}`, sessionsTried }, reference: inp.reference };
+  }
+  return { part: { status: 'PENDING', reason: wait, sessionsTried }, reference: inp.reference };
+}
+
+/**
+ * The row's grade this run (null = not a graded kind).
+ * - SETUP: GRADED as soon as the ACTUAL result is ready (trade closed, or expired unfilled), whatever the bars say;
+ *   the plan-only part may still be PENDING and is filled in on later runs, and an actual already graded is never
+ *   changed. The actual still not ready after MAX_GRADE_SESSIONS → UNGRADABLE.
+ * - NO_TRADE kinds: the row's status is the what-if's.
+ * The cron re-selects rows whose grade, plan or what-if is PENDING; a re-run in the same session counts once.
+ */
+export function buildGrade(i: BuildInput): SetupGrade | null {
+  const { row } = i;
+  const kind = gradeKindOf(row);
+  if (!kind) return null;
+  const prev = isRec(row.grade) ? row.grade : null;
+  const sessionsTried = withSession(priorSessions(prev), i.session);
+  const head = { version: GRADE_VERSION, kind, session: i.session, at: i.now.toISOString(), sessionsTried, rupeesFormula: RUPEES_FORMULA };
+
+  if (kind !== 'SETUP') {
+    const { part, reference } = replayPart(i, kind, partOf(prev, 'whatIf'));
+    const whatIf = { ...part, hypothetical: true as const, ...(reference ? { reference } : {}) };
+    return { status: part.status, ...head, ...(part.status !== 'GRADED' ? { reason: part.reason } : {}), whatIf };
+  }
+
+  const { part: plan } = replayPart(i, kind, partOf(prev, 'plan'));
+  const priorActual = prev && prev.status === 'GRADED' && isRec(prev.actual) ? (prev.actual as unknown as ActualResult) : null;
+  if (priorActual) return { status: 'GRADED', ...head, actual: priorActual, plan };
+  const a = actualResult(row, i.trade);
+  if (a.ready) return { status: 'GRADED', ...head, actual: a.actual, plan };
+  if (sessionsTried.length >= MAX_GRADE_SESSIONS) {
+    return { status: 'UNGRADABLE', ...head, reason: `actual result still not ready after ${sessionsTried.length} sessions: ${a.reason}`, plan };
+  }
+  return { status: 'PENDING', ...head, reason: a.reason, plan };
+}
+
+export interface GateTotals {
+  /** GRADED SETUPs with a known actual net (filled or not). */
+  gradedSetups: number;
+  /** Of those, the ones whose paper trade was opened — what the gate counts. */
+  tradedSetups: number;
+  actualNet: number;
+  gateMin: number;
+  gateMet: boolean;
+}
+
+/** The running totals toward the live gate: ≥ LIVE_GATE_MIN_TRADED FILLED setups with cumulative actual net > 0. */
+export function gateTotals(grades: readonly unknown[]): GateTotals {
+  let graded = 0;
+  let traded = 0;
   let net = 0;
   for (const g of grades) {
     if (!isRec(g) || g.status !== 'GRADED' || g.kind !== 'SETUP' || !isRec(g.actual)) continue;
     const v = num(g.actual.net);
     if (v === null) continue;
-    n++;
+    graded++;
+    if (g.actual.filled === true) traded++;
     net += v;
   }
-  return { gradedSetups: n, actualNet: r2(net), gateMin: LIVE_GATE_MIN_GRADED, gateMet: n >= LIVE_GATE_MIN_GRADED && net > 0 };
+  return { gradedSetups: graded, tradedSetups: traded, actualNet: r2(net), gateMin: LIVE_GATE_MIN_TRADED, gateMet: traded >= LIVE_GATE_MIN_TRADED && net > 0 };
 }
 
-/** The one summary line per run. */
-export function gradeSummaryLine(family: ExchangeFamily, grades: readonly SetupGrade[], totals: ReturnType<typeof gateTotals>, extra: { pending?: number; ungradable?: number } = {}): string {
-  const graded = grades.filter((g) => g.status === 'GRADED');
-  const setups = graded.filter((g) => g.kind === 'SETUP');
+const rupeesOf = (p: PlanPart | undefined): number | null => (p && p.status === 'GRADED' ? p.rupees : null);
+const newlyGraded = (prev: unknown, g: SetupGrade, key: 'plan' | 'whatIf') => g[key]?.status === 'GRADED' && partOf(prev, key)?.status !== 'GRADED';
+
+/** The one summary line per run, over what this run newly graded (`prev` = the row's grade before the run). */
+export function gradeSummaryLine(family: ExchangeFamily, entries: ReadonlyArray<{ prev: unknown; grade: SetupGrade }>, totals: GateTotals): string {
   const sum = (xs: Array<number | null | undefined>) => r2(xs.reduce<number>((a, v) => a + (typeof v === 'number' ? v : 0), 0));
-  const unpriced = graded.filter((g) => (g.plan ?? g.whatIf)?.filled && (g.plan ?? g.whatIf)?.rupees === null).length;
-  const whatIfs = graded.filter((g) => g.kind !== 'SETUP');
+  const actuals = entries.filter((e) => e.grade.kind === 'SETUP' && e.grade.status === 'GRADED' && !(isRec(e.prev) && e.prev.status === 'GRADED' && isRec(e.prev.actual)));
+  const plans = entries.filter((e) => newlyGraded(e.prev, e.grade, 'plan')).map((e) => e.grade.plan);
+  const whatIfs = entries.filter((e) => newlyGraded(e.prev, e.grade, 'whatIf')).map((e) => e.grade);
+  const anyIs = (g: SetupGrade, s: string) => g.status === s || g.plan?.status === s || g.whatIf?.status === s;
+  const unpriced = [...plans, ...whatIfs.map((g) => g.whatIf)].filter((p) => p && p.status === 'GRADED' && p.filled && p.rupees === null).length;
   return (
-    `[ai-setup-grade] ${family}: setups graded ${setups.length}, filled ${setups.filter((g) => g.actual?.filled).length}, ` +
-    `actual net ₹${sum(setups.map((g) => g.actual?.net))}, plan-only net ₹${sum(setups.map((g) => g.plan?.rupees))}; ` +
-    `NO_TRADE what-if net ₹${sum(whatIfs.map((g) => g.whatIf?.rupees))} (${whatIfs.length} graded: ${whatIfs.filter((g) => g.kind === 'NO_TRADE_VETOED').length} vetoed, ` +
-    `${whatIfs.filter((g) => g.kind === 'NO_TRADE_REFERENCE').length} reference); pending ${extra.pending ?? grades.filter((g) => g.status === 'PENDING').length}, ` +
-    `ungradable ${extra.ungradable ?? grades.filter((g) => g.status === 'UNGRADABLE').length}${unpriced ? `, ${unpriced} filled without ₹ (no delta / lot)` : ''} | ` +
-    `live gate: ${totals.gradedSetups}/${totals.gateMin} graded setups, cumulative actual net ₹${totals.actualNet}${totals.gateMet ? ' — gate numbers met (owner OK still needed)' : ''}`
+    `[ai-setup-grade] ${family}: setups graded ${actuals.length} / traded ${actuals.filter((e) => e.grade.actual?.filled).length}; ` +
+    `actual net ₹${sum(actuals.map((e) => e.grade.actual?.net))}; plan-only net ₹${sum(plans.map(rupeesOf))} (${plans.length} plans); ` +
+    `NO_TRADE what-if net ₹${sum(whatIfs.map((g) => rupeesOf(g.whatIf)))} (${whatIfs.length} graded: ${whatIfs.filter((g) => g.kind === 'NO_TRADE_VETOED').length} vetoed, ` +
+    `${whatIfs.filter((g) => g.kind === 'NO_TRADE_REFERENCE').length} reference); pending ${entries.filter((e) => anyIs(e.grade, 'PENDING')).length}, ` +
+    `ungradable ${entries.filter((e) => anyIs(e.grade, 'UNGRADABLE')).length}${unpriced ? `, ${unpriced} filled without ₹ (no delta / lot)` : ''} | ` +
+    `live gate: ${totals.tradedSetups}/${totals.gateMin} traded setups (${totals.gradedSetups} graded), cumulative actual net ₹${totals.actualNet}` +
+    `${totals.gateMet ? ' — gate numbers met (owner OK still needed)' : ''}`
   );
 }

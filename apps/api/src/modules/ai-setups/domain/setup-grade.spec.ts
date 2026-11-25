@@ -88,6 +88,14 @@ describe('replayPlan (15m bars, the watch rules)', () => {
     expect(r).toMatchObject({ status: 'DONE', exit: 'TIME', outcome: 'TIME', exitUnderlying: 428.25, points: 2.25 });
   });
 
+  it('validUntil inside a bar: that bar is not walked (no price after validUntil); TIME at the previous close', () => {
+    // validUntil 11:50: the 11:45 bar (to 12:00) dives through the SL but must not count.
+    const bars = day({ '10:15': bar('10:15', 430, 431, 425, 427), '11:30': bar('11:30', 428, 429, 427.5, 428.5), '11:45': bar('11:45', 428.5, 429, 410, 412) }, 428);
+    expect(replayPlan({ setup: dabur(), createdAt: CREATED, validUntil: IST('11:50'), bars, now: NIGHT })).toMatchObject({ exit: 'TIME', exitUnderlying: 428.5, exitAt: IST('11:50').toISOString() });
+    const never = day({ '11:45': bar('11:45', 430, 430, 425, 425) });
+    expect(replayPlan({ setup: dabur(), createdAt: CREATED, validUntil: IST('11:50'), bars: never, now: NIGHT })).toMatchObject({ filled: false, reason: expect.stringMatching(/^VALID_UNTIL_PASSED/) });
+  });
+
   it('a missing 15m bar before the outcome → MISSING_BARS (never a guess)', () => {
     const bars = day({}).filter((b) => b.ts !== IST('10:45').getTime());
     expect(replayPlan({ setup: dabur(), createdAt: CREATED, validUntil: VALID, bars, now: NIGHT })).toMatchObject({ status: 'MISSING_BARS', reason: expect.stringContaining('10:45') });
@@ -215,22 +223,44 @@ describe('buildGrade', () => {
     expect(buildGrade({ row: row({}), trade: { ...TRADE, status: 'OPEN' }, bars: WIN, barsError: null, now: NIGHT, session: SESSION })).toMatchObject({ status: 'PENDING' });
   });
 
-  it('missing bars → PENDING; the same session twice counts once; the 5th session → UNGRADABLE with the reason', () => {
-    const g1 = buildGrade({ row: row({}), trade: TRADE, bars: null, barsError: 'no 15m bar loader', now: NIGHT, session: SESSION });
-    expect(g1).toMatchObject({ status: 'PENDING', reason: expect.stringContaining('no 15m bar loader'), sessionsTried: [SESSION] });
-    const again = buildGrade({ row: row({ grade: g1 }), trade: TRADE, bars: null, barsError: 'x', now: NIGHT, session: SESSION });
-    expect(again).toMatchObject({ status: 'PENDING', sessionsTried: [SESSION] });
-    let prev: SetupGrade = g1!;
+  it('actual ready + no bars → GRADED (counted in the gate) with the plan PENDING', () => {
+    const g = buildGrade({ row: row({}), trade: TRADE, bars: null, barsError: 'no 15m bar loader', now: NIGHT, session: SESSION });
+    expect(g).toMatchObject({ status: 'GRADED', actual: { filled: true, net: 2917.5 }, plan: { status: 'PENDING', reason: expect.stringContaining('no 15m bar loader'), sessionsTried: [SESSION] } });
+    expect(gateTotals([g])).toMatchObject({ gradedSetups: 1, tradedSetups: 1, actualNet: 2917.5 });
+  });
+
+  it('the next run with bars fills the plan without changing the actual', () => {
+    const g1 = buildGrade({ row: row({}), trade: TRADE, bars: null, barsError: 'x', now: NIGHT, session: SESSION })!;
+    // Even a different trade read later never rewrites a graded actual.
+    const g2 = buildGrade({ row: row({ grade: g1 }), trade: { ...TRADE, pnl: 99, fees: 1 }, bars: WIN, barsError: null, now: NIGHT, session: '2026-11-25' });
+    expect(g2).toMatchObject({ status: 'GRADED', actual: g1.actual, plan: { status: 'GRADED', outcome: 'T2', rupees: 6250 }, sessionsTried: [SESSION, '2026-11-25'] });
+  });
+
+  it('bars missing for 5 sessions → only the plan is UNGRADABLE; the same session twice counts once; the actual still counts', () => {
+    let prev: SetupGrade = buildGrade({ row: row({}), trade: TRADE, bars: null, barsError: 'x', now: NIGHT, session: SESSION })!;
+    prev = buildGrade({ row: row({ grade: prev }), trade: TRADE, bars: null, barsError: 'x', now: NIGHT, session: SESSION })!;
+    expect(prev.plan).toMatchObject({ status: 'PENDING', sessionsTried: [SESSION] });
     const days = ['2026-11-25', '2026-11-26', '2026-11-27', '2026-11-30'];
     for (const d of days) prev = buildGrade({ row: row({ grade: prev }), trade: TRADE, bars: day({}).slice(0, 2), barsError: null, now: NIGHT, session: d })!;
     expect(MAX_GRADE_SESSIONS).toBe(5);
-    expect(prev).toMatchObject({ status: 'UNGRADABLE', reason: expect.stringContaining('5 sessions'), sessionsTried: [SESSION, ...days] });
-    expect(prev).not.toHaveProperty('plan');
+    expect(prev).toMatchObject({ status: 'GRADED', actual: { net: 2917.5 }, plan: { status: 'UNGRADABLE', reason: expect.stringContaining('5 sessions'), sessionsTried: [SESSION, ...days] } });
+    expect(gateTotals([prev])).toMatchObject({ tradedSetups: 1, actualNet: 2917.5 });
   });
 
-  it('a pending grade that now has its bars is graded', () => {
-    const p = buildGrade({ row: row({}), trade: TRADE, bars: null, barsError: 'x', now: NIGHT, session: SESSION })!;
-    expect(buildGrade({ row: row({ grade: p }), trade: TRADE, bars: WIN, barsError: null, now: NIGHT, session: '2026-11-25' })).toMatchObject({ status: 'GRADED', sessionsTried: [SESSION, '2026-11-25'] });
+  it('the actual never ready for 5 sessions → UNGRADABLE with the reason (plan kept)', () => {
+    let prev: SetupGrade | null = null;
+    for (const d of [SESSION, '2026-11-25', '2026-11-26', '2026-11-27', '2026-11-30']) {
+      prev = buildGrade({ row: row({ grade: prev }), trade: null, bars: WIN, barsError: null, now: NIGHT, session: d });
+    }
+    expect(prev).toMatchObject({ status: 'UNGRADABLE', reason: expect.stringMatching(/5 sessions: paper trade t1 not found/), plan: { status: 'GRADED' } });
+    expect(gateTotals([prev])).toMatchObject({ gradedSetups: 0, tradedSetups: 0 });
+  });
+
+  it('NO_TRADE what-if with no bars → PENDING, then graded when bars arrive', () => {
+    const v = row({ status: 'NO_TRADE', tradeId: null, validUntil: null, pnl: null });
+    const g1 = buildGrade({ row: v, trade: null, bars: null, barsError: 'x', now: NIGHT, session: SESSION })!;
+    expect(g1).toMatchObject({ status: 'PENDING', whatIf: { status: 'PENDING', hypothetical: true } });
+    expect(buildGrade({ row: { ...v, grade: g1 }, trade: null, bars: WIN, barsError: null, now: NIGHT, session: '2026-11-25' })).toMatchObject({ status: 'GRADED', whatIf: { status: 'GRADED', outcome: 'T2' } });
   });
 
   it('NO_TRADE with a vetoed setup → the setup replayed as a labelled what-if (no actual)', () => {
@@ -260,17 +290,30 @@ describe('buildGrade', () => {
 });
 
 describe('gateTotals / gradeSummaryLine', () => {
-  it('counts graded SETUPs with a known actual net and sums it; what-ifs never mix in', () => {
+  it('the gate counts FILLED setups; never-filled ones show as graded only; what-ifs never mix in', () => {
     const a = buildGrade({ row: row({}), trade: TRADE, bars: WIN, barsError: null, now: NIGHT, session: SESSION })!;
+    const e = buildGrade({ row: row({ id: 'e', status: 'EXPIRED', tradeId: null, pnl: null }), trade: null, bars: day({}), barsError: null, now: NIGHT, session: SESSION })!;
     const v = buildGrade({ row: row({ status: 'NO_TRADE', tradeId: null }), trade: null, bars: WIN, barsError: null, now: NIGHT, session: SESSION })!;
-    const t = gateTotals([a, a, v]);
-    expect(t).toEqual({ gradedSetups: 2, actualNet: 5835, gateMin: 20, gateMet: false });
-    const line = gradeSummaryLine('NSE', [a, v], t);
-    expect(line).toMatch(/setups graded 1/);
-    expect(line).toMatch(/filled 1/);
-    expect(line).toMatch(/actual net ₹2917.5/);
+    const t = gateTotals([a, a, e, v]);
+    expect(t).toEqual({ gradedSetups: 3, tradedSetups: 2, actualNet: 5835, gateMin: 20, gateMet: false });
+    const line = gradeSummaryLine('NSE', [{ prev: null, grade: a }, { prev: null, grade: e }, { prev: null, grade: v }], t);
+    expect(line).toMatch(/setups graded 2 \/ traded 1; actual net ₹2917.5/);
     expect(line).toMatch(/plan-only net ₹6250/);
     expect(line).toMatch(/NO_TRADE what-if net ₹6250/);
-    expect(line).toMatch(/2\/20 graded setups, cumulative actual net ₹5835/);
+    expect(line).toMatch(/live gate: 2\/20 traded setups \(3 graded\), cumulative actual net ₹5835/);
+  });
+
+  it('20 traded setups with net > 0 meet the gate numbers; 20 graded but unfilled do not', () => {
+    const a = buildGrade({ row: row({}), trade: TRADE, bars: WIN, barsError: null, now: NIGHT, session: SESSION })!;
+    const e = buildGrade({ row: row({ status: 'EXPIRED', tradeId: null, pnl: null }), trade: null, bars: day({}), barsError: null, now: NIGHT, session: SESSION })!;
+    expect(gateTotals(Array(20).fill(a)).gateMet).toBe(true);
+    expect(gateTotals([...Array(19).fill(e), a]).gateMet).toBe(false);
+  });
+
+  it('a later run that only fills the plan does not re-count the actual in the run line', () => {
+    const g1 = buildGrade({ row: row({}), trade: TRADE, bars: null, barsError: 'x', now: NIGHT, session: SESSION })!;
+    const g2 = buildGrade({ row: row({ grade: g1 }), trade: TRADE, bars: WIN, barsError: null, now: NIGHT, session: '2026-11-25' })!;
+    const line = gradeSummaryLine('NSE', [{ prev: g1, grade: g2 }], gateTotals([g2]));
+    expect(line).toMatch(/setups graded 0 \/ traded 0; actual net ₹0; plan-only net ₹6250 \(1 plans\)/);
   });
 });

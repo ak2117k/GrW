@@ -51,7 +51,15 @@ const LOSS_BARS = [...flat('10:00', '10:15', 430), { ts: IST('10:15').getTime(),
 function harness(rows: GradeCandidateRow[], opts: { bars?: Bar15m[] | Error; tradingDay?: boolean; trade?: GradeTrade | null; prior?: unknown[] } = {}) {
   const written = new Map<string, unknown>();
   const store: jest.Mocked<SetupGradeStore> = {
-    gradeCandidates: jest.fn(async (_s: Date, _u: Date) => rows.filter((r) => !written.has(r.id) || (written.get(r.id) as { status: string }).status === 'PENDING')),
+    // As the repository: no grade, or the grade / plan / what-if still PENDING; the row carries its current grade.
+    gradeCandidates: jest.fn(async (_s: Date, _u: Date) =>
+      rows
+        .map((r) => ({ ...r, grade: written.get(r.id) ?? r.grade }))
+        .filter((r) => {
+          const g = r.grade as { status?: string; plan?: { status?: string }; whatIf?: { status?: string } } | null;
+          return !g || g.status === 'PENDING' || g.plan?.status === 'PENDING' || g.whatIf?.status === 'PENDING';
+        }),
+    ),
     writeGrade: jest.fn(async (id: string, _u: Date, g: unknown) => {
       written.set(id, g);
       return true;
@@ -93,8 +101,9 @@ describe('SetupGradeCron', () => {
     expect(h.store.writeGrade).toHaveBeenCalledWith('s1', IST('11:00'), expect.objectContaining({ status: 'GRADED', kind: 'SETUP' }));
     expect(h.written.get('s1')).toMatchObject({ actual: { net: -2075, filled: true }, plan: { outcome: 'SL', points: -6, rupees: -3750 } });
     const line = log.mock.calls.map((c) => String(c[0])).find((l) => l.includes('[ai-setup-grade]'));
-    expect(line).toMatch(/setups graded 1, filled 1, actual net ₹-2075, plan-only net ₹-3750/);
-    expect(line).toMatch(/live gate: 2\/20 graded setups, cumulative actual net ₹-1575/);
+    expect(line).toMatch(/setups graded 1 \/ traded 1; actual net ₹-2075; plan-only net ₹-3750/);
+    // The prior graded setup never filled: graded, not traded.
+    expect(line).toMatch(/live gate: 1\/20 traded setups \(2 graded\), cumulative actual net ₹-1575/);
   });
 
   it('idempotent: a second run finds nothing to grade and writes nothing', async () => {
@@ -112,10 +121,28 @@ describe('SetupGradeCron', () => {
     expect(line).toMatch(/setups graded 0/);
   });
 
-  it('missing bars → PENDING grade (not graded), with the reason', async () => {
+  it('missing bars → the actual is GRADED (counted), the plan PENDING; a later run with bars fills only the plan', async () => {
     const h = harness([row()], { bars: new Error('no 15m bar loader') });
     await h.cron.onNse();
-    expect(h.written.get('s1')).toMatchObject({ status: 'PENDING', reason: expect.stringContaining('no 15m bar loader'), sessionsTried: ['2026-11-24'] });
+    const g1 = h.written.get('s1') as { actual: unknown };
+    expect(g1).toMatchObject({ status: 'GRADED', actual: { net: -2075 }, plan: { status: 'PENDING', reason: expect.stringContaining('no 15m bar loader'), sessionsTried: ['2026-11-24'] } });
+    const lines = () => log.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('[ai-setup-grade]'));
+    expect(lines().pop()).toMatch(/setups graded 1 \/ traded 1; actual net ₹-2075; plan-only net ₹0 \(0 plans\).*pending 1/);
+    h.market.bars15m.mockResolvedValue(LOSS_BARS);
+    await h.cron.onNse();
+    expect(h.written.get('s1')).toMatchObject({ status: 'GRADED', actual: g1.actual, plan: { status: 'GRADED', outcome: 'SL', rupees: -3750 } });
+    const last = lines().pop();
+    expect(last).toMatch(/setups graded 0 \/ traded 0; actual net ₹0; plan-only net ₹-3750 \(1 plans\)/);
+    expect(last).toMatch(/live gate: 1\/20 traded setups \(1 graded\)/);
+  });
+
+  it('a trading-day clock that throws is logged, never thrown', async () => {
+    const h = harness([row()]);
+    h.clock.isTradingDay.mockImplementation(() => {
+      throw new Error('calendar broken');
+    });
+    await expect(h.cron.onNse()).resolves.toBeUndefined();
+    expect(h.store.gradeCandidates).not.toHaveBeenCalled();
   });
 
   it('NO_TRADE rows get a what-if; MCX rows wait for the MCX cron', async () => {

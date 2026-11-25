@@ -86,3 +86,26 @@
 - [ ] Run `cd apps/api && npx jest src/modules/signal-trader src/modules/telegram-reader` — all pass.
 - [ ] After 15:35 IST with no open-position decision pending and owner OK: merge to `main`, push, verify containers run the new SHA.
 - [ ] Next session: read `judge.timings` on the first calls; report post → order time vs ~60 s before.
+
+### Task 6: Missed Stock Gainers calls (nicknames and formats)
+
+Added 2026-11-25 on owner's question about the HUL call. Evidence: 10 posts in 30 days from *Stock Gainers (SEBI Registered)* filed INFO instead of SIGNAL (prod `signal_message_classes`).
+
+**Files:** Modify `apps/api/src/modules/signal-intake/domain/vocabulary.ts` (`STOCK_ALIASES`, `INDEX_ALIASES`), and the rule parser / prefilter only where a format case needs it; Test: `signal-intake/domain/domain.spec.ts` (or the parser spec).
+
+**Behaviour:** each of these real posts must parse as a call with the right underlying (verify each symbol against the instrument master names used by the vocabulary before adding):
+- `HUL  HUL 2060 CE 75-77  SUPPORT 60  VIEW 90` → HINDUNILVR 2060 CE, entry 75–77, SL 60, target 90
+- `Bajaj auto 10800 ce 114-116   support  70   view 170` → BAJAJ-AUTO
+- `Midcp  midcp 14100 ce above 125-130  support 90  view 160` and `Midco 14200 pe 160-170   support 70  view 240` → MIDCPNIFTY
+- `Bullish View On   ALKEM LAB  5300CE  CMP 145   Support 50 ...` → ALKEM (read the full stored text for its target)
+- `cochinship 1280 ce 1280 ce 44-45  support 30  view 60` → COCHINSHIP
+- `SUNPHARMA   SUNPHARMA 1920 ce.47   support 30   view 65` → SUNPHARMA, entry 47
+- `INDIAN BNK   INDIANBNK 880 CE 24   SUPPORT 17  VIEW 30` → INDIANB
+- `OPTION BUYING VIEW   ATHER ENERGY 1420CE  CMP 37  Support 20 ...` → ATHERENERG (read full text)
+The full texts are in prod `telegram_messages` (read-only) — the controller supplies them in the dispatch. No change to how any currently-parsed post is read (run the whole signal-intake suite).
+
+- [ ] Step 1: failing tests, one per post above (fixtures = full text).
+- [ ] Step 2: run, expect FAIL.
+- [ ] Step 3: implement aliases + the two format cases.
+- [ ] Step 4: run signal-intake tests, expect PASS.
+- [ ] Step 5: commit `fix(signal-intake): read Stock Gainers calls with HUL / Bajaj auto / Midcp / Alkem lab / Indianbnk / cochinship names and 'ce.47' / CMP-support layouts`.

@@ -33,7 +33,7 @@ export type SetupCheckFailure =
   | 'oi_unavailable'
   | 'no_evidence'
   | 'evidence_not_in_packet'
-  | 'level_not_in_packet'
+  | 'level_not_a_level'
   | 'sl_wrong_side'
   | 'targets_wrong_side'
   | 'pullback_wrong_side'
@@ -103,6 +103,47 @@ function badEvidence(evidence: SetupEvidence[], idx: PacketIndex): SetupEvidence
   return null;
 }
 
+/** Fields whose number is a price level an entry may anchor to (matched by key, any case, anywhere in a present block). */
+export const LEVEL_KEYS: ReadonlySet<string> = new Set(['dayhigh', 'daylow', 'prevhigh', 'prevlow', 'prevclose', 'high60d', 'low60d', 'vwap']);
+
+const isRec = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+const isBar = (v: unknown): v is { high: number; low: number } => isRec(v) && finite(v.high) && finite(v.low);
+
+/** 15m swing highs / lows: an interior bar whose high (low) is ≥ (≤) both neighbours'. */
+function swingLevels(bars: Array<{ high: number; low: number }>, out: Set<number>): void {
+  for (let i = 1; i < bars.length - 1; i++) {
+    const [a, b, c] = [bars[i - 1], bars[i], bars[i + 1]];
+    if (b.high >= a.high && b.high >= c.high) out.add(r2(b.high));
+    if (b.low <= a.low && b.low <= c.low) out.add(r2(b.low));
+  }
+}
+
+/**
+ * The price levels an entry may cite, from the packet alone: every number under a LEVEL_KEYS field, plus the
+ * swing highs / lows of any bar array under a `bars15m` key — skipping unavailable blocks — minus the current
+ * LTP (an entry anchored to the price it enters at is no anchor). Rounded to 2 dp. Strike, OI, volume, open,
+ * ATR and every other packet number are not levels.
+ */
+export function packetLevels(packet: unknown, ltp: number | null): Set<number> {
+  const out = new Set<number>();
+  const walk = (v: unknown, inBars: boolean, depth: number): void => {
+    if (depth > 12) return;
+    if (Array.isArray(v)) {
+      if (inBars && v.length > 0 && v.every(isBar)) swingLevels(v, out);
+      else for (const x of v) walk(x, inBars, depth + 1);
+      return;
+    }
+    if (!isRec(v) || v.status === 'unavailable') return;
+    for (const [k, x] of Object.entries(v)) {
+      if (LEVEL_KEYS.has(k.toLowerCase()) && finite(x)) out.add(r2(x));
+      else walk(x, inBars || k === 'bars15m', depth + 1);
+    }
+  };
+  walk(packet, false, 0);
+  if (finite(ltp)) out.delete(r2(ltp));
+  return out;
+}
+
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 function shapeError(s: SetupPlan): string | null {
@@ -124,7 +165,7 @@ function shapeError(s: SetupPlan): string | null {
  * Check one setup reply against the mandatory code rules, in order: contract (option BUY, well-formed), data
  * present (LTP, ATR15m, delta, lot, spread, OI — missing numbers never pass), evidence (every cited value in the
  * packet), sides (SL protective, targets beyond entry in order, pullback below price for a CE / above for a PE),
- * anti-chase (BREAKOUT_TRIGGER / MARKET_NOW within 1.5 × ATR15m of a cited packet level), R:R to T1 ≥ 1.2,
+ * anti-chase (BREAKOUT_TRIGGER / MARKET_NOW within 1.5 × ATR15m of a cited packetLevels level, never LTP / strike / OI / volume), R:R to T1 ≥ 1.2,
  * liquidity (spread ≤ 2 %, OI ≥ minOi), intraday validUntil, and SL distance × |delta| × lot ≤ ceiling.
  * NO_TRADE has nothing to veto (ok).
  */
@@ -153,9 +194,16 @@ export function checkSetup(reply: SetupReply, ctx: SetupCheckContext): SetupChec
   if (bad) return fail('evidence_not_in_packet', `"${bad.fact}" = ${bad.value} (${bad.source}) is not in the packet`);
 
   const { entry } = s;
+  // The cited level must be a real level (day / prior / 60d high-low, prior close, a 15m swing, VWAP) — never the
+  // LTP, a strike, OI or volume, which would let any entry "anchor" to itself and beat anti-chase.
   const anchored = entry.type !== 'LIMIT_PULLBACK';
-  if (entry.level === null ? anchored : !idx.numbers.has(r2(entry.level))) {
-    return fail('level_not_in_packet', `${entry.type} level ${String(entry.level)} is not a packet number`);
+  if (entry.level === null) {
+    if (anchored) return fail('level_not_a_level', `${entry.type} cites no level`);
+  } else if (!packetLevels(ctx.packet, ltp).has(r2(entry.level))) {
+    return fail(
+      'level_not_a_level',
+      `${entry.type} level ${entry.level} is not a packet level (day/prior/60d high-low, prior close, 15m swing, VWAP) or equals LTP ${ltp}`,
+    );
   }
 
   const bull = s.instrument.optionType === 'CE';

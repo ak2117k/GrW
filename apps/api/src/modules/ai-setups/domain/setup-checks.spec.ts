@@ -1,4 +1,4 @@
-import { checkSetup, setupCeilingFor, DEFAULT_SETUP_CEILING_RUPEES, type SetupCheckContext } from './setup-checks';
+import { checkSetup, packetLevels, setupCeilingFor, DEFAULT_SETUP_CEILING_RUPEES, type SetupCheckContext } from './setup-checks';
 import type { SetupReply, SetupPlan } from './setup.types';
 
 /**
@@ -10,10 +10,30 @@ const PACKET = {
   quote: {
     status: 'present',
     source: 'market-quote-resolver',
-    value: { ltp: 431.3, open: 405.2, dayHigh: 433.6, dayLow: 404.8, prevHigh: 403, prevClose: 399.4, volume: 8_400_000, avgVolume20d: 1_200_000 },
+    value: {
+      ltp: 431.3,
+      open: 405.2,
+      dayHigh: 433.6,
+      dayLow: 404.8,
+      prevHigh: 403,
+      prevClose: 399.4,
+      volume: 8_400_000,
+      avgVolume20d: 1_200_000,
+      // last 8 closed 15m bars: swing low 425 (12:30, the "13:00 support"), swing high 432.9 (13:30)
+      bars15m: [
+        { at: '12:00', open: 428, high: 430, low: 426.5, close: 427 },
+        { at: '12:15', open: 427, high: 428, low: 425.6, close: 426 },
+        { at: '12:30', open: 426, high: 427.2, low: 425, close: 427 },
+        { at: '12:45', open: 427, high: 429, low: 425.8, close: 428.7 },
+        { at: '13:00', open: 428.7, high: 431, low: 427.9, close: 430.6 },
+        { at: '13:15', open: 430.6, high: 432.4, low: 429.5, close: 431.8 },
+        { at: '13:30', open: 431.8, high: 432.9, low: 430.1, close: 431.2 },
+        { at: '13:45', open: 431.2, high: 432.1, low: 430.4, close: 431.3 },
+      ],
+    },
   },
   daily60: { status: 'present', source: 'owner daily bars', value: { high60d: 403, atr14: 11.2 } },
-  bars15m: { status: 'present', source: 'owner 15m bars', value: { atr15m: 3, vwap: 424.8, swingLow: 425 } },
+  bars15m: { status: 'present', source: 'owner 15m bars', value: { atr15m: 3, vwap: 424.8 } },
   chain: { status: 'present', source: 'option chain', value: { expiry: '2026-12-29', strikes: [{ strike: 430, type: 'CE', ltp: 9.8, oi: 1480, spreadPct: 1.2 }] } },
   news60m: { status: 'unavailable', source: 'news', reason: 'no news in the last 60 min' },
 };
@@ -29,7 +49,7 @@ const DABUR_SETUP: SetupPlan = {
   evidence: [
     { fact: '60-day high broken at the open', value: '403', source: 'daily60' },
     { fact: 'LTP', value: '431.3', source: 'quote' },
-    { fact: '13:00 support (15m swing low)', value: '425', source: 'bars15m' },
+    { fact: '13:00 support (15m swing low)', value: '425', source: 'quote' },
     { fact: 'volume vs 20d average', value: '8,400,000', source: 'quote' },
   ],
 };
@@ -107,16 +127,34 @@ describe('checkSetup — each check', () => {
     expect(checkSetup(near, OK)).toEqual({ ok: true });
   });
 
-  it('a breakout / market-now entry must cite a level, and the level must be a packet number', () => {
+  it('a breakout / market-now entry must cite a level, and the level must be a packet level', () => {
     const noLevel = reply({ entry: { type: 'BREAKOUT_TRIGGER', low: 434, high: 434, trigger: 434, level: null }, sl: 427, targets: [445] });
-    expect(checkSetup(noLevel, OK)).toMatchObject({ ok: false, failed: 'level_not_in_packet' });
+    expect(checkSetup(noLevel, OK)).toMatchObject({ ok: false, failed: 'level_not_a_level' });
     const invented = reply({ entry: { type: 'BREAKOUT_TRIGGER', low: 434, high: 434, trigger: 434, level: 433.1 }, sl: 427, targets: [445] });
-    expect(checkSetup(invented, OK)).toMatchObject({ ok: false, failed: 'level_not_in_packet' });
+    expect(checkSetup(invented, OK)).toMatchObject({ ok: false, failed: 'level_not_a_level' });
   });
 
-  it('a pullback that cites a level must cite a packet number too', () => {
+  it('anti-chase cannot be beaten by citing a non-level packet number: LTP, strike, volume all fail', () => {
+    const now = (level: number) => reply({ entry: { type: 'MARKET_NOW', low: 431.3, high: 431.3, trigger: null, level }, sl: 425, targets: [440] });
+    expect(checkSetup(now(431.3), OK)).toMatchObject({ ok: false, failed: 'level_not_a_level', detail: expect.stringContaining('431.3') }); // LTP
+    expect(checkSetup(now(430), OK)).toMatchObject({ ok: false, failed: 'level_not_a_level' }); // the strike
+    expect(checkSetup(now(8_400_000), OK)).toMatchObject({ ok: false, failed: 'level_not_a_level' }); // volume
+    expect(checkSetup(now(1480), OK)).toMatchObject({ ok: false, failed: 'level_not_a_level' }); // OI
+    expect(checkSetup(now(405.2), OK)).toMatchObject({ ok: false, failed: 'level_not_a_level' }); // open is not a level
+  });
+
+  it('prevHigh and a 15m swing high are levels', () => {
+    // pullback anchored to prevHigh 403 (the broken 60-day high)
+    const prevHigh = reply({ entry: { type: 'LIMIT_PULLBACK', low: 424, high: 426, trigger: null, level: 403 } });
+    expect(checkSetup(prevHigh, OK)).toEqual({ ok: true });
+    // breakout over the 13:30 swing high 432.9: |434 − 432.9| = 1.1 ≤ 4.5
+    const swing = reply({ entry: { type: 'BREAKOUT_TRIGGER', low: 434, high: 434, trigger: 434, level: 432.9 }, sl: 427, targets: [445] });
+    expect(checkSetup(swing, OK)).toEqual({ ok: true });
+  });
+
+  it('a pullback that cites a level must cite a packet level too', () => {
     const r = reply({ entry: { type: 'LIMIT_PULLBACK', low: 424, high: 426, trigger: null, level: 425.5 } });
-    expect(checkSetup(r, OK)).toMatchObject({ ok: false, failed: 'level_not_in_packet' });
+    expect(checkSetup(r, OK)).toMatchObject({ ok: false, failed: 'level_not_a_level' });
   });
 
   it('a breakout entry needs its trigger', () => {
@@ -221,6 +259,27 @@ describe('checkSetup — each check', () => {
     expect(checkSetup(reply(), ctx({ ceiling: 10_000, atr15m: 0 }))).toMatchObject({ ok: false, failed: 'atr_unavailable' });
     expect(checkSetup(reply(), ctx({ ceiling: 10_000, delta: 0 }))).toMatchObject({ ok: false, failed: 'delta_unavailable' });
     expect(checkSetup(reply(), ctx({ ceiling: 10_000, lotSize: 0 }))).toMatchObject({ ok: false, failed: 'lot_unavailable' });
+  });
+});
+
+describe('packetLevels', () => {
+  it('is the level fields plus 15m swing highs / lows, minus LTP; never strike, OI, volume, open or ATR', () => {
+    const levels = packetLevels(PACKET, 431.3);
+    expect([...levels].sort((a, b) => a - b)).toEqual([399.4, 403, 404.8, 424.8, 425, 432.9, 433.6]);
+  });
+
+  it('skips unavailable blocks and drops a level equal to LTP', () => {
+    const p = { quote: { status: 'unavailable', reason: 'x', value: { dayHigh: 500 } }, q2: { status: 'present', value: { dayHigh: 431.3, prevLow: 420, VWAP: 428.15 } } };
+    expect([...packetLevels(p, 431.3)].sort()).toEqual([420, 428.15]);
+  });
+
+  it('only interior bars can be swings', () => {
+    const bars = [
+      { high: 10, low: 5 },
+      { high: 9, low: 6 },
+      { high: 11, low: 4 },
+    ];
+    expect([...packetLevels({ bars15m: bars }, null)]).toEqual([]);
   });
 });
 

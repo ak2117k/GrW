@@ -3613,6 +3613,35 @@ model MessageReading {
   @@map("message_readings")
 }
 
+/// An AI setup built from one verified channel claim (2026-11-25, apps/api/src/modules/ai-setups): an intraday
+/// option BUY on the underlying's levels, or NO_TRADE with the reason / failed code check. Paper only in v1.
+model AiSetup {
+  id         String    @id @default(cuid())
+  readingId  String    @map("reading_id") // message_readings.message_id (= telegram_messages.id)
+  underlying String // canonical uppercase underlying
+  channelId  String    @map("channel_id") // telegram_channels.id
+  decision   String // NO_TRADE | SETUP (the AI's own decision; a failed check keeps SETUP here and status NO_TRADE)
+  reason     String
+  setup      Json? // SetupPlan (setup.types.ts) when the AI returned one
+  checks     Json? // checkSetup result {ok} | {ok:false, failed, detail} + the measured context
+  packet     Json? // the setup packet the AI saw
+  status     String // NO_TRADE | PENDING | EXPIRED | FILLED | EXITED | SKIPPED
+  tradeId    String?   @map("trade_id") // trades.id of the paper trade once FILLED
+  validUntil DateTime? @map("valid_until") @db.Timestamptz(6) // null for NO_TRADE / SKIPPED rows
+  entryAt    DateTime? @map("entry_at") @db.Timestamptz(6)
+  exitAt     DateTime? @map("exit_at") @db.Timestamptz(6)
+  exitReason String?   @map("exit_reason") // AI_SETUP_SL | AI_SETUP_TARGET | AI_SETUP_TIME | closed elsewhere
+  pnl        Float?
+  grade      Json? // nightly grade
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status])
+  @@index([underlying, createdAt])
+  @@index([createdAt])
+  @@map("ai_setups")
+}
+
 /// A breakout level a channel posted ("Radico breakout above 4330"), watched on the underlying's LTP
 /// until it is crossed (→ a trade_signals row + signal.ready, judged like any call) or expires (owner 2026-10-27).
 model SignalWatch {

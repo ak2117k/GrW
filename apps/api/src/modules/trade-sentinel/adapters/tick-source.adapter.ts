@@ -34,6 +34,7 @@ import { newsPositionOf } from '../../news-events/keys';
 import type { FreshItem } from '../../news-events/types';
 import { NEWS_INDEX, type NewsIndexReader } from '../ports/news-index.port';
 import { HighImpactNewsBook, mergeImpactNews } from '../services/high-impact-news-book';
+import { ceilingTableOn } from '../../../common/utils/loss-limit';
 
 /**
  * The window the packet's `freshCount` block names, and therefore the window
@@ -484,6 +485,11 @@ export class SentinelTickSource implements TickSource {
           exchange: underlying.exchange, token: underlying.token, symbol: underlying.contract ?? underlying.name ?? underlying.token,
         })
       : null;
+    // Catastrophe floor: the underlying's N15 for the hard-loss band — read only with the table on, so a tick
+    // without it is byte-identical to before. Same gating as entryUnderlying (F&O, discipline on, a live read).
+    const underlyingN15 = read && !isCash && ceilingTableOn(process.env)
+      ? await this.underlyingN15(underlying)
+      : undefined;
     // Equity spec §4: the equity block's market inputs — CASH only, so an F&O tick is unchanged.
     const equityInputs = isCash ? await this.equityInputsFor(trackerId, row, hub) : null;
     const news = mergeImpactNews(opts.closedSession ? [] : (this.impactBook?.freshFor(structureSymbol, Date.now()) ?? []), v2News?.fresh, legacyNews);
@@ -549,6 +555,7 @@ export class SentinelTickSource implements TickSource {
       noise,
       // SPIKE BANK / NOISE-AWARE HARD LOSS inputs: only with discipline on (absent otherwise).
       ...(read ? { contractBars: read.contractBars, entryUnderlying } : {}),
+      ...(underlyingN15 !== undefined ? { underlyingN15 } : {}),
       ...(equityInputs ? { equityInputs } : {}),
       // Absent unless the hub priced the contract (never rendered; the cycle's exec-price confirm reads it).
       ...(contractBook ? { contractBook } : {}),
@@ -596,6 +603,25 @@ export class SentinelTickSource implements TickSource {
       // The spike window needs only the last few minutes.
       contractBars: cBars.slice(-10),
     };
+  }
+
+  /**
+   * CATASTROPHE FLOOR: the underlying's 15-minute noise unit (MinuteBarsReader.n15 — candles_1m rolled up to
+   * 15-minute buckets in SQL, cached 60 s per instrument; DB only, never a broker call). The SAME instrument the
+   * 1-minute unit and underlyingLtp are read from. Null when unresolvable, unread or the read failed — never throws.
+   */
+  private async underlyingN15(underlying: Underlying): Promise<number | null> {
+    if (typeof this.minuteBars?.n15 !== 'function' || !underlying.token || !underlying.exchange) return null;
+    try {
+      const r = await this.minuteBars.n15(
+        { exchange: underlying.exchange, token: underlying.token, symbol: underlying.contract ?? underlying.name ?? underlying.token },
+        new Date(),
+      );
+      const n = r?.n;
+      return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : null;
+    } catch {
+      return null;
+    }
   }
 
   /**

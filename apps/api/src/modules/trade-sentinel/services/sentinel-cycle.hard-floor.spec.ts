@@ -270,6 +270,41 @@ describe('SentinelCycleService — noise-aware HARD_LOSS_EXIT (prod 2026-11-04 N
     expect(rows[0].reason).toMatch(/the underlying's move is unmeasurable, so the plain rule applies/);
   });
 
+  describe('catastrophe floor on (HARD_LOSS_CEILING_BY_CLASS, 2026-11-25): the band reads N15 up to the class ceiling', () => {
+    const TABLE = { HARD_LOSS_CEILING_BY_CLASS: 'INDEX_OPT:5000,STOCK_OPT:5000,GOLD:7500,SILVER:7500,MCX:5000' };
+    const twice = (hms: [string, string], r: TickReading): Array<[string, TickReading]> => [[hms[0], r], [hms[1], r]];
+
+    it('NIFTY 3.05 N1 but only 1.09 N15 against at −₹2.3k ⇒ HELD (the 1-minute unit would have sold)', async () => {
+      expect(await run(TABLE, twice(['11:20:00', '11:20:30'], nifty(140, 23845, { underlyingN15: 30 })))).toHaveLength(0);
+    });
+
+    it('≥ 3 N15 against ⇒ exits, naming the 15-minute unit', async () => {
+      const rows = await run(TABLE, twice(['11:20:00', '11:20:30'], nifty(140, 23903, { underlyingN15: 30 })));
+      expect(rows).toHaveLength(1);
+      expect(rows[0].reason).toMatch(/MAX_LOSS: net ₹-2\d{3} is past the hard loss exit of ₹2000 and the underlying 23903 is 90.75 \(3.03 N15\) against the position from entry \(≥ 3 N15, HARD_LOSS_NOISE_N\)/);
+    });
+
+    it('fail safe: N15 not read ⇒ BAND_UNMEASURED, the plain ₹2k exit (never N1, never held to the ceiling)', async () => {
+      const rows = await run(TABLE, twice(['11:19:00', '11:19:30'], nifty(142.1, 23834.1)));
+      expect(rows).toHaveLength(1);
+      expect(rows[0].reason).toMatch(/reached the hard loss exit of ₹2000 \(HARD_LOSS_EXIT_RUPEES; the underlying's move is unmeasurable, so the plain rule applies\)/);
+      expect(await run(TABLE, twice(['11:19:00', '11:19:30'], nifty(142.1, 23834.1, { underlyingN15: null })))).toHaveLength(1);
+    });
+
+    it('the old ₹3,000 cap no longer sells an index option inside noise; the ₹5,000 ceiling does', async () => {
+      expect(await run(TABLE, twice(['11:21:00', '11:21:30'], nifty(135.5, 23830, { underlyingN15: 30 })))).toHaveLength(0);
+      const rows = await run(TABLE, twice(['11:22:00', '11:22:30'], nifty(120, 23830, { underlyingN15: 30 })));
+      expect(rows).toHaveLength(1);
+      expect(rows[0].reason).toMatch(/MAX_LOSS: net ₹-5\d{3} reached the absolute hard loss cap of ₹5000 \(HARD_LOSS_CEILING_BY_CLASS\)/);
+    });
+
+    it('table off: a tick carrying underlyingN15 is read exactly as today (N1)', async () => {
+      const rows = await run({}, twice(['11:20:00', '11:20:30'], nifty(140, 23845, { underlyingN15: 30 })));
+      expect(rows).toHaveLength(1);
+      expect(rows[0].reason).toMatch(/\(3.05 N\) against the position from entry \(≥ 3 N, HARD_LOSS_NOISE_N\)/);
+    });
+  });
+
   it('a paper trade is untouched (no hard loss rule)', async () => {
     Object.assign(process.env, {});
     const t = makeSvc(parseExitDisciplineConfig({}));

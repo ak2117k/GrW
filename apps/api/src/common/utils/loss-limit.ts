@@ -1,5 +1,7 @@
 import { mcxUnderlyingOf } from '@td/shared';
 import { hardLossConfig } from '../../modules/exit-discipline/hard-floor';
+import { hardLossAbsRupees } from '../../modules/exit-discipline/chart-read';
+import { INDEX_ALIASES } from '../../modules/signal-intake/domain/vocabulary';
 
 /**
  * PER-UNDERLYING HARD LOSS LIMIT (owner 2026-11-04: "GOLD loss limit ₹7.5k"). Pure.
@@ -55,9 +57,119 @@ function underlyingKey(underlying: string | null | undefined): string | null {
   return mcxUnderlyingOf(s) ?? s;
 }
 
-export function lossLimitFor(underlying: string | null, env: Env = process.env): LossLimit {
+/**
+ * CATASTROPHE FLOOR — PER-CLASS CEILINGS (owner 2026-11-25, desk spec §5.3). Pure.
+ *
+ * The flat ₹2,000 loss exit sells instruments whose ordinary 15-minute swing is worth more than ₹2,000. With
+ * the table on, a listed class keeps limit = HARD_LOSS_EXIT_RUPEES (₹2,000) and gets cap = its ceiling, so
+ * hard-floor.ts's noise band is on: between −limit and −ceiling the trade exits only once the underlying is
+ * HARD_LOSS_NOISE_N (3) × its 15-MINUTE noise unit (N15, see hardLossNoiseUnit) against it; at −ceiling it exits
+ * unconditionally. This replaces, for a listed class, both HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING (GOLD's plain
+ * ₹7,500) and the trade-value stops of lossLimitForTrade.
+ *
+ *   HARD_LOSS_CEILING_BY_CLASS  `INDEX_OPT:5000,STOCK_OPT:5000,GOLD:7500,SILVER:7500,MCX:5000`.
+ *                               Unset / blank / `off` = no table = today's behaviour, exactly. Junk entries
+ *                               (unknown class, OTHER, non-positive / non-numeric value, wrong shape) are
+ *                               ignored, valid ones kept; no valid entry = no table. A class not listed keeps
+ *                               today's figures. A bad table can only fall back to today's figures — never "no cap".
+ *
+ * HARD_LOSS_EXIT_RUPEES stays the master switch (unset ⇒ limit null everywhere). The entry risk check
+ * (signal-trader gate riskCapFor) does not read this table: widening the exit floor never lets bigger trades in.
+ */
+export const CEILING_CLASSES = ['INDEX_OPT', 'STOCK_OPT', 'GOLD', 'SILVER', 'MCX'] as const;
+export type CeilingClass = (typeof CEILING_CLASSES)[number];
+export type InstrumentClass = CeilingClass | 'OTHER';
+
+/** `CLASS:rupees,...` → { CLASS: rupees }. Unset / blank / `off` → {}. Junk entries dropped. */
+export function parseCeilingByClass(raw: string | undefined): Partial<Record<CeilingClass, number>> {
+  const s = String(raw ?? '').trim();
+  if (s === '' || s.toLowerCase() === 'off') return {};
+  const out: Partial<Record<CeilingClass, number>> = {};
+  for (const part of s.split(',')) {
+    const bits = part.split(':');
+    if (bits.length !== 2) continue;
+    const name = bits[0].trim().toUpperCase() as CeilingClass;
+    const v = bits[1].trim();
+    const n = v === '' ? NaN : Number(v);
+    if (!CEILING_CLASSES.includes(name) || !Number.isFinite(n) || n <= 0) continue;
+    out[name] = n;
+  }
+  return out;
+}
+
+/** True when HARD_LOSS_CEILING_BY_CLASS holds at least one valid entry. */
+export function ceilingTableOn(env: Env = process.env): boolean {
+  return Object.keys(parseCeilingByClass(env.HARD_LOSS_CEILING_BY_CLASS)).length > 0;
+}
+
+/** Index underlyings with listed derivatives (signal-intake vocabulary INDEX_ALIASES keys), longest first. */
+const INDEX_NAMES_LONGEST_FIRST = Object.keys(INDEX_ALIASES).sort((a, b) => b.length - a.length);
+const isIndexName = (s: string): boolean =>
+  INDEX_NAMES_LONGEST_FIRST.some((name) => {
+    if (!s.startsWith(name)) return false;
+    const next = s.charAt(name.length);
+    return next === '' || (next >= '0' && next <= '9');
+  });
+
+/**
+ * The ceiling class of a tradingsymbol (or underlying name) on an exchange.
+ *  - MCX: GOLD and GOLDM ⇒ GOLD, SILVER and SILVERM ⇒ SILVER (the minis count as their metal HERE, unlike
+ *    HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING's exact names); every other MCX name (GOLDGUINEA, CRUDEOIL, …) ⇒ MCX.
+ *  - NFO / BFO: an index name (INDEX_ALIASES keys) followed by a digit or nothing ⇒ INDEX_OPT, else STOCK_OPT.
+ *    Futures on those exchanges classify by the same rule.
+ *  - Exchange unknown (null / blank): an MCX name or an index name is still classified; anything else ⇒ OTHER.
+ *  - Anything else (cash NSE / BSE, empty symbol) ⇒ OTHER, which is never in the table (today's figures).
+ */
+export function instrumentClass(symbol: string | null | undefined, exchange: string | null | undefined): InstrumentClass {
+  const s = String(symbol ?? '').trim().toUpperCase();
+  if (!s) return 'OTHER';
+  const ex = String(exchange ?? '').trim().toUpperCase();
+  const mcx = mcxUnderlyingOf(s);
+  if (ex === 'MCX' || (ex === '' && mcx !== null)) {
+    if (mcx === 'GOLD' || mcx === 'GOLDM') return 'GOLD';
+    if (mcx === 'SILVER' || mcx === 'SILVERM') return 'SILVER';
+    return 'MCX';
+  }
+  const fno = ex === 'NFO' || ex === 'BFO';
+  if ((fno || ex === '') && isIndexName(s)) return 'INDEX_OPT';
+  return fno ? 'STOCK_OPT' : 'OTHER';
+}
+
+/** The class ceiling in rupees when the table is on and lists this position's class; else null (today's figures). */
+export function classCeilingFor(symbol: string | null | undefined, exchange: string | null | undefined, env: Env = process.env): number | null {
+  const cls = instrumentClass(symbol, exchange);
+  if (cls === 'OTHER') return null;
+  return parseCeilingByClass(env.HARD_LOSS_CEILING_BY_CLASS)[cls] ?? null;
+}
+
+/**
+ * The noise unit the hard-loss band measures the underlying's move in. Table off ⇒ `n1` (the 1-minute unit,
+ * exactly as before 2026-11-25). Table on ⇒ `n15` (ATR14 of the underlying's 15-minute session bars) — and a
+ * missing N15 stays missing (null ⇒ hardLossReading's BAND_UNMEASURED: exit at the limit), never N1.
+ */
+export function hardLossNoiseUnit(env: Env, n1: number | null | undefined, n15: number | null | undefined): number | null {
+  return ceilingTableOn(env) ? (n15 ?? null) : (n1 ?? null);
+}
+
+/**
+ * The loss at which the loss-side chart check (exit-gate chart-confirm) stops holding: HARD_LOSS_ABS_RUPEES
+ * (chart-read.ts, prod ₹3,500) today; with the table on and the class listed, the class ceiling — the chart
+ * may hold to the ceiling, never past it.
+ */
+export function chartAbsLossRupees(symbol: string | null | undefined, exchange: string | null | undefined, env: Env = process.env): number {
+  return classCeilingFor(symbol, exchange, env) ?? hardLossAbsRupees(env);
+}
+
+/** `exchange` is optional (positional before `env`); without it the class is inferred from the name (instrumentClass). */
+export function lossLimitFor(underlying: string | null, env?: Env): LossLimit;
+export function lossLimitFor(underlying: string | null, exchange: string | null | undefined, env?: Env): LossLimit;
+export function lossLimitFor(underlying: string | null, a?: Env | string | null, b?: Env): LossLimit {
+  const [exchange, env] = typeof a === 'object' && a !== null ? [null, a] : [a ?? null, b ?? process.env];
   // The defaults are hard-floor.ts's own parse (one source of truth for HARD_LOSS_EXIT_RUPEES / _CAP_RUPEES).
   const { limit, cap } = hardLossConfig(env);
+  // Catastrophe floor (2026-11-25): a listed class keeps the ₹limit and gets its ceiling as the cap (band on).
+  const ceiling = classCeilingFor(underlying, exchange, env);
+  if (ceiling !== null) return { limit, cap: ceiling };
   const key = underlyingKey(underlying);
   const listed = key !== null ? parseLossLimitsByUnderlying(env.HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING)[key] : undefined;
   if (listed !== undefined) return { limit: limit === null ? null : listed, cap: listed };
@@ -81,8 +193,13 @@ function positive(raw: string | undefined, fallback: number): number {
  * stops: limit = cap, so no noise band. A listed underlying (GOLD) keeps its figure. A stock with no usable value
  * falls back to lossLimitFor, as does HARD_LOSS_BY_TRADE_VALUE=off (the rollback).
  */
-export function lossLimitForTrade(symbol: string, tradeValue: number | null | undefined, env: Env = process.env): LossLimit {
-  const base = lossLimitFor(symbol, env);
+export function lossLimitForTrade(symbol: string, tradeValue: number | null | undefined, env?: Env): LossLimit;
+export function lossLimitForTrade(symbol: string, tradeValue: number | null | undefined, exchange: string | null | undefined, env?: Env): LossLimit;
+export function lossLimitForTrade(symbol: string, tradeValue: number | null | undefined, a?: Env | string | null, b?: Env): LossLimit {
+  const [exchange, env] = typeof a === 'object' && a !== null ? [null, a] : [a ?? null, b ?? process.env];
+  // Catastrophe floor (2026-11-25): a class listed in HARD_LOSS_CEILING_BY_CLASS replaces the trade-value stops.
+  if (classCeilingFor(symbol, exchange, env) !== null) return lossLimitFor(symbol, exchange, env);
+  const base = lossLimitFor(symbol, exchange, env);
   if (base.limit === null || String(env.HARD_LOSS_BY_TRADE_VALUE ?? '').trim().toLowerCase() === 'off') return base;
   const key = underlyingKey(symbol);
   if (key !== null && parseLossLimitsByUnderlying(env.HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING)[key] !== undefined) return base;

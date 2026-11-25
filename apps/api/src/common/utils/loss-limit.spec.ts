@@ -1,5 +1,8 @@
-import { lossLimitFor, lossLimitForTrade, parseLossLimitsByUnderlying } from './loss-limit';
-import { hardLossConfig, hardLossReading, hardLossTrip } from '../../modules/exit-discipline/hard-floor';
+import {
+  ceilingTableOn, chartAbsLossRupees, hardLossNoiseUnit, instrumentClass, lossLimitFor, lossLimitForTrade, parseCeilingByClass, parseLossLimitsByUnderlying,
+} from './loss-limit';
+import { hardLossBandOn, hardLossConfig, hardLossReading, hardLossTrip } from '../../modules/exit-discipline/hard-floor';
+import { riskCapFor } from '../../modules/signal-trader/domain/gate';
 
 describe('lossLimitFor (HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING, 2026-11-04)', () => {
   const ENV = { HARD_LOSS_EXIT_RUPEES: '2000' };
@@ -127,5 +130,122 @@ describe('lossLimitForTrade: the hard rupee stop by trade value (owner 2026-11-0
   it('with the master switch off nothing exits', () => {
     expect(lossLimitForTrade('NIFTY09NOV2625100PE', 13_000, {}).limit).toBeNull();
     expect(lossLimitForTrade('LAURUSLABS23NOV262360CE', 44_519, {}).limit).toBeNull();
+  });
+});
+
+describe('per-class catastrophe ceilings (HARD_LOSS_CEILING_BY_CLASS, owner 2026-11-25)', () => {
+  const ENV = { HARD_LOSS_EXIT_RUPEES: '2000' };
+  const TABLE = 'INDEX_OPT:5000,STOCK_OPT:5000,GOLD:7500,SILVER:7500,MCX:5000';
+  const ON = { ...ENV, HARD_LOSS_CEILING_BY_CLASS: TABLE };
+
+  it('instrumentClass: index / stock options by exchange, GOLD / SILVER (incl. the minis) / other MCX, else OTHER', () => {
+    expect(instrumentClass('NIFTY09NOV2623750PE', 'NFO')).toBe('INDEX_OPT');
+    expect(instrumentClass('BANKNIFTY25NOV2659000CE', 'NFO')).toBe('INDEX_OPT');
+    expect(instrumentClass('NIFTYNXT5025NOV2670000CE', 'NFO')).toBe('INDEX_OPT');
+    expect(instrumentClass('SENSEX13NOV2678600CE', 'BFO')).toBe('INDEX_OPT');
+    expect(instrumentClass('SBIN23NOV261020CE', 'NFO')).toBe('STOCK_OPT');
+    expect(instrumentClass('NIFTYBEES', 'NSE')).toBe('OTHER');
+    expect(instrumentClass('GOLD27NOV26125000PE', 'MCX')).toBe('GOLD');
+    expect(instrumentClass('GOLDM05DEC26FUT', 'MCX')).toBe('GOLD');
+    expect(instrumentClass('SILVER05DEC26FUT', 'MCX')).toBe('SILVER');
+    expect(instrumentClass('SILVERM27FEB26FUT', 'mcx')).toBe('SILVER');
+    expect(instrumentClass('GOLDGUINEA28NOV26FUT', 'MCX')).toBe('MCX');
+    expect(instrumentClass('CRUDEOILM17NOV269350PE', 'MCX')).toBe('MCX');
+    expect(instrumentClass('NATURALGAS25NOV26300CE', 'MCX')).toBe('MCX');
+    expect(instrumentClass('SBIN-EQ', 'NSE')).toBe('OTHER');
+    expect(instrumentClass('', 'NFO')).toBe('OTHER');
+  });
+
+  it('instrumentClass without an exchange: MCX names and index names are still known, anything else is OTHER', () => {
+    expect(instrumentClass('GOLD27NOV26125000PE', null)).toBe('GOLD');
+    expect(instrumentClass('NIFTY09NOV2623750PE', '')).toBe('INDEX_OPT');
+    expect(instrumentClass('SBIN23NOV261020CE', undefined)).toBe('OTHER');
+    expect(instrumentClass('GOLDBEES', null)).toBe('OTHER');
+  });
+
+  it('parse: unset / blank / off = no table; junk entries ignored, valid kept; unknown classes and OTHER are junk', () => {
+    expect(parseCeilingByClass(undefined)).toEqual({});
+    expect(parseCeilingByClass('  ')).toEqual({});
+    expect(parseCeilingByClass('OFF')).toEqual({});
+    expect(parseCeilingByClass(TABLE)).toEqual({ INDEX_OPT: 5000, STOCK_OPT: 5000, GOLD: 7500, SILVER: 7500, MCX: 5000 });
+    expect(parseCeilingByClass('index_opt:5000, GOLD:abc,MCX:-1,OTHER:9000,FOO:5000,SILVER:0,STOCK_OPT:5000:1,:5000')).toEqual({ INDEX_OPT: 5000 });
+    expect(ceilingTableOn({ HARD_LOSS_CEILING_BY_CLASS: 'GOLD:x,FOO:1' })).toBe(false);
+    expect(ceilingTableOn(ON)).toBe(true);
+  });
+
+  it("table unset → today's limit / cap, exactly", () => {
+    expect(lossLimitFor('NIFTY09NOV2623750PE', 'NFO', ENV)).toEqual({ limit: 2000, cap: 3000 });
+    expect(lossLimitFor('GOLD27NOV26125000PE', 'MCX', ENV)).toEqual({ limit: 7500, cap: 7500 });
+    expect(lossLimitForTrade('NIFTY09NOV2625100PE', 13_000, 'NFO', ENV)).toEqual({ limit: 2000, cap: 2000 });
+    expect(lossLimitForTrade('LAURUSLABS23NOV262360CE', 44_519, 'NFO', ENV)).toEqual({ limit: 3000, cap: 3000 });
+    expect(lossLimitForTrade('GOLD27NOV26125000PE', 90_000, 'MCX', ENV)).toEqual({ limit: 7500, cap: 7500 });
+    expect(lossLimitForTrade('NIFTY09NOV2625100PE', 13_000, 'NFO', { ...ENV, HARD_LOSS_CEILING_BY_CLASS: 'off' })).toEqual({ limit: 2000, cap: 2000 });
+  });
+
+  it('INDEX_OPT NIFTY…CE → {limit 2000, cap 5000} with the noise band on', () => {
+    expect(lossLimitFor('NIFTY25NOV2623750CE', 'NFO', ON)).toEqual({ limit: 2000, cap: 5000 });
+    const lim = lossLimitForTrade('NIFTY25NOV2623750CE', 13_000, 'NFO', ON);
+    expect(lim).toEqual({ limit: 2000, cap: 5000 });
+    const cfg = hardLossConfig(ON, lim);
+    expect(cfg).toEqual({ limit: 2000, cap: 5000, noiseN: 3 });
+    expect(hardLossBandOn(cfg)).toBe(true);
+  });
+
+  it("GOLD option → {2000, 7500} with the band on (not today's plain 7500); SILVER / STOCK_OPT / other MCX get their ceilings", () => {
+    const gold = lossLimitForTrade('GOLD27NOV26125000PE', 90_000, 'MCX', ON);
+    expect(gold).toEqual({ limit: 2000, cap: 7500 });
+    expect(hardLossBandOn(hardLossConfig(ON, gold))).toBe(true);
+    expect(lossLimitForTrade('SILVERM27FEB26100000CE', 20_000, 'MCX', ON)).toEqual({ limit: 2000, cap: 7500 });
+    expect(lossLimitForTrade('LAURUSLABS23NOV262360CE', 44_519, 'NFO', ON)).toEqual({ limit: 2000, cap: 5000 });
+    expect(lossLimitForTrade('CRUDEOILM17NOV269350PE', 7_000, 'MCX', ON)).toEqual({ limit: 2000, cap: 5000 });
+  });
+
+  it("a class missing from the table keeps today's figures; OTHER always does", () => {
+    const only = { ...ENV, HARD_LOSS_CEILING_BY_CLASS: 'INDEX_OPT:5000' };
+    expect(lossLimitForTrade('GOLD27NOV26125000PE', 90_000, 'MCX', only)).toEqual({ limit: 7500, cap: 7500 });
+    expect(lossLimitForTrade('SBIN23NOV261020CE', 24_999, 'NFO', only)).toEqual({ limit: 2000, cap: 2000 });
+    expect(lossLimitFor('SBIN-EQ', 'NSE', ON)).toEqual({ limit: 2000, cap: 3000 });
+  });
+
+  it("junk table → today's figures (never \"no cap\")", () => {
+    const junk = { ...ENV, HARD_LOSS_CEILING_BY_CLASS: 'INDEX_OPT:abc,GOLD:-5,FOO:5000,MCX:' };
+    expect(lossLimitForTrade('NIFTY09NOV2625100PE', 13_000, 'NFO', junk)).toEqual({ limit: 2000, cap: 2000 });
+    expect(lossLimitForTrade('GOLD27NOV26125000PE', 90_000, 'MCX', junk)).toEqual({ limit: 7500, cap: 7500 });
+    expect(lossLimitFor('NIFTY09NOV2625100PE', 'NFO', junk)).toEqual({ limit: 2000, cap: 3000 });
+  });
+
+  it('the master switch stays HARD_LOSS_EXIT_RUPEES: unset ⇒ limit null for every class', () => {
+    expect(lossLimitForTrade('NIFTY09NOV2625100PE', 13_000, 'NFO', { HARD_LOSS_CEILING_BY_CLASS: TABLE }).limit).toBeNull();
+  });
+
+  it('loss −5,000 on INDEX_OPT → CAP, whatever the underlying did', () => {
+    const cfg = hardLossConfig(ON, lossLimitForTrade('NIFTY25NOV2623750CE', 13_000, 'NFO', ON));
+    const base = { cfg, exposure: 'BULLISH' as const, underlying: 23800, entryUnderlying: 23800, bestUnderlying: 23800, nUnderlying: 40 };
+    expect(hardLossReading({ ...base, netPnl: -5000 })).toMatchObject({ trip: true, band: 'CAP', cap: 5000 });
+    expect(hardLossReading({ ...base, netPnl: -4999 })).toMatchObject({ trip: false, band: 'HOLD_UNDER_N' });
+  });
+
+  it("the band's noise unit: N15 with the table on (null stays null — never N1), N1 with it off", () => {
+    expect(hardLossNoiseUnit(ENV, 10.73, 31.5)).toBe(10.73);
+    expect(hardLossNoiseUnit(ON, 10.73, 31.5)).toBe(31.5);
+    expect(hardLossNoiseUnit(ON, 10.73, null)).toBeNull();
+    expect(hardLossNoiseUnit(ON, 10.73, undefined)).toBeNull();
+  });
+
+  it('entry gate riskCapFor is unchanged with the table on', () => {
+    for (const env of [ENV, ON]) {
+      expect(riskCapFor('NIFTY', 'NIFTY25NOV2623750CE', 2000, env)).toBe(2000);
+      expect(riskCapFor('GOLD', 'GOLD27NOV26125000PE', 2000, env)).toBe(7500);
+      expect(riskCapFor('SBIN', 'SBIN23NOV261020CE', 2000, env)).toBe(2000);
+      expect(riskCapFor('CRUDEOIL', 'CRUDEOILM17NOV269350PE', 2000, env)).toBe(2000);
+    }
+  });
+
+  it('chart hold ceiling: HARD_LOSS_ABS_RUPEES with the table off; the class ceiling with it on', () => {
+    expect(chartAbsLossRupees('NIFTY25NOV2623750CE', 'NFO', { ...ENV, HARD_LOSS_ABS_RUPEES: '3500' })).toBe(3500);
+    expect(chartAbsLossRupees('NIFTY25NOV2623750CE', 'NFO', ENV)).toBe(3500);
+    expect(chartAbsLossRupees('NIFTY25NOV2623750CE', 'NFO', { ...ON, HARD_LOSS_ABS_RUPEES: '3500' })).toBe(5000);
+    expect(chartAbsLossRupees('GOLD27NOV26125000PE', 'MCX', { ...ON, HARD_LOSS_ABS_RUPEES: '3500' })).toBe(7500);
+    expect(chartAbsLossRupees('SBIN-EQ', 'NSE', { ...ON, HARD_LOSS_ABS_RUPEES: '3500' })).toBe(3500);
   });
 });

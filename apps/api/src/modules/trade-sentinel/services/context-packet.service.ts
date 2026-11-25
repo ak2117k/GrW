@@ -454,6 +454,13 @@ export interface TickSnapshot {
    */
   entryUnderlying?: number | null;
   /**
+   * CATASTROPHE FLOOR (HARD_LOSS_CEILING_BY_CLASS, 2026-11-25): the underlying's 15-minute noise unit (N15 =
+   * ATR14 of its 15-minute session bars, sentinel-executor N15Reader), the unit the hard-loss band is measured in
+   * while the table is on. Set by the tick source ONLY with the table on (absent otherwise — byte-identical);
+   * null when it could not be read (the band then fails safe: BAND_UNMEASURED). Never rendered.
+   */
+  underlyingN15?: number | null;
+  /**
    * EXECUTABLE-PRICE CONFIRM (exit-discipline/exec-price-confirm.ts): the contract's best bid / ask and day
    * volume from the SAME hub price `ltp` came from (SNAP_QUOTE depth), with its receipt time. Set by the tick
    * source only when the hub priced the contract; absent otherwise. Read by the cycle's hard-floor / ladder

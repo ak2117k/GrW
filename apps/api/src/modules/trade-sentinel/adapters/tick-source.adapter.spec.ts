@@ -919,9 +919,9 @@ describe('SentinelTickSource', () => {
           Array.from({ length: n }, (_, i) => ({ ts: T0 + i * 60_000, open: base, high: base + w / 2, low: base - w / 2, close: base }));
         const ON = parseExitDisciplineConfig({});
         const OFF = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });
-        const setup = (discipline: unknown, withReader = true) => {
+        const setup = (discipline: unknown, withReader = true, n15?: jest.Mock) => {
           const recent = jest.fn(async (ref: { token: string }) => (ref.token === '5001' ? bars(20, 4, 210) : bars(20, 10, 8875)));
-          const t = make({ minuteBars: withReader ? { recent } : undefined, discipline });
+          const t = make({ minuteBars: withReader ? { recent, ...(n15 ? { n15 } : {}) } : undefined, discipline });
           t.findUnique.mockResolvedValue(crudeOption());
           t.getInstrumentByToken.mockResolvedValue({ name: 'CRUDEOIL', expiry: null });
           t.getNearestFuture.mockResolvedValue({ token: '472789', symbol: 'CRUDEOIL19OCT26FUT', exchange: 'MCX' });
@@ -958,6 +958,41 @@ describe('SentinelTickSource', () => {
         it('no reader wired ⇒ tick.noise null', async () => {
           const t = setup(ON, false);
           expect((await t.svc.tickFor('t1')).noise).toBeNull();
+        });
+
+        describe('catastrophe floor (HARD_LOSS_CEILING_BY_CLASS): the underlying N15 for the hard-loss band', () => {
+          const saved = process.env.HARD_LOSS_CEILING_BY_CLASS;
+          afterEach(() => {
+            if (saved === undefined) delete process.env.HARD_LOSS_CEILING_BY_CLASS;
+            else process.env.HARD_LOSS_CEILING_BY_CLASS = saved;
+          });
+          it('table on: reads N15 of the resolved underlying future and carries it as underlyingN15', async () => {
+            process.env.HARD_LOSS_CEILING_BY_CLASS = 'MCX:5000';
+            const n15 = jest.fn().mockResolvedValue({ n: 31.5, bars: 14 });
+            const t = setup(ON, true, n15);
+            const tick = await t.svc.tickFor('t1');
+            expect(n15).toHaveBeenCalledWith(expect.objectContaining({ exchange: 'MCX', token: '472789' }), expect.any(Date));
+            expect(tick.underlyingN15).toBe(31.5);
+          });
+
+          it('table on, N15 unreadable ⇒ underlyingN15 null (the band then fails safe)', async () => {
+            process.env.HARD_LOSS_CEILING_BY_CLASS = 'MCX:5000';
+            const n15 = jest.fn().mockResolvedValue(null);
+            expect((await setup(ON, true, n15).svc.tickFor('t1')).underlyingN15).toBeNull();
+            const throws = jest.fn().mockRejectedValue(new Error('db down'));
+            expect((await setup(ON, true, throws).svc.tickFor('t1')).underlyingN15).toBeNull();
+          });
+
+          it('table off / junk: no N15 read and no underlyingN15 on the tick (byte-identical)', async () => {
+            for (const v of [undefined, 'off', 'FOO:1']) {
+              if (v === undefined) delete process.env.HARD_LOSS_CEILING_BY_CLASS;
+              else process.env.HARD_LOSS_CEILING_BY_CLASS = v;
+              const n15 = jest.fn().mockResolvedValue({ n: 31.5, bars: 14 });
+              const tick = await setup(ON, true, n15).svc.tickFor('t1');
+              expect(n15).not.toHaveBeenCalled();
+              expect(tick).not.toHaveProperty('underlyingN15');
+            }
+          });
         });
       });
     });

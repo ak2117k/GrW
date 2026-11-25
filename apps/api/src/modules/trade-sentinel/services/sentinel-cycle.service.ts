@@ -65,7 +65,7 @@ import {
 } from '../../exit-discipline/exec-price-confirm';
 import { EMPTY_SPIKE, solveCycleSpike, type SpikeMemory } from './cycle-spike';
 import { exposureOf } from '../../exit-discipline/exposure';
-import { lossLimitForTrade } from '../../../common/utils/loss-limit';
+import { ceilingTableOn, classCeilingFor, hardLossNoiseUnit, lossLimitForTrade } from '../../../common/utils/loss-limit';
 import { defaultLadderStop, ladderReading, ladderTargets, parseProfitLockConfig, profitLockMinMove, type LadderReading, type PacketLadder } from '../../exit-discipline/target-ladder';
 import { LADDER_PLANS, type LadderPlan, type LadderPlanReader } from '../ports/ladder-plans.port';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
@@ -1348,10 +1348,13 @@ export class SentinelCycleService {
    */
   private hardLossFor(entry: RosterEntry, state: TrackerState, tick: TickReading, now: Date): { reading: HardFloorReading; floor: number; netPnl: number } | null {
     // Per-underlying limit (2026-11-04 owner: GOLD ₹7,500) — the same source the exit gate's HARD_MAX_LOSS reads.
-    const cfg = hardLossConfig(process.env, lossLimitForTrade(entry.symbol, tick.entryPrice * Math.abs(tick.qty) * valueFactorOf(entry)));
+    // Catastrophe floor (2026-11-25): with HARD_LOSS_CEILING_BY_CLASS on, a listed class gets its ceiling as the cap.
+    const cfg = hardLossConfig(process.env, lossLimitForTrade(entry.symbol, tick.entryPrice * Math.abs(tick.qty) * valueFactorOf(entry), entry.exchange));
     if (cfg.limit === null || entry.ownership !== 'SENTINEL' || isPaperTracker(entry.trackerId) || !isDerivativeSegment(tick.segment)) return null;
     const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side, valueFactor: valueFactorOf(entry) });
     const hold = this.gateCfg?.hold ?? this.futileCfg?.hold;
+    // The band's unit: N1 today; N15 with the table on (a missing N15 ⇒ BAND_UNMEASURED, never N1).
+    const nUnit = ceilingTableOn(process.env) ? 'N15' : 'N';
     const loss = hardLossReading({
       netPnl: green.netPnl,
       cfg,
@@ -1359,7 +1362,7 @@ export class SentinelCycleService {
       underlying: tick.underlyingLtp,
       entryUnderlying: tick.entryUnderlying ?? null,
       bestUnderlying: tick.anchors?.best?.underlying ?? null,
-      nUnderlying: tick.noise?.underlying1m?.n ?? null,
+      nUnderlying: hardLossNoiseUnit(process.env, tick.noise?.underlying1m?.n, tick.underlyingN15),
       // The classifier plug (NoiseOpinion): nothing supplies one yet ⇒ the N test.
       noise: null,
     });
@@ -1368,8 +1371,8 @@ export class SentinelCycleService {
         state.hardLossHeldLoggedAt = now.getTime();
         this.logger.warn(
           `[hard-loss] HELD in the noise band — ${entry.symbol} (tracker ${entry.trackerId}): net ₹${Math.round(green.netPnl)} ≤ −₹${cfg.limit} ` +
-            `but the underlying is ${loss.adverse} (${loss.adverseN} N) against from ${loss.ref === 'ENTRY' ? 'entry' : 'the best point'} ` +
-            `(< ${cfg.noiseN} N); exits at −₹${cfg.cap} regardless`,
+            `but the underlying is ${loss.adverse} (${loss.adverseN} ${nUnit}) against from ${loss.ref === 'ENTRY' ? 'entry' : 'the best point'} ` +
+            `(< ${cfg.noiseN} ${nUnit}); exits at −₹${cfg.cap} regardless`,
         );
       }
     }
@@ -1399,7 +1402,7 @@ export class SentinelCycleService {
       const q = await withTimeout(this.ticks.quickPrice(entry.trackerId), QUICK_PRICE_TIMEOUT_MS, () => new Error('quick price read timed out'));
       if (!isDerivativeSegment(q.segment)) return;
       const vf = valueFactorOf(entry);
-      const cfg = hardLossConfig(process.env, lossLimitForTrade(entry.symbol, q.entryPrice * Math.abs(q.qty) * vf));
+      const cfg = hardLossConfig(process.env, lossLimitForTrade(entry.symbol, q.entryPrice * Math.abs(q.qty) * vf, entry.exchange));
       if (cfg.limit === null) return;
       const green = computeGreenFloor({ segment: q.segment, entryPrice: q.entryPrice, ltp: q.ltp, qty: q.qty, side: q.side, valueFactor: vf });
       const loss = hardLossReading({
@@ -1536,12 +1539,13 @@ export class SentinelCycleService {
         : Promise.resolve(null);
     const from = tick.anchors?.best;
     const loss = r.loss;
+    const nUnit = ceilingTableOn(process.env) ? 'N15' : 'N';
     const detail =
       r.rule === 'MAX_LOSS'
         ? loss?.band === 'CAP'
-          ? `net ₹${Math.round(hard.netPnl)} reached the absolute hard loss cap of ₹${-hard.floor} (HARD_LOSS_CAP_RUPEES)`
+          ? `net ₹${Math.round(hard.netPnl)} reached the absolute hard loss cap of ₹${-hard.floor} (${classCeilingFor(entry.symbol, entry.exchange, process.env) !== null ? 'HARD_LOSS_CEILING_BY_CLASS' : 'HARD_LOSS_CAP_RUPEES'})`
           : loss?.band === 'BAND_UNDERLYING'
-          ? `net ₹${Math.round(hard.netPnl)} is past the hard loss exit of ₹${-hard.floor} and the underlying ${tick.underlyingLtp} is ${loss.adverse} (${loss.adverseN} N) against the position from ${loss.ref === 'ENTRY' ? 'entry' : 'its best point'} (≥ ${loss.noiseN} N, HARD_LOSS_NOISE_N)`
+          ? `net ₹${Math.round(hard.netPnl)} is past the hard loss exit of ₹${-hard.floor} and the underlying ${tick.underlyingLtp} is ${loss.adverse} (${loss.adverseN} ${nUnit}) against the position from ${loss.ref === 'ENTRY' ? 'entry' : 'its best point'} (≥ ${loss.noiseN} ${nUnit}, HARD_LOSS_NOISE_N)`
           : loss?.band === 'BAND_UNMEASURED'
           ? `net ₹${Math.round(hard.netPnl)} reached the hard loss exit of ₹${-hard.floor} (HARD_LOSS_EXIT_RUPEES; the underlying's move is unmeasurable, so the plain rule applies)`
           : `net ₹${Math.round(hard.netPnl)} reached the hard loss exit of ₹${-hard.floor} (HARD_LOSS_EXIT_RUPEES)`

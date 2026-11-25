@@ -32,4 +32,25 @@ describe('MinuteBarsReader', () => {
     await expect(new MinuteBarsReader({ read: jest.fn(async () => []) } as never).closeAt(REF, at)).resolves.toBeNull();
     await expect(new MinuteBarsReader({ read: jest.fn(async () => { throw new Error('db'); }) } as never).closeAt(REF, at)).resolves.toBeNull();
   });
+
+  describe('n15 (catastrophe floor: the underlying 15-minute noise unit)', () => {
+    // 2026-10-14 MCX session bars from 09:00 IST, 15 minutes each, high−low 20, flat closes.
+    const bars = Array.from({ length: 20 }, (_, i) => {
+      const ts = Date.parse('2026-10-14T03:30:00Z') + i * 15 * 60_000;
+      return { ts, open: 9000, high: 9010, low: 8990, close: 9000, volume: 0 };
+    });
+    it('reads 15-minute buckets (origin 09:15 IST) over 5 days, ATR14 of them, cached 60 s', async () => {
+      const readBucketed = jest.fn(async () => bars);
+      const r = new MinuteBarsReader({ read: jest.fn(), readBucketed } as never);
+      await expect(r.n15(REF, NOW)).resolves.toMatchObject({ n: 20, bars: 14, method: 'atr14-15m' });
+      expect(readBucketed).toHaveBeenCalledWith(REF, 15, 555, NOW.getTime() - 5 * 86_400_000, NOW.getTime());
+      await r.n15(REF, new Date(NOW.getTime() + 59_000));
+      expect(readBucketed).toHaveBeenCalledTimes(1);
+    });
+    it('a failed read, too few bars, or a repo without bucketed reads ⇒ null (never throws)', async () => {
+      await expect(new MinuteBarsReader({ read: jest.fn(), readBucketed: jest.fn(async () => { throw new Error('db'); }) } as never).n15(REF, NOW)).resolves.toBeNull();
+      await expect(new MinuteBarsReader({ read: jest.fn(), readBucketed: jest.fn(async () => bars.slice(0, 3)) } as never).n15(REF, NOW)).resolves.toBeNull();
+      await expect(new MinuteBarsReader({ read: jest.fn() } as never).n15(REF, NOW)).resolves.toBeNull();
+    });
+  });
 });

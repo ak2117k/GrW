@@ -93,6 +93,46 @@ describe('ExitGateService', () => {
     });
   });
 
+  describe('catastrophe floor (HARD_LOSS_CEILING_BY_CLASS, 2026-11-25)', () => {
+    const KEYS = ['HARD_LOSS_EXIT_RUPEES', 'HARD_LOSS_CEILING_BY_CLASS', 'HARD_LOSS_ABS_RUPEES', 'EXIT_CHART_CONFIRM'] as const;
+    const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+    afterEach(() => {
+      for (const k of KEYS) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    });
+    const TABLE = 'INDEX_OPT:5000,STOCK_OPT:5000,GOLD:7500,SILVER:7500,MCX:5000';
+
+    it("the gate's per-trade limit for GOLD is the band's ₹2,000 limit with the table on (₹7,500 off)", async () => {
+      process.env.HARD_LOSS_EXIT_RUPEES = '2000';
+      const gold = () => {
+        const t = make();
+        t.repo.maxRiskPerTrade.mockResolvedValue(null as never);
+        return t.svc.load({ ...V, symbol: 'GOLD27NOV26125000PE' } as never, NOW);
+      };
+      expect(await gold()).toMatchObject({ maxLossPerTrade: 7500 });
+      process.env.HARD_LOSS_CEILING_BY_CLASS = TABLE;
+      expect(await gold()).toMatchObject({ maxLossPerTrade: 2000 });
+    });
+
+    it('the loss-side chart check may hold only up to the class ceiling with the table on (HARD_LOSS_ABS_RUPEES off)', async () => {
+      process.env.HARD_LOSS_EXIT_RUPEES = '2000';
+      process.env.HARD_LOSS_ABS_RUPEES = '3500';
+      process.env.EXIT_CHART_CONFIRM = 'act';
+      const red = { ...PACKET, money: { ...PACKET.money, netPnl: -3251, greenFloorPrice: null, greenFloorArmed: false } };
+      const gateAt = async () => {
+        const { repo, clock } = make({ packet: red });
+        const chart = { read: jest.fn().mockResolvedValue({ ref: { exchange: 'MCX', token: '1', symbol: 'CRUDEOIL' }, bars5: [], bars15: [], n15: null }) };
+        const svc = new ExitGateService(repo as never, clock as never, parseExitDisciplineConfig({}), undefined, undefined, undefined, chart as never);
+        return svc.decide(await svc.load(V as never, NOW), { ltpNow: 490, productType: 'CARRYFORWARD', exchange: 'MCX', now: NOW });
+      };
+      expect((await gateAt()).chartGate).toMatchObject({ side: 'loss', absLossRupees: 3500 });
+      process.env.HARD_LOSS_CEILING_BY_CLASS = TABLE;
+      expect((await gateAt()).chartGate).toMatchObject({ side: 'loss', absLossRupees: 5000 });
+    });
+  });
+
   it('a clock without a trading window ⇒ the equity default (375 min), not a failure', async () => {
     const { svc } = make();
     const ctx = await svc.load(V as never, NOW);

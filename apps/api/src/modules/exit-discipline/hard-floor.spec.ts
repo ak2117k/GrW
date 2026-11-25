@@ -3,6 +3,7 @@ import {
   confirmHardFloor, hardFloorReading, hardLossBandOn, hardLossConfig, hardLossLimit, hardLossReading, hardLossTrip, underlyingAgainst, widenExitTrigger,
   type HardFloorInput, type HardLossInput, type TriggerFloorInput,
 } from './hard-floor';
+import { hardLossNoiseUnit, lossLimitForTrade } from '../../common/utils/loss-limit';
 
 /** Long CRUDEOILM 9350 PE (BEARISH exposure: a RISING underlying hurts), 2026-10-29 numbers. */
 const BASE: HardFloorInput = {
@@ -246,6 +247,38 @@ describe('noise-aware hard loss (HARD_LOSS_CAP_RUPEES / HARD_LOSS_NOISE_N, 2026-
     expect(hardLossReading({ ...T1, noise: { verdict: 'REAL', source: 'test' } })).toMatchObject({ trip: true, band: 'BAND_REAL' });
     expect(hardLossReading({ ...T1, underlying: 23860, noise: { verdict: 'NOISE', source: 'test' } })).toMatchObject({ trip: false, band: 'HOLD_NOISE' });
     expect(hardLossReading({ ...T1, noise: { verdict: 'UNKNOWN', source: 'test' } })).toMatchObject({ trip: false, band: 'HOLD_UNDER_N' });
+  });
+});
+
+describe('catastrophe floor: the 3×N15 band up to the class ceiling (HARD_LOSS_CEILING_BY_CLASS, 2026-11-25)', () => {
+  const ON = { HARD_LOSS_EXIT_RUPEES: '2000', HARD_LOSS_CEILING_BY_CLASS: 'INDEX_OPT:5000,STOCK_OPT:5000,GOLD:7500,SILVER:7500,MCX:5000' };
+  const N1 = 10.73;
+  const N15 = 30;
+  /** Long NIFTY PE (BEARISH): a RISING NIFTY hurts. Entry NIFTY 23812.25. */
+  const at = (nAgainst: number, n15: number | null): HardLossInput => ({
+    netPnl: -2500,
+    cfg: hardLossConfig(ON, lossLimitForTrade('NIFTY09NOV2623750PE', 13_000, 'NFO', ON)),
+    exposure: 'BEARISH',
+    underlying: Math.round((23812.25 + nAgainst * N15) * 100) / 100,
+    entryUnderlying: 23812.25,
+    bestUnderlying: 23812.25,
+    nUnderlying: hardLossNoiseUnit(ON, N1, n15),
+  });
+
+  it('loss −2,500, underlying 2.9×N15 against → HOLD_UNDER_N (it is 8.1 N1 — the 1-minute unit would have sold)', () => {
+    expect(hardLossReading(at(2.9, N15))).toMatchObject({ trip: false, band: 'HOLD_UNDER_N', adverseN: 2.9, limit: 2000, cap: 5000, noiseN: 3 });
+  });
+
+  it('3.0×N15 against → BAND_UNDERLYING (exit)', () => {
+    expect(hardLossReading(at(3.0, N15))).toMatchObject({ trip: true, band: 'BAND_UNDERLYING', adverseN: 3 });
+  });
+
+  it('N15 null in the band → BAND_UNMEASURED: exits at the ₹2,000 limit, never holds to the ceiling', () => {
+    expect(hardLossReading(at(0.5, null))).toMatchObject({ trip: true, band: 'BAND_UNMEASURED' });
+  });
+
+  it('at the ceiling it exits unconditionally', () => {
+    expect(hardLossReading({ ...at(0.1, N15), netPnl: -5000 })).toMatchObject({ trip: true, band: 'CAP' });
   });
 });
 

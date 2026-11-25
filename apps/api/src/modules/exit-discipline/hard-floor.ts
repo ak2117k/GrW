@@ -219,6 +219,12 @@ function envNum(raw: string | undefined, fallback: number): number | null {
  * lossLimitFor(symbol) (common/utils/loss-limit.ts — resolved by the caller, this module stays pure:
  * HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING, code default GOLD:7500, `off` = rollback). A listed underlying has
  * limit = cap, so hardLossBandOn is false and it is the plain rule. Absent = the config before 2026-11-04.
+ *
+ * CATASTROPHE FLOOR (owner 2026-11-25): with HARD_LOSS_CEILING_BY_CLASS on, lossLimitFor(symbol, exchange) of a
+ * listed class is { limit: HARD_LOSS_EXIT_RUPEES, cap: the class ceiling } — cap > limit, so the band is ON:
+ * exit between −₹2,000 and −ceiling once the underlying is noiseN × N15 against, at −ceiling unconditionally.
+ * The caller passes N15 as `nUnderlying` then (loss-limit.ts hardLossNoiseUnit). A table that is unset / off /
+ * all junk changes nothing here: the perUnderlying the caller passes is today's.
  */
 export function hardLossConfig(
   env: Record<string, string | undefined> = process.env,
@@ -256,6 +262,10 @@ export interface HardLossInput {
   entryUnderlying: number | null;
   /** The underlying at the position's best point (FloorAnchors.best.underlying) — the fallback reference. */
   bestUnderlying: number | null;
+  /**
+   * The underlying's noise unit the band is measured in: the 1-minute N today; the 15-minute N (N15) with
+   * HARD_LOSS_CEILING_BY_CLASS on (loss-limit.ts hardLossNoiseUnit). Null ⇒ BAND_UNMEASURED (exit at the limit).
+   */
   nUnderlying: number | null;
   /**
    * The decision point's noise opinion (types.ts NoiseOpinion). Honoured ONLY inside the band: REAL ⇒

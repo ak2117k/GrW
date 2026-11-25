@@ -59,6 +59,22 @@ describe('selectVerifiedNotes', () => {
     expect(selectVerifiedNotes(rows, q('NIFTY', null))).toHaveLength(0);
   });
 
+  it('relevance follows the claim subject, not the row scope (final review #7)', () => {
+    // A MARKET-scope post with an instrument claim on another underlying: not shown for NIFTY.
+    const marketRow = row('MARKET', [claim('MARKET'), claim('RELIANCE')]);
+    expect(selectVerifiedNotes([marketRow], q('NIFTY')).map((n) => n.subject)).toEqual(['MARKET']);
+    expect(selectVerifiedNotes([marketRow], q('RELIANCE')).map((n) => n.subject)).toEqual(['MARKET', 'RELIANCE']);
+    // An INSTRUMENT-scope post with a market-wide claim: shown for any call (as the owner alert would treat it).
+    const instRow = row('INSTRUMENT', [claim('MARKET'), claim('SBIN')]);
+    expect(selectVerifiedNotes([instRow], q('NIFTY')).map((n) => n.subject)).toEqual(['MARKET']);
+    // A sector claim inside a MARKET-scope post reaches only that sector's calls.
+    const sectorInMarket = row('MARKET', [claim('BANK')]);
+    expect(selectVerifiedNotes([sectorInMarket], q('HDFCBANK', 'BANK'))).toHaveLength(1);
+    expect(selectVerifiedNotes([sectorInMarket], q('INFY', 'IT'))).toHaveLength(0);
+    // A blank subject is never relevant.
+    expect(selectVerifiedNotes([row('MARKET', [claim('  ')])], q())).toHaveLength(0);
+  });
+
   it("drops yesterday's notes", () => {
     // 2026-11-24 23:00 IST — same UTC date as NOW, previous IST session
     const late = row('MARKET', [claim('MARKET')], new Date('2026-11-24T17:30:00.000Z'));

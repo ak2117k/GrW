@@ -10,7 +10,6 @@ import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { sessionMinuteFilter } from '../../market-hub/candles/session-sql';
 import { istYmd } from '../../market-cues/fetchers/ist-dates';
 // Pure files only (no MessageReaderModule import: message-reader imports signal-trader).
-import { parseMessageReaderConfig } from '../../message-reader/message-reader.config';
 import { selectVerifiedNotes, type ReadingRow } from '../../message-reader/domain/notes-for-judge';
 import type { Claim, ReadScope } from '../../message-reader/domain/reading.types';
 
@@ -101,6 +100,8 @@ export function callAtOf(tags: unknown, postedAt: Date | null): Date | null {
 export const CHANNEL_VIEWS_WINDOW_MS = 24 * 3_600_000;
 /** channelViews.verifiedNotesSource (MESSAGE_READER=on). */
 const VERIFIED_NOTES_SOURCE = 'message_readings (AI present-state check), today';
+/** The verifiedNotes read never holds the judge longer than this. */
+export const VERIFIED_NOTES_TIMEOUT_MS = 2_000;
 
 export function findByChannel(summary: unknown, depth = 0): Record<string, unknown> | null {
   if (!summary || typeof summary !== 'object' || depth > 4) return null;
@@ -248,18 +249,31 @@ export class SignalTraderRepository {
    * Telegram channels' market views (INFO items, signal-intake) on `underlying` over the last 24 h,
    * weighted by each channel's CHANNEL_INFO accuracy from the latest self-review. Read-only judge context.
    */
-  async channelViews(underlying: string, now: Date, sector: string | null = null): Promise<Record<string, unknown>> {
-    // MESSAGE_READER=on only: off / shadow return exactly the pre-reader block (and never read message_readings).
+  async channelViews(underlying: string, now: Date, sector: string | null = null, notesOn = false): Promise<Record<string, unknown>> {
+    // notesOn = MESSAGE_READER=on, decided ONCE by the caller (runJudge). Off / shadow: exactly the pre-reader
+    // block, and message_readings is never read. On: each read fails on its own — a channel_infos failure keeps
+    // the notes, a notes failure / timeout keeps the channel views.
     const since = new Date(now.getTime() - CHANNEL_VIEWS_WINDOW_MS);
+    const infos = this.prisma.channelInfo.findMany({
+      where: { postedAt: { gte: since, lte: now } },
+      select: { channelId: true, postedAt: true, items: true },
+      orderBy: { postedAt: 'desc' },
+      take: 500,
+    });
+    if (!notesOn) return this.channelViewsFrom(underlying, await infos, null);
     const [notes, rows] = await Promise.all([
-      parseMessageReaderConfig(process.env).mode === 'on' ? this.verifiedNotes(underlying, sector, now) : null,
-      this.prisma.channelInfo.findMany({
-        where: { postedAt: { gte: since, lte: now } },
-        select: { channelId: true, postedAt: true, items: true },
-        orderBy: { postedAt: 'desc' },
-        take: 500,
-      }),
+      this.verifiedNotesBounded(underlying, sector, now),
+      infos.catch((err: unknown) => new Error(`channel_infos: ${err instanceof Error ? err.message : String(err)}`)),
     ]);
+    if (rows instanceof Error) return { status: 'unavailable', reason: `channel views: ${rows.message}`, ...notes };
+    return this.channelViewsFrom(underlying, rows, notes);
+  }
+
+  private async channelViewsFrom(
+    underlying: string,
+    rows: Parameters<typeof channelSentiment>[0],
+    notes: Record<string, unknown> | null,
+  ): Promise<Record<string, unknown>> {
     if (rows.length === 0) return { status: 'unavailable', reason: 'no Telegram INFO posts in the last 24 h', ...notes };
     const accuracy = (await this.allChannelStats().catch(() => null)) as Record<string, ChannelInfoAccuracy> | null;
     const all = channelSentiment(rows, accuracy);
@@ -276,6 +290,23 @@ export class SignalTraderRepository {
    * Today's AI-checked channel claims (message_readings, READ / CACHED) for the judge: MARKET, the call's sector and
    * its underlying, CONFIRMED / CONTRADICTED only (domain selectVerifiedNotes). A failed read is stated, not hidden.
    */
+  /** verifiedNotes, bounded at VERIFIED_NOTES_TIMEOUT_MS: a slow read is stated, never waited on. */
+  private async verifiedNotesBounded(underlying: string, sector: string | null, now: Date): Promise<Record<string, unknown>> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<Record<string, unknown>>((resolve) => {
+      timer = setTimeout(
+        () => resolve({ verifiedNotes: [], verifiedNotesSource: VERIFIED_NOTES_SOURCE, verifiedNotesUnavailable: `timed out after ${VERIFIED_NOTES_TIMEOUT_MS} ms` }),
+        VERIFIED_NOTES_TIMEOUT_MS,
+      );
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([this.verifiedNotes(underlying, sector, now), timedOut]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async verifiedNotes(underlying: string, sector: string | null, now: Date): Promise<Record<string, unknown>> {
     const base = { verifiedNotesSource: VERIFIED_NOTES_SOURCE };
     try {

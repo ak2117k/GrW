@@ -757,7 +757,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       this.repo.channelStats(s.channelId).catch(() => null),
       // Telegram channels' market views on this underlying (read-only context; never a trigger).
       Promise.resolve()
-        .then(() => this.repo.channelViews(s.underlying, now, null)) // no sector lookup here: SECTOR notes reach the judge only as MARKET
+        // verifiedNotes on/off is decided once above and passed down: the repository never reads the env.
+        .then(() => this.repo.channelViews(s.underlying, now, null, verifiedNotes)) // no sector lookup here: sector claims are not matched
         .catch((err: unknown) => ({ status: 'unavailable', reason: `channel views: ${err instanceof Error ? err.message : String(err)}` })),
       takeDefault ? this.eventsFor(s.underlying, now) : Promise.resolve(null),
       // Informational (record only): WITH / AGAINST / MIXED / UNKNOWN the 15m trend, or unavailable with the reason.

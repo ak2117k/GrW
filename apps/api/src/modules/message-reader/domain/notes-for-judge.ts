@@ -34,10 +34,17 @@ function istHhMm(at: Date): string {
   return `${pad(Math.floor(min / 60))}:${pad(min % 60)}`;
 }
 
-function relevant(row: ReadingRow, subject: string, q: { underlying: string; sector: string | null }): boolean {
-  if (row.scope === 'MARKET') return true;
-  if (row.scope === 'SECTOR') return q.sector !== null && subject === q.sector;
-  return subject === q.underlying;
+/**
+ * Relevance by the CLAIM's subject (MARKET, the call's underlying, the call's sector), not the row's scope:
+ * a MARKET-scope post can carry an instrument claim and vice versa. Agrees with the owner alert's
+ * `subject === 'MARKET'` (reader-health marketNoteClaims).
+ */
+function relevant(subject: string, q: { underlying: string; sector: string | null }): boolean {
+  const s = String(subject ?? '').trim().toUpperCase();
+  if (!s) return false;
+  if (s === 'MARKET') return true;
+  if (s === q.underlying) return true;
+  return q.sector !== null && s === q.sector;
 }
 
 /** Today's (IST session of `now`) CONFIRMED / CONTRADICTED claims about the market, the call's sector or its underlying; newest first, at most 10. */
@@ -52,7 +59,7 @@ export function selectVerifiedNotes(
     .sort((a, b) => b.postedAt.getTime() - a.postedAt.getTime())
     .flatMap((r) =>
       r.claims
-        .filter((c) => (c.verdict === 'CONFIRMED' || c.verdict === 'CONTRADICTED') && relevant(r, c.subject, q))
+        .filter((c) => (c.verdict === 'CONFIRMED' || c.verdict === 'CONTRADICTED') && relevant(c.subject, q))
         .map(
           (c): VerifiedNote => ({
             channel: r.channelTitle,

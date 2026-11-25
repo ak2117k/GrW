@@ -364,7 +364,8 @@ describe('SignalTraderService', () => {
         expect(judged(t)[0].promptVersion).toBe('signal-judge-v8-take');
         expect(judged(t)[1].system).toBe(judged(base)[1].system);
         expect(judged(t)[1].system).not.toMatch(/verifiedNotes/);
-        expect(t.repo.channelViews).toHaveBeenCalledWith('NIFTY', expect.any(Date), null);
+        // The flag is decided once in runJudge and passed down (final review #5).
+        expect(t.repo.channelViews).toHaveBeenCalledWith('NIFTY', expect.any(Date), null, false);
       }
       const skip = build({ cfg: { mode: 'shadow', judgeDefault: 'skip' }, env: { ...LIVE_ENV, MESSAGE_READER: 'shadow' } });
       await skip.svc.evaluate(ev);
@@ -377,6 +378,7 @@ describe('SignalTraderService', () => {
       await t.svc.evaluate(ev);
       expect(judged(t)[0].promptVersion).toBe('signal-judge-v9-take');
       expect(judged(t)[1].system).toMatch(/channelViews\.verifiedNotes = channel claims checked against our data/);
+      expect(t.repo.channelViews).toHaveBeenCalledWith('NIFTY', expect.any(Date), null, true);
       const skip = build({ cfg: { mode: 'shadow', judgeDefault: 'skip' }, env: { ...LIVE_ENV, MESSAGE_READER: 'on' } });
       await skip.svc.evaluate(ev);
       expect(judged(skip)[0].promptVersion).toBe('signal-judge-v7');

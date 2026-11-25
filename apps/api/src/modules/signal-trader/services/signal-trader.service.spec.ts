@@ -352,6 +352,37 @@ describe('SignalTraderService', () => {
     });
   });
 
+  describe('MESSAGE_READER verifiedNotes (2026-11-25)', () => {
+    const judged = (t: ReturnType<typeof build>) => t.judge.judge.mock.calls[0] as any[];
+
+    it('prompt version and system unchanged unless MESSAGE_READER=on (shadow/off = the old judge exactly)', async () => {
+      for (const mode of ['shadow', 'off']) {
+        const t = build({ cfg: { mode: 'shadow', judgeDefault: 'take' }, env: { ...LIVE_ENV, MESSAGE_READER: mode } });
+        const base = build({ cfg: { mode: 'shadow', judgeDefault: 'take' } });
+        await t.svc.evaluate(ev);
+        await base.svc.evaluate(ev);
+        expect(judged(t)[0].promptVersion).toBe('signal-judge-v8-take');
+        expect(judged(t)[1].system).toBe(judged(base)[1].system);
+        expect(judged(t)[1].system).not.toMatch(/verifiedNotes/);
+        expect(t.repo.channelViews).toHaveBeenCalledWith('NIFTY', expect.any(Date), null);
+      }
+      const skip = build({ cfg: { mode: 'shadow', judgeDefault: 'skip' }, env: { ...LIVE_ENV, MESSAGE_READER: 'shadow' } });
+      await skip.svc.evaluate(ev);
+      expect(judged(skip)[0].promptVersion).toBe('signal-judge-v6');
+      expect(judged(skip)[1].system).toBe(SIGNAL_JUDGE_SYSTEM);
+    });
+
+    it('prompt version is signal-judge-v9-take with the verifiedNotes rule when MESSAGE_READER=on', async () => {
+      const t = build({ cfg: { mode: 'shadow', judgeDefault: 'take' }, env: { ...LIVE_ENV, MESSAGE_READER: 'on' } });
+      await t.svc.evaluate(ev);
+      expect(judged(t)[0].promptVersion).toBe('signal-judge-v9-take');
+      expect(judged(t)[1].system).toMatch(/channelViews\.verifiedNotes = channel claims checked against our data/);
+      const skip = build({ cfg: { mode: 'shadow', judgeDefault: 'skip' }, env: { ...LIVE_ENV, MESSAGE_READER: 'on' } });
+      await skip.svc.evaluate(ev);
+      expect(judged(skip)[0].promptVersion).toBe('signal-judge-v7');
+    });
+  });
+
   it('caps.maxLossPerTrade is the underlying’s own cap: GOLD ₹7,500 (HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING default), NIFTY ₹2,000', async () => {
     const nifty = build({ cfg: { mode: 'shadow' } });
     await nifty.svc.evaluate(ev);

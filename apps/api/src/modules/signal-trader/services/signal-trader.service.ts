@@ -15,6 +15,7 @@ import { applyJudgeTightening, evaluateGate, planEntry, riskCapFor, type EntryPl
 import { fullLotMisfit, miniFallbackOn, miniMaxLots, miniNameFor, planMini } from '../domain/mini-swap';
 import { judgeDecision, signalJudgePromptVersion, signalJudgeSystem, type JudgeVerdict } from '../domain/judge';
 import { eventContextFor, type EventContext, type EventContextDeps } from '../../news-events/events/event-context';
+import { parseMessageReaderConfig } from '../../message-reader/message-reader.config';
 import { slEnforceability } from '../domain/execution';
 import { skipAlert, takeAlert, triggerArmedAlert, triggerFiredAlert, updateAlert } from '../domain/alerts';
 import { entryNotReached, judgeFresh, readTrigger, triggerExpiry, triggerHit, triggerOf } from '../domain/trigger';
@@ -734,6 +735,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const conflict = e.conflict === true || cluster?.conflict === true;
     // 2026-11-04: event days reach the judge only on the default-TAKE prompt (skip = the v5 packet exactly).
     const takeDefault = cfg.judgeDefault === 'take';
+    // 2026-11-25: MESSAGE_READER=on adds channelViews.verifiedNotes + its prompt rule (v7 / v9-take); off / shadow = unchanged.
+    const verifiedNotes = parseMessageReaderConfig(this.env).mode === 'on';
     // 2026-11-25 speed: each market-data source gets at most this long; a miss reaches the judge as unavailable.
     const deadlineMs = cfg.contextDeadlineMs;
     // Timings (record only): each context block's ms from the start of the collection.
@@ -754,7 +757,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       this.repo.channelStats(s.channelId).catch(() => null),
       // Telegram channels' market views on this underlying (read-only context; never a trigger).
       Promise.resolve()
-        .then(() => this.repo.channelViews(s.underlying, now))
+        .then(() => this.repo.channelViews(s.underlying, now, null)) // no sector lookup here: SECTOR notes reach the judge only as MARKET
         .catch((err: unknown) => ({ status: 'unavailable', reason: `channel views: ${err instanceof Error ? err.message : String(err)}` })),
       takeDefault ? this.eventsFor(s.underlying, now) : Promise.resolve(null),
       // Informational (record only): WITH / AGAINST / MIXED / UNKNOWN the 15m trend, or unavailable with the reason.
@@ -811,7 +814,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     ];
     if (missed.length > 0) this.logger.warn(`[signal-trader] ${what}: deadline ${deadlineMs} ms hit — ${missed.join(', ')}`);
     const packet = {
-      promptVersion: signalJudgePromptVersion(cfg.judgeDefault),
+      promptVersion: signalJudgePromptVersion(cfg.judgeDefault, verifiedNotes),
       at: now.toISOString(),
       signal: { text: s.rawText.slice(0, 1500), parsed: what, channel, receivedAt: s.receivedAt?.toISOString() ?? null, horizon: s.horizon ?? 'INTRADAY' },
       cluster: { agreeCount, conflict, channels: cluster?.channelIds.length ?? null, strong: !conflict && agreeCount >= cfg.strongChannels },
@@ -841,7 +844,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const out = await this.timed('modelMs', () =>
       this.judge.judge(packet, {
         model: cfg.judgeModel, timeoutMs: cfg.judgeTimeoutMs, slotWaitMs: cfg.judgeSlotWaitMs, userId: owner,
-        system: signalJudgeSystem(cfg.judgeDefault, cfg.judgeMinConfidence),
+        system: signalJudgeSystem(cfg.judgeDefault, cfg.judgeMinConfidence, verifiedNotes),
       }),
     );
     if (!out.ok) {

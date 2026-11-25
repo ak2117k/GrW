@@ -8,6 +8,11 @@ import { SIGNAL_ENTRY_VERDICT_TAG, istDayStart } from '../domain/execution';
 import { PAPER_WATCH_STRATEGIES, SIGNAL_PAPER_STRATEGY, decisionTag } from '../domain/paper';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { sessionMinuteFilter } from '../../market-hub/candles/session-sql';
+import { istYmd } from '../../market-cues/fetchers/ist-dates';
+// Pure files only (no MessageReaderModule import: message-reader imports signal-trader).
+import { parseMessageReaderConfig } from '../../message-reader/message-reader.config';
+import { selectVerifiedNotes, type ReadingRow } from '../../message-reader/domain/notes-for-judge';
+import type { Claim, ReadScope } from '../../message-reader/domain/reading.types';
 
 const isUnique = (err: unknown) => err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 type Row = Record<string, unknown>;
@@ -94,6 +99,8 @@ export function callAtOf(tags: unknown, postedAt: Date | null): Date | null {
 /** The first `byChannel` object anywhere in a self-review summary (stream S's CHANNEL_SIGNAL). */
 /** The judge's channel-views window. */
 export const CHANNEL_VIEWS_WINDOW_MS = 24 * 3_600_000;
+/** channelViews.verifiedNotesSource (MESSAGE_READER=on). */
+const VERIFIED_NOTES_SOURCE = 'message_readings (AI present-state check), today';
 
 export function findByChannel(summary: unknown, depth = 0): Record<string, unknown> | null {
   if (!summary || typeof summary !== 'object' || depth > 4) return null;
@@ -241,15 +248,19 @@ export class SignalTraderRepository {
    * Telegram channels' market views (INFO items, signal-intake) on `underlying` over the last 24 h,
    * weighted by each channel's CHANNEL_INFO accuracy from the latest self-review. Read-only judge context.
    */
-  async channelViews(underlying: string, now: Date): Promise<Record<string, unknown>> {
+  async channelViews(underlying: string, now: Date, sector: string | null = null): Promise<Record<string, unknown>> {
+    // MESSAGE_READER=on only: off / shadow return exactly the pre-reader block (and never read message_readings).
     const since = new Date(now.getTime() - CHANNEL_VIEWS_WINDOW_MS);
-    const rows = await this.prisma.channelInfo.findMany({
-      where: { postedAt: { gte: since, lte: now } },
-      select: { channelId: true, postedAt: true, items: true },
-      orderBy: { postedAt: 'desc' },
-      take: 500,
-    });
-    if (rows.length === 0) return { status: 'unavailable', reason: 'no Telegram INFO posts in the last 24 h' };
+    const [notes, rows] = await Promise.all([
+      parseMessageReaderConfig(process.env).mode === 'on' ? this.verifiedNotes(underlying, sector, now) : null,
+      this.prisma.channelInfo.findMany({
+        where: { postedAt: { gte: since, lte: now } },
+        select: { channelId: true, postedAt: true, items: true },
+        orderBy: { postedAt: 'desc' },
+        take: 500,
+      }),
+    ]);
+    if (rows.length === 0) return { status: 'unavailable', reason: 'no Telegram INFO posts in the last 24 h', ...notes };
     const accuracy = (await this.allChannelStats().catch(() => null)) as Record<string, ChannelInfoAccuracy> | null;
     const all = channelSentiment(rows, accuracy);
     return {
@@ -257,7 +268,41 @@ export class SignalTraderRepository {
       source: 'telegram INFO items (signal-intake channel_infos), last 24 h, weighted by channel INFO accuracy',
       underlying: all.find((x) => x.underlying === underlying) ?? null,
       others: all.filter((x) => x.underlying !== underlying).slice(0, 5),
+      ...notes,
     };
+  }
+
+  /**
+   * Today's AI-checked channel claims (message_readings, READ / CACHED) for the judge: MARKET, the call's sector and
+   * its underlying, CONFIRMED / CONTRADICTED only (domain selectVerifiedNotes). A failed read is stated, not hidden.
+   */
+  private async verifiedNotes(underlying: string, sector: string | null, now: Date): Promise<Record<string, unknown>> {
+    const base = { verifiedNotesSource: VERIFIED_NOTES_SOURCE };
+    try {
+      const readings = await this.prisma.messageReading.findMany({
+        where: { sessionDate: istYmd(now), status: { in: ['READ', 'CACHED'] }, postedAt: { lte: now } },
+        select: { messageId: true, channelId: true, postedAt: true, scope: true, claims: true, summary: true },
+      });
+      const ids = [...new Set(readings.map((r) => r.channelId))];
+      const channels = ids.length
+        ? await this.prisma.telegramChannel.findMany({ where: { id: { in: ids } }, select: { id: true, title: true } })
+        : [];
+      const titles = new Map(channels.map((c) => [c.id, c.title]));
+      const rows: ReadingRow[] = readings
+        .filter((r) => r.scope === 'MARKET' || r.scope === 'SECTOR' || r.scope === 'INSTRUMENT')
+        .map((r) => ({
+          messageId: r.messageId,
+          channelId: r.channelId,
+          channelTitle: titles.get(r.channelId) ?? r.channelId,
+          postedAt: r.postedAt,
+          scope: r.scope as ReadScope,
+          claims: Array.isArray(r.claims) ? (r.claims as unknown as Claim[]) : [],
+          summary: r.summary,
+        }));
+      return { verifiedNotes: selectVerifiedNotes(rows, { underlying: up(underlying), sector: sector ? up(sector) : null, now }), ...base };
+    } catch (err) {
+      return { verifiedNotes: [], ...base, verifiedNotesUnavailable: `message_readings: ${err instanceof Error ? err.message : String(err)}` };
+    }
   }
 
   decisionsFor(signalId: string) {

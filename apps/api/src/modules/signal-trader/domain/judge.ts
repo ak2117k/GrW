@@ -119,15 +119,44 @@ export function judgeTakeRule(minConfidence: number): string {
   ].join(' ');
 }
 
-/** The system prompt for SIGNAL_JUDGE_DEFAULT. `skip` = SIGNAL_JUDGE_SYSTEM (v5) byte for byte. */
-export function signalJudgeSystem(mode: 'take' | 'skip', minConfidence = 60): string {
-  if (mode === 'skip') return SIGNAL_JUDGE_SYSTEM;
-  if (!SIGNAL_JUDGE_SYSTEM.includes(SKIP_DEFAULT_RULE)) throw new Error('signal judge prompt: the v5 default-SKIP rule moved — update SKIP_DEFAULT_RULE');
-  return SIGNAL_JUDGE_SYSTEM.replace(SKIP_DEFAULT_RULE, judgeTakeRule(minConfidence));
+/**
+ * MESSAGE_READER=on (2026-11-25): the packet's channelViews carries verifiedNotes — today's Telegram channel
+ * claims the AI message reader checked against our live data at post time. Off / shadow keep v6 / v8-take.
+ */
+export const SIGNAL_JUDGE_PROMPT_VERSION_NOTES = 'signal-judge-v7';
+export const SIGNAL_JUDGE_PROMPT_VERSION_TAKE_NOTES = 'signal-judge-v9-take';
+
+/** The channelViews line the verifiedNotes rule follows (must exist in SIGNAL_JUDGE_SYSTEM verbatim). */
+const CHANNEL_VIEWS_RULE = 'channel\'s view accuracy): weak, crowd sentiment — context only, never a reason on its own.';
+
+const VERIFIED_NOTES_RULE = [
+  'channelViews.verifiedNotes = channel claims checked against our data at post time (today\'s session; channel, IST time,',
+  'claim, bias, verdict CONFIRMED or CONTRADICTED, the evidence numbers): context, weighted by the verdict and by the',
+  'channel\'s information accuracy — never a trigger to take or skip on their own; a CONTRADICTED note counts against the',
+  'channel\'s claim, not for the opposite trade.',
+].join(' ');
+
+/**
+ * The system prompt for SIGNAL_JUDGE_DEFAULT. `skip` = SIGNAL_JUDGE_SYSTEM (v5) byte for byte.
+ * `verifiedNotes` (MESSAGE_READER=on only) adds the verifiedNotes rule right after the channelViews line;
+ * without it the prompt is exactly what it was before the message reader.
+ */
+export function signalJudgeSystem(mode: 'take' | 'skip', minConfidence = 60, verifiedNotes = false): string {
+  let p = SIGNAL_JUDGE_SYSTEM;
+  if (mode === 'take') {
+    if (!p.includes(SKIP_DEFAULT_RULE)) throw new Error('signal judge prompt: the v5 default-SKIP rule moved — update SKIP_DEFAULT_RULE');
+    p = p.replace(SKIP_DEFAULT_RULE, judgeTakeRule(minConfidence));
+  }
+  if (verifiedNotes) {
+    if (!p.includes(CHANNEL_VIEWS_RULE)) throw new Error('signal judge prompt: the channelViews rule moved — update CHANNEL_VIEWS_RULE');
+    p = p.replace(CHANNEL_VIEWS_RULE, `${CHANNEL_VIEWS_RULE} ${VERIFIED_NOTES_RULE}`);
+  }
+  return p;
 }
 
-/** promptVersion stamped on the packet for SIGNAL_JUDGE_DEFAULT. */
-export function signalJudgePromptVersion(mode: 'take' | 'skip'): string {
+/** promptVersion stamped on the packet for SIGNAL_JUDGE_DEFAULT; `verifiedNotes` = MESSAGE_READER=on (v7 / v9-take). */
+export function signalJudgePromptVersion(mode: 'take' | 'skip', verifiedNotes = false): string {
+  if (verifiedNotes) return mode === 'skip' ? SIGNAL_JUDGE_PROMPT_VERSION_NOTES : SIGNAL_JUDGE_PROMPT_VERSION_TAKE_NOTES;
   return mode === 'skip' ? SIGNAL_JUDGE_PROMPT_VERSION : SIGNAL_JUDGE_PROMPT_VERSION_TAKE;
 }
 

@@ -8,11 +8,14 @@ import { parseAutoExitConfig } from '../domain/auto-exit.config';
 import type { AutoExitConfig } from '../domain/auto-exit.types';
 import { tickRupees } from '../domain/exit-order';
 import {
+  ceilingStopTrigger,
   desiredFloorStop,
   floorStopTag,
   parseFloorBrokerSlConfig,
   planFloorStop,
   simulateStopFill,
+  type CeilingTrigger,
+  type DesiredStop,
   type FloorBrokerSlConfig,
   type RestingStop,
   type StopStep,
@@ -55,6 +58,10 @@ export class FloorBrokerSlService implements OnModuleInit, OnModuleDestroy {
   private running = false;
   private exit: AutoExitConfig | null = null;
   private cfg: FloorBrokerSlConfig | null = null;
+  /** The env the class ceiling is read from (FLOOR_BROKER_SL_AT=ceiling; classCeilingFor). */
+  private env: Record<string, string | undefined> = process.env;
+  /** live + ceiling: this pass's ceiling skip reason per tracker (the executor only sees `floor: null`). */
+  private readonly ceilingSkip = new Map<string, string>();
   private readonly board: Pick<FloorStateBoard, 'get'>;
   /** shadow: trackerId → the virtual resting stop. */
   private readonly virtual = new Map<string, Virtual>();
@@ -84,7 +91,8 @@ export class FloorBrokerSlService implements OnModuleInit, OnModuleDestroy {
     if (!bootJobsEnabled()) return void this.logger.log(BOOT_JOBS_DISABLED);
     if (!exit.enabled || exit.userIds.length === 0) return void this.logger.log('[floor-sl] inert: the AI auto-exit is disabled or has no users');
     this.use(exit, cfg);
-    this.logger.warn(`[floor-sl] ${cfg.mode.toUpperCase()} — resting STOPLOSS-LIMIT at the armed noise floor, limit ${cfg.limitTicks} ticks, modify ≥ ${cfg.modifyMinSec}s apart`
+    const where = cfg.at === 'ceiling' ? 'the class rupee ceiling (FLOOR_BROKER_SL_AT=ceiling, placed at entry, not trailed)' : 'the armed noise floor';
+    this.logger.warn(`[floor-sl] ${cfg.mode.toUpperCase()} — resting STOPLOSS-LIMIT at ${where}, limit ${cfg.limitTicks} ticks, modify ≥ ${cfg.modifyMinSec}s apart`
       + (cfg.mode === 'shadow' ? ' (records only, places nothing)' : ' (REAL ORDERS)'));
     this.timer = setInterval(() => void this.runOnce(), FLOOR_SL_PASS_MS);
     this.timer.unref?.();
@@ -96,9 +104,10 @@ export class FloorBrokerSlService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Start configuration (onModuleInit; tests call it directly). */
-  use(exit: AutoExitConfig, cfg: FloorBrokerSlConfig): void {
+  use(exit: AutoExitConfig, cfg: FloorBrokerSlConfig, env: Record<string, string | undefined> = process.env): void {
     this.exit = exit;
     this.cfg = cfg;
+    this.env = env;
   }
 
   /** One pass. Single-flight; never throws. */
@@ -112,6 +121,7 @@ export class FloorBrokerSlService implements OnModuleInit, OnModuleDestroy {
       const open = await this.repo.openTrackers(exit.userIds);
       const openIds = new Set(open.map((t) => t.id));
       const intents = new Map<string, Array<{ t: FloorSlTracker; intent: FloorStopIntent; state: FloorState | null }>>();
+      this.ceilingSkip.clear();
       for (const t of open) {
         try {
           const ex = String(t.exchange).toUpperCase();
@@ -120,11 +130,15 @@ export class FloorBrokerSlService implements OnModuleInit, OnModuleDestroy {
           if (!state || now.getTime() - state.at > FLOOR_STATE_STALE_MS) continue; // no fresh floor: touch nothing
           const inst = await this.instrumentOf(t);
           const tick = tickRupees(inst?.tickSize, ex);
-          const eligible = this.eligibility(t, state, exit);
-          if (mode === 'shadow') await this.shadowStep(t, state, eligible, tick, inst?.lotSize ?? null, exit, cfg, now);
+          const eligible = this.eligibility(t, state, exit, cfg);
+          const ceiling = cfg.at === 'ceiling'
+            ? ceilingStopTrigger({ symbol: t.symbol, exchange: ex, side: state.side, entry: state.entryPrice, qty: t.qty, ltp: state.ltp, tick, env: this.env })
+            : null;
+          if (mode === 'shadow') await this.shadowStep(t, state, eligible, tick, inst?.lotSize ?? null, exit, cfg, now, ceiling);
           else {
+            if (ceiling && !ceiling.ok) this.ceilingSkip.set(t.id, ceiling.reason);
             const list = intents.get(t.userId) ?? [];
-            list.push({ t, state, intent: this.intentOf(t, state, eligible, tick, inst?.lotSize ?? null) });
+            list.push({ t, state, intent: this.intentOf(t, state, eligible, tick, inst?.lotSize ?? null, ceiling) });
             intents.set(t.userId, list);
           }
         } catch (err) {
@@ -141,20 +155,28 @@ export class FloorBrokerSlService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Same eligibility as the hard-floor exit (guards.ts), plus SENTINEL ownership and an ARMED noise floor. */
-  private eligibility(t: FloorSlTracker, s: FloorState, exit: AutoExitConfig): { ok: true } | { ok: false; reason: string } {
+  /**
+   * Same eligibility as the hard-floor exit (guards.ts), plus SENTINEL ownership and an ARMED noise floor.
+   * FLOOR_BROKER_SL_AT=ceiling: no armed floor needed — the ceiling stop rests from entry.
+   */
+  private eligibility(t: FloorSlTracker, s: FloorState, exit: AutoExitConfig, cfg: FloorBrokerSlConfig): { ok: true } | { ok: false; reason: string } {
     if (!exit.userIds.includes(t.userId) || s.userId !== t.userId) return { ok: false, reason: 'NOT_ALLOWED_USER' };
     const hold = exit.hold ?? [];
     if ([t.symbol, t.id].some((k) => hold.includes(String(k).toUpperCase()))) return { ok: false, reason: 'OWNER_HOLD' };
     if (s.ownership !== 'SENTINEL') return { ok: false, reason: 'NOT_SENTINEL_OWNED' };
+    if (cfg.at === 'ceiling') return { ok: true };
     if (!s.floor || s.floor.basis !== 'noise' || !s.floor.armed || !(s.floor.level > 0)) return { ok: false, reason: 'FLOOR_DISARMED' };
     return { ok: true };
   }
 
-  private intentOf(t: FloorSlTracker, s: FloorState | null, eligible: FloorStopIntent['eligible'], tick: number, lotSize: number | null): FloorStopIntent {
+  /** `ceiling` set (FLOOR_BROKER_SL_AT=ceiling): the stop level is the ceiling trigger (null when it has none), never the floor. */
+  private intentOf(
+    t: FloorSlTracker, s: FloorState | null, eligible: FloorStopIntent['eligible'], tick: number, lotSize: number | null, ceiling: CeilingTrigger | null = null,
+  ): FloorStopIntent {
+    const floor = ceiling ? (ceiling.ok ? ceiling.trigger : null) : s?.floor?.armed ? s.floor.level : null;
     return {
       trackerId: t.id, symbol: t.symbol, exchange: String(t.exchange).toUpperCase(), token: t.token, trackerQty: t.qty,
-      entryTime: t.entryTime ?? null, lotSize, tick, floor: s?.floor?.armed ? s.floor.level : null, eligible,
+      entryTime: t.entryTime ?? null, lotSize, tick, floor, eligible,
     };
   }
 
@@ -169,18 +191,27 @@ export class FloorBrokerSlService implements OnModuleInit, OnModuleDestroy {
 
   private async shadowStep(
     t: FloorSlTracker, s: FloorState, eligible: { ok: true } | { ok: false; reason: string }, tick: number, lot: number | null,
-    exit: AutoExitConfig, cfg: FloorBrokerSlConfig, now: Date,
+    exit: AutoExitConfig, cfg: FloorBrokerSlConfig, now: Date, ceiling: CeilingTrigger | null = null,
   ): Promise<void> {
     const { qty, unitVerified } = this.shadowQty(t, lot, exit);
-    const desired = eligible.ok
-      ? desiredFloorStop({ side: s.side, floor: s.floor!.level, ltp: s.ltp, tick, limitTicks: cfg.limitTicks, quantity: qty ?? 0 })
-      : null;
+    // ceiling set (FLOOR_BROKER_SL_AT=ceiling): the stop level is the ceiling trigger; its skip reason when it has none.
+    const level = ceiling ? (ceiling.ok ? ceiling.trigger : null) : s.floor?.level ?? null;
+    let desired: DesiredStop | null = null;
+    if (eligible.ok) {
+      desired = ceiling && !ceiling.ok
+        ? { ok: false, reason: ceiling.reason }
+        : desiredFloorStop({ side: s.side, floor: level ?? NaN, ltp: s.ltp, tick, limitTicks: cfg.limitTicks, quantity: qty ?? 0 });
+    }
     const resting = this.virtual.get(t.id) ?? null;
     const action = planFloorStop({ eligible, desired, resting, tick, nowMs: now.getTime(), modifyMinSec: cfg.modifyMinSec });
-    const base = { ...this.ids(t, 'shadow'), floorPrice: s.floor?.level ?? null, ltp: s.ltp, orderTag: floorStopTag(t.id), detail: unitVerified ? null : { unitVerified: false } };
+    const unitDetail = unitVerified ? null : { unitVerified: false };
+    const detail = ceiling?.ok
+      ? { at: 'ceiling', ceiling: ceiling.ceiling, entryPrice: s.entryPrice, valueFactor: ceiling.valueFactor, units: ceiling.units, ...unitDetail }
+      : ceiling ? { at: 'ceiling', ...unitDetail } : unitDetail;
+    const base = { ...this.ids(t, 'shadow'), floorPrice: s.floor?.level ?? null, ltp: s.ltp, orderTag: floorStopTag(t.id), detail };
     if (action.kind === 'PLACE' || action.kind === 'MODIFY') {
       const d = action.desired;
-      this.virtual.set(t.id, { side: d.side, trigger: d.trigger, limit: d.limit, quantity: d.quantity, changedAt: now.getTime(), floor: s.floor!.level });
+      this.virtual.set(t.id, { side: d.side, trigger: d.trigger, limit: d.limit, quantity: d.quantity, changedAt: now.getTime(), floor: level ?? d.trigger });
       this.lastNote.delete(t.id);
       await this.record({ ...base, action: action.kind, side: d.side, triggerPrice: d.trigger, limitPrice: d.limit, quantity: d.quantity,
         prevTriggerPrice: action.kind === 'MODIFY' ? action.from.trigger : null, reason: unitVerified ? null : 'UNIT_UNVERIFIED' });
@@ -231,7 +262,19 @@ export class FloorBrokerSlService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async recordLive(t: FloorSlTracker, s: FloorState | null, r: FloorStopResult, now: Date): Promise<void> {
+  /**
+   * FLOOR_BROKER_SL_AT=ceiling: the executor sees only a level (or null), so its NO_FLOOR / NOT_PLACEABLE are read
+   * back as the ceiling's own reasons (no_ceiling, ceiling_through_ltp, ...). Noise mode: unchanged.
+   */
+  private ceilingReason(trackerId: string, reason: string | undefined): string | undefined {
+    if (this.cfg?.at !== 'ceiling') return reason;
+    if (reason === 'NO_FLOOR') return this.ceilingSkip.get(trackerId) ?? reason;
+    if (reason === 'NOT_PLACEABLE') return 'ceiling_through_ltp';
+    return reason;
+  }
+
+  private async recordLive(t: FloorSlTracker, s: FloorState | null, raw: FloorStopResult, now: Date): Promise<void> {
+    const r = this.cfg?.at === 'ceiling' ? { ...raw, reason: this.ceilingReason(t.id, raw.reason) } : raw;
     const wrote = r.action === 'PLACE' || r.action === 'MODIFY';
     if (wrote || (r.action === 'KEEP' && r.trigger != null)) this.liveTracked.set(t.id, t);
     if (r.action === 'CANCEL' || r.action === 'FILLED' || (r.action === 'NONE' && r.reason === 'POSITION_CLOSED')) this.liveTracked.delete(t.id);

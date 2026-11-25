@@ -1,4 +1,6 @@
 // apps/api/src/modules/sentinel-executor/domain/floor-broker-sl.ts
+import { contractValueFactor } from '@td/shared';
+import { classCeilingFor } from '../../../common/utils/loss-limit';
 import type { AutoExitConfig } from './auto-exit.types';
 import { isDeadOrderStatus, isTerminalOrderStatus } from './exit-order';
 
@@ -18,8 +20,20 @@ import { isDeadOrderStatus, isTerminalOrderStatus } from './exit-order';
  */
 export type FloorBrokerSlMode = 'off' | 'shadow' | 'live';
 
+/**
+ * FLOOR_BROKER_SL_AT (2026-11-25, catastrophe floor) — WHERE the stop rests:
+ *  - noise (DEFAULT, unset): the armed noise floor, trailed — exactly the behaviour above.
+ *  - ceiling: the premium at which the position's loss equals its class ceiling (HARD_LOSS_CEILING_BY_CLASS via
+ *    classCeilingFor; ceilingStopTrigger). Rests from entry (no armed floor needed) and is NOT trailed — the
+ *    noise floor's trailing stays in the code exits. It exists so an outage or a blocked exit can never leave a
+ *    trade unprotected past its ceiling. Same modes (shadow records only), same HOLD / ownership skips.
+ */
+export type FloorBrokerSlAt = 'noise' | 'ceiling';
+
 export interface FloorBrokerSlConfig {
   mode: FloorBrokerSlMode;
+  /** FLOOR_BROKER_SL_AT: noise (default) | ceiling. */
+  at: FloorBrokerSlAt;
   /** FLOOR_BROKER_SL_LIMIT_TICKS (default 3, 1–20): limit = trigger − ticks (SELL) / + ticks (BUY). */
   limitTicks: number;
   /** FLOOR_BROKER_SL_MODIFY_MIN_SEC (default 15, 5–300): the least gap between two changes of one stop. */
@@ -56,8 +70,13 @@ export function parseFloorBrokerSlConfig(env: Record<string, string | undefined>
       mode = 'shadow';
     }
   }
+  const rawAt = String(env.FLOOR_BROKER_SL_AT ?? '').trim();
+  let at: FloorBrokerSlAt = 'noise';
+  if (rawAt === 'ceiling') at = 'ceiling';
+  else if (rawAt !== '' && rawAt !== 'noise') problems.push(`FLOOR_BROKER_SL_AT=${rawAt} is not noise|ceiling — using noise`);
   return {
     mode,
+    at,
     limitTicks: int(env, 'FLOOR_BROKER_SL_LIMIT_TICKS', DEFAULTS.limitTicks, 1, 20, problems),
     modifyMinSec: int(env, 'FLOOR_BROKER_SL_MODIFY_MIN_SEC', DEFAULTS.modifyMinSec, 5, 300, problems),
     problems,
@@ -79,7 +98,7 @@ const toTick = (x: number, tick: number, dir: 'up' | 'down') =>
 
 export type DesiredStop =
   | { ok: true; side: 'BUY' | 'SELL'; trigger: number; limit: number; quantity: number }
-  | { ok: false; reason: 'NO_FLOOR' | 'BAD_TICK' | 'BAD_QTY' | 'NOT_PLACEABLE' | 'LIMIT_NOT_POSITIVE' };
+  | { ok: false; reason: 'NO_FLOOR' | 'BAD_TICK' | 'BAD_QTY' | 'NOT_PLACEABLE' | 'LIMIT_NOT_POSITIVE' | Extract<CeilingTrigger, { ok: false }>['reason'] };
 
 /**
  * The stop the armed floor asks for. LONG: SELL, trigger = the floor CEILED to the tick (fires at or above
@@ -101,6 +120,44 @@ export function desiredFloorStop(i: { side: 'LONG' | 'SHORT'; floor: number; ltp
   const trigger = toTick(i.floor, i.tick, 'down');
   if (!fin(i.ltp) || i.ltp > trigger - i.tick + EPS) return { ok: false, reason: 'NOT_PLACEABLE' };
   return { ok: true, side: 'BUY', trigger, limit: Number((trigger + i.limitTicks * i.tick).toFixed(4)), quantity: i.quantity };
+}
+
+export type CeilingTrigger =
+  | { ok: true; trigger: number; ceiling: number; valueFactor: number; units: number }
+  | { ok: false; reason: 'no_ceiling' | 'ceiling_through_ltp' | 'ceiling_unreachable' | 'BAD_TICK' | 'BAD_QTY' | 'NO_ENTRY' };
+
+/**
+ * FLOOR_BROKER_SL_AT=ceiling: the stop trigger at which the position's loss equals its class ceiling.
+ * Rupees per point = |qty| × contractValueFactor — qty is the tracker's, the unit rupees are computed in
+ * everywhere (broker netqty: lots × lot size on NFO/BFO, factor 1; MCX's factor converts, GOLD ₹100/pt/lot).
+ *   LONG  (SELL stop): entry − ceiling / (|qty| × factor), CEILED to the tick (fires a hair early: loss ≤ ceiling)
+ *   SHORT (BUY stop):  entry + ceiling / (|qty| × factor), FLOORED to the tick
+ * Never on the wrong side of the LTP — the same "at least one tick clear" test as desiredFloorStop; a stop that
+ * would fire at once is no resting stop (the code floor owns that exit) ⇒ ceiling_through_ltp.
+ * The ceiling comes ONLY from classCeilingFor: table off / class unlisted ⇒ no_ceiling (no stop).
+ * A long whose whole premium is below the ceiling can never lose it ⇒ ceiling_unreachable (no stop needed).
+ */
+export function ceilingStopTrigger(i: {
+  symbol: string; exchange: string; side: 'LONG' | 'SHORT'; entry: number; qty: number; ltp: number; tick: number;
+  env: Record<string, string | undefined>;
+}): CeilingTrigger {
+  const ceiling = classCeilingFor(i.symbol, i.exchange, i.env);
+  if (ceiling == null || !(ceiling > 0)) return { ok: false, reason: 'no_ceiling' };
+  if (!fin(i.tick) || i.tick <= 0) return { ok: false, reason: 'BAD_TICK' };
+  const units = Math.abs(i.qty);
+  if (!fin(units) || units <= 0) return { ok: false, reason: 'BAD_QTY' };
+  if (!fin(i.entry) || i.entry <= 0) return { ok: false, reason: 'NO_ENTRY' };
+  const valueFactor = contractValueFactor(i.exchange, i.symbol);
+  const points = ceiling / (units * valueFactor);
+  if (i.side === 'LONG') {
+    const trigger = toTick(i.entry - points, i.tick, 'up');
+    if (trigger <= 0) return { ok: false, reason: 'ceiling_unreachable' };
+    if (!fin(i.ltp) || i.ltp < trigger + i.tick - EPS) return { ok: false, reason: 'ceiling_through_ltp' };
+    return { ok: true, trigger, ceiling, valueFactor, units };
+  }
+  const trigger = toTick(i.entry + points, i.tick, 'down');
+  if (!fin(i.ltp) || i.ltp > trigger - i.tick + EPS) return { ok: false, reason: 'ceiling_through_ltp' };
+  return { ok: true, trigger, ceiling, valueFactor, units };
 }
 
 /** Our stop as it rests (live: from the order book; shadow: the virtual one). `changedAt` = ms of its last place/modify. */

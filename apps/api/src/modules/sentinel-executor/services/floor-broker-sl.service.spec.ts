@@ -154,6 +154,137 @@ describe('FloorBrokerSlService — shadow (default)', () => {
   });
 });
 
+describe('FloorBrokerSlService — FLOOR_BROKER_SL_AT=ceiling (the rupee ceiling, not the noise floor)', () => {
+  const TABLE = { HARD_LOSS_CEILING_BY_CLASS: 'INDEX_OPT:5000,STOCK_OPT:5000,GOLD:7500,SILVER:7500,MCX:5000' };
+  const SHADOW_C = parseFloorBrokerSlConfig({ FLOOR_BROKER_SL_AT: 'ceiling' }, EXIT);
+  const LIVE_C = parseFloorBrokerSlConfig({ FLOOR_BROKER_SL: 'live', FLOOR_BROKER_SL_AT: 'ceiling' }, EXIT);
+  // NIFTY CE 1 lot 75 @120, LTP 118, the noise floor not armed yet: the ceiling stop rests from entry.
+  const nTracker = tracker({ qty: 75 });
+  const nState = (over: Partial<FloorState> = {}) => state({ entryPrice: 120, ltp: 118, floor: { basis: 'noise', armed: false, level: 110 }, ...over });
+
+  it('shadow: records ONE placement at the ceiling (53.35, limit 53.20) from entry, unarmed floor or none, and never trails it', async () => {
+    const h = harness();
+    h.set({ open: [nTracker], board: nState() });
+    h.svc.use(EXIT, SHADOW_C, TABLE);
+    await h.svc.runOnce(at(0));
+    h.set({ board: nState({ ltp: 160, floor: { basis: 'noise', armed: true, level: 150 }, at: T0 + 30_000 }) });
+    await h.svc.runOnce(at(30));
+    h.set({ board: nState({ ltp: 170, floor: null, at: T0 + 60_000 }) });
+    await h.svc.runOnce(at(60));
+    expect(h.executor.syncFloorStops).not.toHaveBeenCalled();
+    expect(h.actions()).toEqual(['PLACE']);
+    expect(h.rows[0]).toMatchObject({ mode: 'shadow', action: 'PLACE', side: 'SELL', triggerPrice: 53.35, limitPrice: 53.2, quantity: 75,
+      floorPrice: 110, detail: { at: 'ceiling', ceiling: 5000, entryPrice: 120, valueFactor: 1 } });
+  });
+
+  it('GOLD option: the MCX contract value sets the price (1 lot @2000, ₹7,500 → 1925)', async () => {
+    const h = harness();
+    h.repo.instrument.mockResolvedValue({ tickSize: 50, lotSize: 1 } as never); // ₹0.50 tick
+    h.set({ open: [tracker({ symbol: 'GOLD26DEC26130000PE', exchange: 'MCX', qty: 1 })], board: nState({ symbol: 'GOLD26DEC26130000PE', exchange: 'MCX', entryPrice: 2000, ltp: 1990 }) });
+    h.svc.use(EXIT, SHADOW_C, TABLE);
+    await h.svc.runOnce(at(0));
+    expect(h.rows[0]).toMatchObject({ action: 'PLACE', side: 'SELL', triggerPrice: 1925, limitPrice: 1923.5 });
+  });
+
+  it('a short mirrors: BUY stop above the entry, rounded down', async () => {
+    const h = harness();
+    h.set({ open: [tracker({ symbol: 'SENSEX27NOV2683600PE', exchange: 'BFO', qty: -60 })],
+      board: nState({ symbol: 'SENSEX27NOV2683600PE', exchange: 'BFO', side: 'SHORT', entryPrice: 200, ltp: 205 }) });
+    h.svc.use(EXIT, SHADOW_C, TABLE);
+    await h.svc.runOnce(at(0));
+    expect(h.rows[0]).toMatchObject({ action: 'PLACE', side: 'BUY', triggerPrice: 283.3, limitPrice: 283.45, quantity: 60 });
+  });
+
+  it('trigger through the LTP → SKIP ceiling_through_ltp; table off → SKIP no_ceiling; HOLD → SKIP OWNER_HOLD', async () => {
+    const a = harness();
+    a.set({ open: [nTracker], board: nState({ ltp: 50 }) });
+    a.svc.use(EXIT, SHADOW_C, TABLE);
+    await a.svc.runOnce(at(0));
+    expect(a.actions()).toEqual(['SKIP:ceiling_through_ltp']);
+
+    const b = harness();
+    b.set({ open: [nTracker], board: nState() });
+    b.svc.use(EXIT, SHADOW_C, {});
+    await b.svc.runOnce(at(0));
+    expect(b.actions()).toEqual(['SKIP:no_ceiling']);
+
+    const c = harness();
+    c.set({ open: [nTracker], board: nState() });
+    c.svc.use(parseAutoExitConfig({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_HOLD: 'NIFTY09NOV2624650CE' }), SHADOW_C, TABLE);
+    await c.svc.runOnce(at(0));
+    expect(c.actions()).toEqual(['SKIP:OWNER_HOLD']);
+  });
+
+  it('a manual (not SENTINEL-owned) position gets no ceiling stop', async () => {
+    const h = harness();
+    h.set({ open: [nTracker], board: nState({ ownership: 'OBSERVE_ONLY' }) });
+    h.svc.use(EXIT, SHADOW_C, TABLE);
+    await h.svc.runOnce(at(0));
+    expect(h.actions()).toEqual(['SKIP:NOT_SENTINEL_OWNED']);
+  });
+
+  it('a resting ceiling stop is KEPT (not cancelled) when the price later runs through it — it is the protection', async () => {
+    const h = harness();
+    h.set({ open: [nTracker], board: nState() });
+    h.svc.use(EXIT, SHADOW_C, TABLE);
+    await h.svc.runOnce(at(0));
+    h.set({ board: nState({ ltp: 50, at: T0 + 30_000 }) });
+    await h.svc.runOnce(at(30));
+    expect(h.actions()).toEqual(['PLACE']);
+  });
+
+  it('on exit: EXIT_COMPARE scores the ceiling stop (would_fill) against the real exit, as today', async () => {
+    const h = harness();
+    h.set({ open: [nTracker], board: nState() });
+    h.svc.use(EXIT, SHADOW_C, TABLE);
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(T0);
+    await h.svc.runOnce(at(0));
+    h.rows[0].at = at(0);
+    h.set({ open: [], closed: [tracker({ qty: 75, status: 'CLOSED', exitPrice: 40, exitTime: at(200) })] });
+    h.repo.exitFill.mockResolvedValue({ fillPrice: 40, fillAt: at(200) });
+    h.candles.read.mockResolvedValue([
+      { ts: T0 + 60_000, open: 100, high: 101, low: 60, close: 61, volume: 0 },
+      { ts: T0 + 120_000, open: 61, high: 61, low: 45, close: 46, volume: 0 },
+    ]);
+    for (const s of [210, 400, 415, 430, 445]) await h.svc.runOnce(at(s));
+    nowSpy.mockRestore();
+    const cmp = h.rows.find((r) => r.action === 'EXIT_COMPARE');
+    expect(cmp).toMatchObject({ exitPrice: 40, wouldFillPrice: 53.35, wouldFillLimit: 53.2, reason: 'TRADED_THROUGH' });
+    expect(cmp.savedRupees).toBeCloseTo((53.35 - 40) * 75, 2);
+  });
+
+  it('live: the intent carries the ceiling trigger (eligible without an armed floor); NOT_PLACEABLE reads ceiling_through_ltp, NO_FLOOR reads no_ceiling', async () => {
+    const h = harness();
+    h.set({ open: [nTracker], board: nState() });
+    h.svc.use(EXIT, LIVE_C, TABLE);
+    h.executor.syncFloorStops.mockResolvedValueOnce([{ trackerId: 't1', action: 'NONE', reason: 'NOT_PLACEABLE' }] as never);
+    await h.svc.runOnce(at(0));
+    const intents = h.executor.syncFloorStops.mock.calls[0][1] as any[];
+    expect(intents[0]).toMatchObject({ trackerId: 't1', floor: 53.35, eligible: { ok: true } });
+    expect(h.actions()).toEqual(['SKIP:ceiling_through_ltp']);
+
+    const b = harness();
+    b.set({ open: [nTracker], board: nState() });
+    b.svc.use(EXIT, LIVE_C, {});
+    b.executor.syncFloorStops.mockResolvedValueOnce([{ trackerId: 't1', action: 'NONE', reason: 'NO_FLOOR' }] as never);
+    await b.svc.runOnce(at(0));
+    expect((b.executor.syncFloorStops.mock.calls[0][1] as any[])[0]).toMatchObject({ floor: null });
+    expect(b.actions()).toEqual(['SKIP:no_ceiling']);
+  });
+
+  it('FLOOR_BROKER_SL_AT unset: the noise placement is unchanged even with the ceiling table on', async () => {
+    const h = harness();
+    h.svc.use(EXIT, SHADOW, TABLE);
+    await h.svc.runOnce(at(0));
+    expect(h.rows[0]).toMatchObject({ action: 'PLACE', triggerPrice: 180.75, limitPrice: 180.6, floorPrice: 180.74, detail: null });
+    const u = harness();
+    u.set({ board: state({ floor: { basis: 'noise', armed: false, level: 175 } }) });
+    u.svc.use(EXIT, SHADOW, TABLE);
+    await u.svc.runOnce(at(0));
+    expect(u.actions()).toEqual(['SKIP:FLOOR_DISARMED']);
+  });
+});
+
 describe('FloorBrokerSlService — live', () => {
   it('hands the intents to the executor (one call per user) and records what it did', async () => {
     const h = harness();

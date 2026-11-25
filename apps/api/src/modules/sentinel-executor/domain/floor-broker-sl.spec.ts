@@ -2,6 +2,7 @@
 import { parseAutoExitConfig } from './auto-exit.config';
 import {
   FLOOR_STOP_TAG_PREFIX,
+  ceilingStopTrigger,
   desiredFloorStop,
   floorStopTag,
   parseFloorBrokerSlConfig,
@@ -173,5 +174,81 @@ describe('simulateStopFill (shadow measurement and the replay)', () => {
   it('a BUY stop (short) mirrors it', () => {
     const s = [{ at: m(0), trigger: 100, limit: 100.15 }];
     expect(simulateStopFill({ side: 'BUY', bars: [bar(1, 98, 103, 97, 102)], steps: s, untilMs: m(9), actualExit: 104 })).toMatchObject({ fill: 100, fillAtLimit: 100.15 });
+  });
+});
+
+describe('FLOOR_BROKER_SL_AT — where the resting stop sits (2026-11-25 catastrophe floor)', () => {
+  it('unset or noise = the noise floor (today); ceiling = the rupee ceiling; junk falls back to noise with a problem', () => {
+    expect(parseFloorBrokerSlConfig({}, liveExit).at).toBe('noise');
+    expect(parseFloorBrokerSlConfig({ FLOOR_BROKER_SL_AT: 'noise' }, liveExit).at).toBe('noise');
+    const c = parseFloorBrokerSlConfig({ FLOOR_BROKER_SL_AT: ' ceiling ' }, liveExit);
+    expect(c.at).toBe('ceiling');
+    expect(c.problems).toEqual([]);
+    const j = parseFloorBrokerSlConfig({ FLOOR_BROKER_SL_AT: 'rupees' }, liveExit);
+    expect(j.at).toBe('noise');
+    expect(j.problems.join()).toMatch(/FLOOR_BROKER_SL_AT=rupees is not noise\|ceiling/);
+  });
+});
+
+describe('ceilingStopTrigger — the premium at which the loss equals the class ceiling', () => {
+  const TABLE = { HARD_LOSS_CEILING_BY_CLASS: 'INDEX_OPT:5000,STOCK_OPT:5000,GOLD:7500,SILVER:7500,MCX:5000' };
+  const nifty = { symbol: 'NIFTY02DEC2626000CE', exchange: 'NFO', side: 'LONG' as const, entry: 120, qty: 75, ltp: 118, tick: 0.05, env: TABLE };
+
+  it('NIFTY CE 1 lot 75 @120, ceiling 5000 → 120 − 5000/75 = 53.33, rounded UP to the tick (exits a little earlier) = 53.35', () => {
+    expect(ceilingStopTrigger(nifty)).toEqual({ ok: true, trigger: 53.35, ceiling: 5000, valueFactor: 1, units: 75 });
+    // The stop it asks for: SELL, limit 3 ticks under.
+    expect(desiredFloorStop({ side: 'LONG', floor: 53.35, ltp: 118, tick: 0.05, limitTicks: 3, quantity: 75 }))
+      .toEqual({ ok: true, side: 'SELL', trigger: 53.35, limit: 53.2, quantity: 75 });
+  });
+
+  it('a negative tracker qty is the same position size (|qty|)', () => {
+    expect(ceilingStopTrigger({ ...nifty, qty: -75 })).toMatchObject({ ok: true, trigger: 53.35 });
+  });
+
+  it('GOLD option uses the MCX contract value (₹100 per point per lot): 1 lot @2000.3, ceiling 7500 → 2000.3 − 75 = 1925.3 → 1925.5 on a ₹0.5 tick', () => {
+    expect(ceilingStopTrigger({ symbol: 'GOLD26DEC26130000PE', exchange: 'MCX', side: 'LONG', entry: 2000.3, qty: 1, ltp: 1990, tick: 0.5, env: TABLE }))
+      .toEqual({ ok: true, trigger: 1925.5, ceiling: 7500, valueFactor: 100, units: 1 });
+  });
+
+  it('GOLDM counts as GOLD (₹7,500) with its own factor 0.1: 100 units @2000 → 2000 − 7500/10 = 1250', () => {
+    expect(ceilingStopTrigger({ symbol: 'GOLDM03DEC26130000CE', exchange: 'MCX', side: 'LONG', entry: 2000, qty: 100, ltp: 1990, tick: 0.5, env: TABLE }))
+      .toEqual({ ok: true, trigger: 1250, ceiling: 7500, valueFactor: 0.1, units: 100 });
+  });
+
+  it('CRUDEOIL (other MCX ₹5,000, factor 1): 100 units @250 → 250 − 50 = 200', () => {
+    expect(ceilingStopTrigger({ symbol: 'CRUDEOIL16DEC265800CE', exchange: 'MCX', side: 'LONG', entry: 250, qty: 100, ltp: 240, tick: 0.1, env: TABLE }))
+      .toMatchObject({ ok: true, trigger: 200, ceiling: 5000, valueFactor: 1 });
+  });
+
+  it('SELL side mirrors: a short SENSEX (BFO) 60 @200 → 200 + 5000/60 = 283.33, rounded DOWN to the tick = 283.30', () => {
+    const r = ceilingStopTrigger({ symbol: 'SENSEX27NOV2683600PE', exchange: 'BFO', side: 'SHORT', entry: 200, qty: 60, ltp: 205, tick: 0.05, env: TABLE });
+    expect(r).toEqual({ ok: true, trigger: 283.3, ceiling: 5000, valueFactor: 1, units: 60 });
+    expect(desiredFloorStop({ side: 'SHORT', floor: 283.3, ltp: 205, tick: 0.05, limitTicks: 3, quantity: 60 }))
+      .toEqual({ ok: true, side: 'BUY', trigger: 283.3, limit: 283.45, quantity: 60 });
+  });
+
+  it('a trigger on the wrong side of the LTP (would fire at once) is never placed: ceiling_through_ltp', () => {
+    expect(ceilingStopTrigger({ ...nifty, ltp: 50 })).toEqual({ ok: false, reason: 'ceiling_through_ltp' });
+    expect(ceilingStopTrigger({ ...nifty, ltp: 53.35 })).toEqual({ ok: false, reason: 'ceiling_through_ltp' });
+    expect(ceilingStopTrigger({ ...nifty, ltp: 53.4 })).toMatchObject({ ok: true, trigger: 53.35 }); // one tick clear
+    expect(ceilingStopTrigger({ symbol: 'SENSEX27NOV2683600PE', exchange: 'BFO', side: 'SHORT', entry: 200, qty: 60, ltp: 290, tick: 0.05, env: TABLE }))
+      .toEqual({ ok: false, reason: 'ceiling_through_ltp' });
+    expect(ceilingStopTrigger({ ...nifty, ltp: NaN })).toEqual({ ok: false, reason: 'ceiling_through_ltp' });
+  });
+
+  it('table off / class unlisted → no_ceiling (no stop; the code floor keeps today\'s figures)', () => {
+    expect(ceilingStopTrigger({ ...nifty, env: {} })).toEqual({ ok: false, reason: 'no_ceiling' });
+    expect(ceilingStopTrigger({ ...nifty, env: { HARD_LOSS_CEILING_BY_CLASS: 'off' } })).toEqual({ ok: false, reason: 'no_ceiling' });
+    expect(ceilingStopTrigger({ ...nifty, env: { HARD_LOSS_CEILING_BY_CLASS: 'GOLD:7500' } })).toEqual({ ok: false, reason: 'no_ceiling' });
+  });
+
+  it('a long whose whole premium is less than the ceiling cannot reach it: ceiling_unreachable', () => {
+    expect(ceilingStopTrigger({ ...nifty, entry: 40, ltp: 41 })).toEqual({ ok: false, reason: 'ceiling_unreachable' });
+  });
+
+  it('bad inputs are refused, never guessed', () => {
+    expect(ceilingStopTrigger({ ...nifty, qty: 0 })).toEqual({ ok: false, reason: 'BAD_QTY' });
+    expect(ceilingStopTrigger({ ...nifty, tick: 0 })).toEqual({ ok: false, reason: 'BAD_TICK' });
+    expect(ceilingStopTrigger({ ...nifty, entry: NaN })).toEqual({ ok: false, reason: 'NO_ENTRY' });
   });
 });

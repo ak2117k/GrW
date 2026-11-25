@@ -96,6 +96,11 @@ import { parseSignalIntakeConfig, SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig 
             close: c.close,
           }));
         },
+        intraday15m: async (exchange, token, from, to) => {
+          if (!cfg.ownerUserId) return [];
+          const rows = await feeds.fetchCandles(cfg.ownerUserId, token, exchange, '15m', from, to);
+          return (rows ?? []).map((c) => ({ ts: c.timestamp.getTime(), open: c.open, high: c.high, low: c.low, close: c.close }));
+        },
       }),
       inject: [UserFeedManager, SIGNAL_INTAKE_CONFIG],
     },
@@ -116,6 +121,7 @@ import { parseSignalIntakeConfig, SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig 
     SignalWatchService,
     SetupWatchService,
   ],
-  exports: [SignalIntakeService, SIGNAL_INTAKE_CONFIG, SignalVocabularyService],
+  // SIGNAL_INFO_BARS / SIGNAL_INFO_MASTER: the message-reader night scoring reuses the same bar loader and master.
+  exports: [SignalIntakeService, SIGNAL_INTAKE_CONFIG, SignalVocabularyService, SIGNAL_INFO_BARS, SIGNAL_INFO_MASTER],
 })
 export class SignalIntakeModule {}

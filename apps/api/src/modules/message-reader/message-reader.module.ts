@@ -9,6 +9,7 @@ import { TradeSentinelModule } from '../trade-sentinel/trade-sentinel.module';
 import { MessageReaderController } from './controllers/message-reader.controller';
 import { MESSAGE_READER_CONFIG, parseMessageReaderConfig, type MessageReaderConfig } from './message-reader.config';
 import { MessageReaderRepository } from './repositories/message-reader.repository';
+import { ClaimScoringService } from './services/claim-scoring.service';
 import { MessageReaderLlm } from './services/message-reader-llm.service';
 import { MESSAGE_READER_CLOCK, MessageReaderCron } from './services/message-reader.cron';
 import { MessageReaderService } from './services/message-reader.service';
@@ -20,6 +21,7 @@ import { ReaderPacketService } from './services/reader-packet.service';
  * (image posts after the vision read) is read by the AI against our live data → message_readings.
  * Listens to `telegram.message` and `signal.vision.done`; places nothing, emits nothing. A 5-minute check
  * alerts ops when posts arrive and nothing is read; in `on` mode confirmed market-wide claims alert the owner.
+ * Nightly (15:25 / 18:30 IST) each claim is scored against what the market did (message_readings.outcomes).
  * GET /api/message-reader/health and /notes (owner only).
  * MESSAGE_READER=off (default) | shadow | on; also off unless AI agents are on.
  * SignalIntakeModule supplies the pre-filter vocabulary (it must never import this module).
@@ -36,6 +38,8 @@ import { ReaderPacketService } from './services/reader-packet.service';
     MessageReaderService,
     // NSE trading days for the 5-minute dead-reader check (holidays included).
     { provide: MESSAGE_READER_CLOCK, useFactory: () => makeSentinelClock(process.env.HUB_MCX_LATE_CLOSE) },
+    // Night review of the claims (15:25 close A/D, 18:30 scores) on signal-intake's SIGNAL_INFO_BARS.
+    ClaimScoringService,
     MessageReaderCron,
   ],
   exports: [MessageReaderService, MessageReaderRepository, MESSAGE_READER_CONFIG],

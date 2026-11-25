@@ -7,14 +7,20 @@ import { agentsOn } from '../../ai-gateway/agents/agent-registry';
 import { deadReaderText, HEALTH_WINDOW_MS, readerUnhealthy, withinReaderWindow } from '../domain/reader-health';
 import { MESSAGE_READER_CONFIG, type MessageReaderConfig } from '../message-reader.config';
 import { MessageReaderRepository } from '../repositories/message-reader.repository';
+import { ClaimScoringService } from './claim-scoring.service';
 import { MESSAGE_READER_AGENTS_ON, MESSAGE_READER_ALERT, MESSAGE_READER_NOW, type ReaderAlert } from './message-reader.service';
 
 /** Every 5 min, 09:00–15:55 IST on weekdays; the 09:15–15:30 window and holidays are checked in code. */
 export const MESSAGE_READER_HEALTH_CRON = '*/5 9-15 * * 1-5';
+/** 15:25 IST: the session's advance/decline ratio, parked on its rows for the night scoring (A/D at the close). */
+export const MESSAGE_READER_CLOSE_BREADTH_CRON = '25 15 * * 1-5';
+/** 18:30 IST: night scoring of the claims whose session is over. */
+export const MESSAGE_READER_SCORE_CRON = '30 18 * * 1-5';
 export const MESSAGE_READER_CLOCK = Symbol('MESSAGE_READER_CLOCK');
 export const DEAD_READER_ALERT_KEY = 'message-reader-dead';
 export const AGENTS_OFF_ALERT_KEY = 'message-reader-agents-off';
 const LEASE_TTL_MS = 4 * 60_000;
+const SCORE_LEASE_TTL_MS = 30 * 60_000;
 
 export type HealthStore = Pick<MessageReaderRepository, 'countsSince' | 'lastFailure'>;
 export interface TradingDayClock {
@@ -42,6 +48,7 @@ export class MessageReaderCron implements OnApplicationBootstrap {
     @Optional() @Inject(MESSAGE_READER_NOW) private readonly nowFn?: () => Date,
     @Optional() @Inject(MESSAGE_READER_AGENTS_ON) private readonly agentsOnFn?: () => boolean,
     @Optional() @Inject(MESSAGE_READER_ALERT) private readonly alertFn?: ReaderAlert,
+    @Optional() private readonly scoring?: ClaimScoringService,
   ) {}
 
   private agentsOn(): boolean {
@@ -71,6 +78,34 @@ export class MessageReaderCron implements OnApplicationBootstrap {
       else await job();
     } catch (e) {
       this.logger.warn(`[message-reader] health check failed: ${errText(e)}`);
+    }
+  }
+
+  /** 15:25 IST on NSE trading days, while the reader is enabled (no rows are written when it is off). */
+  @Cron(MESSAGE_READER_CLOSE_BREADTH_CRON, { name: 'message-reader-close-breadth', timeZone: 'Asia/Kolkata' })
+  async onCloseBreadth(): Promise<void> {
+    if (this.cfg.mode === 'off') return;
+    await this.nightJob('message-reader-close-breadth', LEASE_TTL_MS, (s, now) => s.storeCloseBreadth(now));
+  }
+
+  /** 18:30 IST on NSE trading days, whatever the mode: rows read while it was on still finish their DAYS / WEEKS horizons. */
+  @Cron(MESSAGE_READER_SCORE_CRON, { name: 'message-reader-score', timeZone: 'Asia/Kolkata' })
+  async onScore(): Promise<void> {
+    await this.nightJob('message-reader-score', SCORE_LEASE_TTL_MS, (s, now) => s.scoreNight(now));
+  }
+
+  private async nightJob(name: string, ttlMs: number, run: (s: ClaimScoringService, now: Date) => Promise<unknown>): Promise<void> {
+    const now = this.nowFn ? this.nowFn() : new Date();
+    if (!this.clock.isTradingDay('NSE', now)) return;
+    try {
+      if (!bootJobsEnabled()) return void this.logger.log(BOOT_JOBS_DISABLED);
+      const scoring = this.scoring;
+      if (!scoring) return void this.logger.warn(`[message-reader] ${name}: claim scoring service not wired`);
+      const job = () => run(scoring, now);
+      if (this.lease) await this.lease.runExclusiveFailClosed(name, ttlMs, job);
+      else await job();
+    } catch (e) {
+      this.logger.warn(`[message-reader] ${name} failed: ${errText(e)}`);
     }
   }
 

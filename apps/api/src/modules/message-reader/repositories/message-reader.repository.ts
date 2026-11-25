@@ -83,6 +83,16 @@ export interface UnscoredReading {
   kind: string | null;
   scope: ReadScope;
   claims: Claim[];
+  /** The 15:25 IST advance/decline the close-breadth job stored on the row (session = the day it was taken). */
+  closeBreadth: { session: string; adAtClose: number } | null;
+}
+
+/** What the 15:25 IST job parks in `outcomes` until the night scoring replaces it with the claim scores. */
+interface PendingOutcome {
+  pending: true;
+  adSession: string;
+  adAtClose: number;
+  adAt: string;
 }
 
 const IST_OFFSET_MS = 330 * 60_000;
@@ -295,9 +305,23 @@ export class MessageReaderRepository implements ReaderPacketSources {
       where: { status: 'READ', outcomeFilledAt: null, postedAt: { gte: since }, scope: { not: null } },
       orderBy: { postedAt: 'asc' },
       take: UNSCORED_ROWS,
-      select: { messageId: true, channelId: true, postedAt: true, sessionDate: true, kind: true, scope: true, claims: true },
+      select: { messageId: true, channelId: true, postedAt: true, sessionDate: true, kind: true, scope: true, claims: true, outcomes: true },
     });
-    return rows.map((r) => ({ ...r, scope: r.scope as ReadScope, claims: (r.claims ?? []) as unknown as Claim[] }));
+    return rows.map(({ outcomes, ...r }) => {
+      const p = outcomes as Partial<PendingOutcome> | null;
+      const closeBreadth = p && p.pending === true && typeof p.adSession === 'string' && typeof p.adAtClose === 'number' ? { session: p.adSession, adAtClose: p.adAtClose } : null;
+      return { ...r, scope: r.scope as ReadScope, claims: (r.claims ?? []) as unknown as Claim[], closeBreadth };
+    });
+  }
+
+  /** Parks the session's 15:25 IST A/D ratio on its not-yet-scored rows (replaced by the scores at night). */
+  async storeCloseBreadth(sessionDate: string, adAtClose: number, at: Date): Promise<number> {
+    const pending: PendingOutcome = { pending: true, adSession: sessionDate, adAtClose, adAt: at.toISOString() };
+    const r = await this.prisma.messageReading.updateMany({
+      where: { sessionDate, outcomeFilledAt: null },
+      data: { outcomes: pending as unknown as Prisma.InputJsonValue },
+    });
+    return r.count;
   }
 
   async fillOutcome(messageId: string, outcomes: unknown[], now: Date): Promise<void> {

@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { parseMessageReaderConfig, type ReaderMode } from '../message-reader.config';
 import type { ReaderCounts } from '../repositories/message-reader.repository';
-import { MESSAGE_READER_HEALTH_CRON, MessageReaderCron } from './message-reader.cron';
+import { MESSAGE_READER_CLOSE_BREADTH_CRON, MESSAGE_READER_HEALTH_CRON, MESSAGE_READER_SCORE_CRON, MessageReaderCron } from './message-reader.cron';
 
 const OPEN = new Date('2026-11-25T05:00:00Z'); // Wed 10:30 IST
 
@@ -13,6 +13,7 @@ type Opts = {
   counts?: Partial<ReaderCounts>;
   lastFailure?: { at: Date; error: string | null } | null;
   lease?: { runExclusiveFailClosed: jest.Mock };
+  noScoring?: boolean;
 };
 
 function make(o: Opts = {}) {
@@ -23,8 +24,9 @@ function make(o: Opts = {}) {
   const clock = { isTradingDay: jest.fn(() => o.tradingDay ?? true) };
   const alert = jest.fn(async () => true);
   const cfg = parseMessageReaderConfig({ MESSAGE_READER: o.mode ?? 'shadow' });
-  const cron = new MessageReaderCron(repo, cfg, clock, o.lease as never, () => o.now ?? OPEN, () => o.agents ?? true, alert);
-  return { cron, repo, clock, alert };
+  const scoring = { storeCloseBreadth: jest.fn(async () => 0.8), scoreNight: jest.fn(async () => ({ filled: 1, pending: 0 })) };
+  const cron = new MessageReaderCron(repo, cfg, clock, o.lease as never, () => o.now ?? OPEN, () => o.agents ?? true, alert, o.noScoring ? undefined : (scoring as never));
+  return { cron, repo, clock, alert, scoring };
 }
 
 describe('MessageReaderCron (reader health)', () => {
@@ -143,5 +145,72 @@ describe('MessageReaderCron (reader health)', () => {
     m.repo.countsSince.mockRejectedValueOnce(new Error('db down'));
     await expect(m.cron.onHealth()).resolves.toBeUndefined();
     expect(Logger.prototype.warn).toHaveBeenCalledWith(expect.stringContaining('db down'));
+  });
+});
+
+describe('MessageReaderCron (night scoring of claims)', () => {
+  const AT_1525 = new Date('2026-11-25T09:55:00Z');
+  const AT_1830 = new Date('2026-11-25T13:00:00Z');
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    delete process.env.BOOT_JOBS;
+  });
+
+  it('stores the close A/D at 15:25 and scores at 18:30 IST, weekdays', () => {
+    expect(MESSAGE_READER_CLOSE_BREADTH_CRON).toBe('25 15 * * 1-5');
+    expect(MESSAGE_READER_SCORE_CRON).toBe('30 18 * * 1-5');
+  });
+
+  it('15:25: stores the close breadth under its lease', async () => {
+    const lease = { runExclusiveFailClosed: jest.fn(async (_n: string, _t: number, fn: () => Promise<unknown>) => fn()) };
+    const m = make({ now: AT_1525, lease });
+    await m.cron.onCloseBreadth();
+    expect(lease.runExclusiveFailClosed).toHaveBeenCalledWith('message-reader-close-breadth', expect.any(Number), expect.any(Function));
+    expect(m.scoring.storeCloseBreadth).toHaveBeenCalledWith(AT_1525);
+  });
+
+  it('15:25: nothing when the reader is off, on a holiday, or with BOOT_JOBS=false', async () => {
+    const off = make({ mode: 'off', now: AT_1525 });
+    await off.cron.onCloseBreadth();
+    const holiday = make({ tradingDay: false, now: AT_1525 });
+    await holiday.cron.onCloseBreadth();
+    process.env.BOOT_JOBS = 'false';
+    const noBoot = make({ now: AT_1525 });
+    await noBoot.cron.onCloseBreadth();
+    for (const m of [off, holiday, noBoot]) expect(m.scoring.storeCloseBreadth).not.toHaveBeenCalled();
+  });
+
+  it('18:30: scores under its lease, also when the reader is off (pending DAYS / WEEKS claims finish)', async () => {
+    const lease = { runExclusiveFailClosed: jest.fn(async (_n: string, _t: number, fn: () => Promise<unknown>) => fn()) };
+    const m = make({ mode: 'off', now: AT_1830, lease });
+    await m.cron.onScore();
+    expect(lease.runExclusiveFailClosed).toHaveBeenCalledWith('message-reader-score', expect.any(Number), expect.any(Function));
+    expect(m.scoring.scoreNight).toHaveBeenCalledWith(AT_1830);
+  });
+
+  it('18:30: nothing on a holiday or with BOOT_JOBS=false', async () => {
+    const holiday = make({ tradingDay: false, now: AT_1830 });
+    await holiday.cron.onScore();
+    process.env.BOOT_JOBS = 'false';
+    const noBoot = make({ now: AT_1830 });
+    await noBoot.cron.onScore();
+    for (const m of [holiday, noBoot]) expect(m.scoring.scoreNight).not.toHaveBeenCalled();
+  });
+
+  it('a failing job is logged, not thrown', async () => {
+    const m = make({ now: AT_1830 });
+    m.scoring.scoreNight.mockRejectedValueOnce(new Error('bars down'));
+    await expect(m.cron.onScore()).resolves.toBeUndefined();
+    expect(Logger.prototype.warn).toHaveBeenCalledWith(expect.stringContaining('bars down'));
+  });
+
+  it('warns (not silent) when the scoring service is not wired', async () => {
+    const m = make({ now: AT_1830, noScoring: true });
+    await m.cron.onScore();
+    expect(Logger.prototype.warn).toHaveBeenCalledWith(expect.stringContaining('not wired'));
   });
 });

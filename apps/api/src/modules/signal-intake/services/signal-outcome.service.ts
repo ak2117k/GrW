@@ -22,6 +22,8 @@ export const SIGNAL_INFO_VOCAB = Symbol('SIGNAL_INFO_VOCAB');
 /** Daily bars of one instrument over the owner's own Angel session. */
 export interface InfoBars {
   daily(exchange: string, token: string, from: Date, to: Date): Promise<DailyBar[]>;
+  /** 15-minute bars (`ts` = bar start, ms), same session: the message-reader night scoring's post-time NIFTY level. */
+  intraday15m?(exchange: string, token: string, from: Date, to: Date): Promise<Array<{ ts: number; open: number; high: number; low: number; close: number }>>;
 }
 
 /** INFO rows posted within this many days are (re)tried; an item still PENDING after INFO_PENDING_DAYS is NO_DATA. */

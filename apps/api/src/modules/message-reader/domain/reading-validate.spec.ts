@@ -1,4 +1,4 @@
-import { validateReading } from './reading-validate';
+import { indexPacket, validateReading } from './reading-validate';
 
 const claim = (over: Record<string, unknown> = {}) => ({
   text: 'nifty strong',
@@ -92,5 +92,89 @@ describe('validateReading', () => {
     if (!r.ok) return;
     expect(r.reply.claims[0]).toEqual(c);
     expect(r.reply.call).toBeNull();
+  });
+});
+
+describe('validateReading — blank strings (final review #4)', () => {
+  it.each([
+    ['text', claim({ text: '   ' })],
+    ['subject', claim({ subject: ' \t ' })],
+  ])('rejects a whitespace-only claim %s', (_f, c) => {
+    expect(validateReading(reply([c])).ok).toBe(false);
+  });
+
+  it('rejects a whitespace-only summary', () => {
+    expect(validateReading(reply([], { summary: '  ' }))).toEqual({ ok: false, reason: expect.stringContaining('summary') });
+  });
+
+  it.each([
+    ['fact', { fact: '  ', value: '0.4', source: 'quotes' }],
+    ['value', { fact: 'NIFTY change', value: ' ', source: 'quotes' }],
+  ])('rejects a whitespace-only evidence %s', (_f, e) => {
+    expect(validateReading(reply([claim({ evidence: [e] })])).ok).toBe(false);
+  });
+});
+
+describe('validateReading — evidence checked against the packet (final review #4)', () => {
+  const PACKET = {
+    at: '2026-11-25T04:00:00.000Z',
+    marketPulse: {
+      indices: { status: 'present', source: 'q', value: { NIFTY: { ltp: 24_350.5, changePercent: 0.4 } } },
+      breadth: { status: 'unavailable', source: 'b', reason: 'timed out after 3000 ms' },
+      sectors: { status: 'present', source: 's', value: [{ sector: 'IT', changePercent: -1.234 }] },
+    },
+    instruments: {
+      NIFTY: { chain: { status: 'present', source: 'c', value: { pcr: 0.92, maxPain: 24300 } } },
+      SBIN: { context: { status: 'unavailable', source: 'i', reason: 'reader build limit' } },
+    },
+    channelRecent: { status: 'present', source: 'ch', value: [] },
+    todayNotes: { status: 'present', source: 'n', value: [] },
+  };
+  const ev = (value: string, source = 'marketPulse.indices') => ({ fact: 'f', value, source });
+  const one = (evidence: unknown[], verdict = 'CONFIRMED') => {
+    const r = validateReading(reply([claim({ verdict, evidence })]), PACKET);
+    if (!r.ok) throw new Error(r.reason);
+    return r.reply.claims[0];
+  };
+
+  it('keeps CONFIRMED when a value is in the packet (commas, ₹, %, + and 2 dp normalised)', () => {
+    expect(one([ev('24,350.50')]).verdict).toBe('CONFIRMED');
+    expect(one([ev('₹24350.5')]).verdict).toBe('CONFIRMED');
+    expect(one([ev('+0.4%')]).verdict).toBe('CONFIRMED');
+    expect(one([ev('-1.23%', 'marketPulse.sectors')]).verdict).toBe('CONFIRMED');
+    expect(one([ev('0.92', 'instruments.NIFTY.chain')]).evidenceMissing).toBeUndefined();
+  });
+
+  it('downgrades to UNCLEAR + evidenceMissing when no evidence value is anywhere in the packet', () => {
+    const c = one([ev('24,500'), ev('1.7%')]);
+    expect(c.verdict).toBe('UNCLEAR');
+    expect(c.evidenceMissing).toBe(true);
+    expect(one([ev('99')], 'CONTRADICTED')).toMatchObject({ verdict: 'UNCLEAR', evidenceMissing: true });
+  });
+
+  it('downgrades when an evidence source names an unavailable block (full path, bare pulse name, failed instrument)', () => {
+    expect(one([ev('0.4', 'marketPulse.breadth')])).toMatchObject({ verdict: 'UNCLEAR', evidenceMissing: true });
+    expect(one([ev('0.4', 'breadth')])).toMatchObject({ verdict: 'UNCLEAR', evidenceMissing: true });
+    expect(one([ev('0.4', 'instruments.SBIN.chain')])).toMatchObject({ verdict: 'UNCLEAR', evidenceMissing: true });
+    // One good item does not rescue an item that cites an unavailable block.
+    expect(one([ev('0.4'), ev('0.4', 'marketPulse.breadth')])).toMatchObject({ verdict: 'UNCLEAR', evidenceMissing: true });
+  });
+
+  it('word values are matched in the packet text; NOT_CHECKABLE is left alone', () => {
+    expect(one([ev('IT', 'marketPulse.sectors')]).verdict).toBe('CONFIRMED');
+    expect(one([ev('nowhere words')], 'NOT_CHECKABLE').verdict).toBe('NOT_CHECKABLE');
+  });
+
+  it('without a packet only the old checks apply (callers that have none)', () => {
+    const r = validateReading(reply([claim({ evidence: [ev('99')] })]));
+    expect(r.ok && r.reply.claims[0].verdict).toBe('CONFIRMED');
+  });
+
+  it('indexPacket: statusOf resolves dotted paths', () => {
+    const idx = indexPacket(PACKET);
+    expect(idx.statusOf('marketPulse.indices')).toBe('present');
+    expect(idx.statusOf('marketPulse.breadth')).toBe('unavailable');
+    expect(idx.statusOf('instruments.NIFTY.chain')).toBe('present');
+    expect(idx.statusOf('nonsense')).toBeNull();
   });
 });

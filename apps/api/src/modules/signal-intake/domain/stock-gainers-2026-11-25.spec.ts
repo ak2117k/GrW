@@ -40,9 +40,9 @@ const CALLS: Array<[string, string, Want]> = [
   ['Midco = MIDCPNIFTY, PE (2026-11-18 10:23)',
     `Midco 14200 pe 160-170\n\n\nsupport 70\n\nview 240\n.${DISCLAIMER}`,
     { underlying: 'MIDCPNIFTY', instrumentKind: 'PE', strike: 14200, side: 'BUY', entryType: 'RANGE', entryLow: 160, entryHigh: 170, sl: 70, targets: [240] }],
-  ['ALKEM LAB = ALKEM, CMP is the entry, no target in the post (2026-11-12 12:33)',
+  ['ALKEM LAB = ALKEM, CMP is the entry, "Support 50 points" = stop 145 − 50, no target (2026-11-12 12:33)',
     'Bullish View On \n\nALKEM LAB\n\n5300CE\n\nCMP 145\n\n\nSupport 50 points \nRESULT TODAY',
-    { underlying: 'ALKEM', instrumentKind: 'CE', strike: 5300, side: 'BUY', entryLow: 145, entryHigh: 145, sl: 50, targets: [] }],
+    { underlying: 'ALKEM', instrumentKind: 'CE', strike: 5300, side: 'BUY', entryLow: 145, entryHigh: 145, sl: 95, targets: [] }],
   ['Midcp = MIDCPNIFTY (2026-11-11 12:58)',
     `Midcp\n\nmidcp 14500 ce 100-110\n\nsupport 50\n\nview 140\n\nholding \n${DISCLAIMER}`,
     { underlying: 'MIDCPNIFTY', instrumentKind: 'CE', strike: 14500, side: 'BUY', entryType: 'RANGE', entryLow: 100, entryHigh: 110, sl: 50, targets: [140] }],
@@ -74,6 +74,30 @@ describe('Stock Gainers calls missed in prod (2026-11-25)', () => {
   ])('stays commentary: %s', (_why, text) => {
     const pf = prefilter(text, vocab);
     expect(pf.pass ? parseSignal(text, vocab, pf.norm) : null).toBeNull();
+  });
+
+  describe('"Support N points" is a distance from the entry; a bare "Support N" is a price', () => {
+    it('Support 50 points with CMP 145 → SL 95', () => {
+      expect(parseSignal('Bullish View On ALKEM LAB 5300CE CMP 145 Support 50 points', vocab)).toMatchObject({ entryLow: 145, sl: 95 });
+    });
+
+    it('Support 50 pts reads the same way', () => {
+      expect(parseSignal('Bullish View On ALKEM LAB 5300CE CMP 145 Support 50 pts', vocab)).toMatchObject({ entryLow: 145, sl: 95 });
+    });
+
+    it('Support 200 points with CMP 145 → no stop → not a call', () => {
+      const text = 'Bullish View On ALKEM LAB 5300CE CMP 145 Support 200 points';
+      const pf = prefilter(text, vocab);
+      expect(pf.pass ? parseSignal(text, vocab, pf.norm) : null).toBeNull();
+    });
+
+    it('a bare "SUPPORT 60" (HUL) is still the stop price 60', () => {
+      expect(parseSignal(`HUL\n\nHUL 2060 CE 75-77\n\nSUPPORT 60\n\nVIEW 90\n\n\n${DISCLAIMER}`, vocab)).toMatchObject({ sl: 60 });
+    });
+
+    it('with a target: CMP 37 Support 20 points For 57 → SL 17', () => {
+      expect(parseSignal('ATHER ENERGY 1420CE CMP 37 Support 20 points For 57', vocab)).toMatchObject({ sl: 17, targets: [57] });
+    });
   });
 
   it.each([

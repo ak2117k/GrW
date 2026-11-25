@@ -65,6 +65,8 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
   let entryType: EntryType | null = null;
   const entry: number[] = [];
   let sl: number | null = null;
+  let slPoints: number | null = null;
+  let slViaSupport = false;
   let slCost = false;
   let noSl = false;
   const targets: number[] = [];
@@ -88,7 +90,10 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
         if (entry.length === 2 && rangeJoin && !entryType) entryType = 'RANGE';
         rangeJoin = false;
       } else if (mode === 'sl') {
-        if (sl === null) sl = v;
+        // "Support 50 points" is a distance from the entry, not a price (resolved once the side is known).
+        if (slViaSupport && (t[i + 1] === 'POINTS' || t[i + 1] === 'PTS')) {
+          if (sl === null && slPoints === null) slPoints = v;
+        } else if (sl === null && slPoints === null) sl = v;
         mode = 'none';
       } else if (mode === 'tgt') {
         // "TARGET 1 140": a lone single digit right after the keyword is the target's ordinal.
@@ -106,6 +111,7 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
     }
     if (w === 'SL') {
       mode = 'sl';
+      slViaSupport = false;
       if (['COST', 'CTC', 'ENTRY'].includes(t[i + 1] ?? '')) slCost = true;
       if (t[i + 1] === 'NO' || t[i - 1] === 'NO' || t[i - 1] === 'WITHOUT') noSl = true;
       continue;
@@ -145,6 +151,7 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
     if (entry.length > 0 && isNumber(t[i + 1] ?? '')) {
       if (w === 'SUPPORT' && mode !== 'tgt') {
         mode = 'sl';
+        slViaSupport = true;
         continue;
       }
       if (w === 'VIEW' || w === 'FOR') {
@@ -170,6 +177,14 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
   const entryHigh = Math.max(...entry);
   // A "range" more than 30% wide is a move being bragged about ("1420CE 37 TO 77 🔥"), not an entry.
   if (entryHigh > entryLow * 1.3) return null;
+  // "CMP 145 Support 50 points" → stop 95: entry − N for a buy, entry + N for a sell; a stop at or
+  // under 0 is dropped (no stop — for a no-target layout that refuses the call).
+  const pointsSl = (s: Side): number | null => {
+    if (slPoints === null) return null;
+    const x = s === 'SELL' ? entryHigh + slPoints : entryLow - slPoints;
+    return x > 0 ? x : null;
+  };
+  if (slPoints !== null) sl = pointsSl(side ?? 'BUY');
   const option = kind === 'CE' || kind === 'PE';
   // "Bullish View On ALKEM LAB 5300CE CMP 145 Support 50" (Stock Gainers, prod 2026-11-12): a named option,
   // its current premium and a stop under it, with the channel's bullish call as the verb. Without the
@@ -186,6 +201,7 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
     else if (bullishCmp && entryType !== 'BELOW' && sl !== null && sl < entryLow && targets.every((x) => x > entryHigh)) side = 'BUY';
     else return null;
   }
+  if (slPoints !== null) sl = pointsSl(side);
   if (!(entryLow > 0)) return null;
   if (!entryType) entryType = entry.length === 2 ? 'RANGE' : 'AT';
   if (entryType === 'RANGE' && entryLow === entryHigh) entryType = 'AT';

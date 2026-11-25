@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ENGINE_UNDERLYING_TAG } from '../../entry-engine/entry-engine.config';
 import { PAPER_WATCH_STRATEGIES } from '../../signal-trader/domain/paper';
+import type { GradeRow, GradeTrade } from '../domain/setup-grade';
 import type { SetupPacketSources } from '../services/setup-packet.service';
 
 /** One ai_setups row as the setup service writes it. */
@@ -51,6 +52,11 @@ export interface SetupTradeRow {
   exitTime: Date | null;
   entryPrice: number | null;
   instrument: { token: string; exchange: string; symbol: string } | null;
+}
+
+/** An ungraded / pending-grade row as the nightly grader reads it (updatedAt guards the conditional write). */
+export interface GradeCandidateRow extends GradeRow {
+  updatedAt: Date;
 }
 
 /** Row statuses that count as an AI setup made (the daily cap); a NO_TRADE or a SKIPPED never counts. */
@@ -241,6 +247,53 @@ export class AiSetupsRepository implements SetupPacketSources {
       select: { id: true, status: true, entryPrice: true },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  // ---- The nightly grader (services/setup-grade.cron.ts). ----
+
+  /**
+   * SETUP / NO_TRADE rows created in [since, until) with no grade yet or a PENDING one, oldest first. GRADED and
+   * UNGRADABLE rows are never selected again (re-running never double-grades); SKIPPED rows are never graded.
+   */
+  gradeCandidates(since: Date, until: Date): Promise<GradeCandidateRow[]> {
+    return this.prisma.aiSetup.findMany({
+      where: {
+        decision: { in: ['SETUP', 'NO_TRADE'] },
+        status: { not: 'SKIPPED' },
+        createdAt: { gte: since, lt: until },
+        OR: [{ grade: { equals: Prisma.AnyNull } }, { grade: { path: ['status'], equals: 'PENDING' } }],
+      },
+      select: {
+        id: true, underlying: true, decision: true, status: true, setup: true, checks: true, packet: true, tradeId: true,
+        validUntil: true, createdAt: true, exitReason: true, pnl: true, grade: true, updatedAt: true,
+      },
+      orderBy: { createdAt: 'asc' },
+      take: 500,
+    }) as Promise<GradeCandidateRow[]>;
+  }
+
+  /** Writes the grade only if the row is unchanged since it was read (false = changed meanwhile; retried next run). */
+  async writeGrade(id: string, readUpdatedAt: Date, grade: unknown): Promise<boolean> {
+    const r = await this.prisma.aiSetup.updateMany({ where: { id, updatedAt: readUpdatedAt }, data: { grade: json(grade) } });
+    return r.count === 1;
+  }
+
+  /** The setup's paper trade for its actual result (pnl is gross; fees hold the paper charges). */
+  gradeTrade(tradeId: string): Promise<GradeTrade | null> {
+    return this.prisma.trade.findUnique({
+      where: { id: tradeId },
+      select: { id: true, status: true, pnl: true, fees: true, exitReasonTag: true, isPaperTrade: true },
+    });
+  }
+
+  /** Every GRADED SETUP grade (the running totals toward the live gate). */
+  async gradedSetupGrades(): Promise<unknown[]> {
+    const rows = await this.prisma.aiSetup.findMany({
+      where: { decision: 'SETUP', status: { not: 'NO_TRADE' }, grade: { path: ['status'], equals: 'GRADED' } },
+      select: { grade: true },
+      take: 5_000,
+    });
+    return rows.map((r) => r.grade);
   }
 
   async channelTitle(channelId: string): Promise<string | null> {

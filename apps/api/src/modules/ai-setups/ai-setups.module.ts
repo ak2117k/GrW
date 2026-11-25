@@ -19,10 +19,12 @@ import type { SignalTraderConfig } from '../signal-trader/domain/signal-trader.c
 import { SIGNAL_TRADER_CONFIG } from '../signal-trader/services/signal-trader.service';
 import { SignalTraderModule } from '../signal-trader/signal-trader.module';
 import { TradeEngineModule } from '../trade-engine/trade-engine.module';
+import { makeSentinelClock } from '../trade-sentinel/overnight/overnight-calendar';
 import { TradeSentinelModule } from '../trade-sentinel/trade-sentinel.module';
 import { AI_SETUPS_CONFIG, parseAiSetupsConfig, type AiSetupsConfig } from './ai-setups.config';
 import { AiSetupsRepository } from './repositories/ai-setups.repository';
 import { AiSetupsService } from './services/ai-setups.service';
+import { AI_SETUP_GRADE_CLOCK, SetupGradeCron } from './services/setup-grade.cron';
 import { SetupLlm } from './services/setup-llm.service';
 import { SETUP_CHAIN_SOURCE, SETUP_NEWS_SOURCE, SETUP_PACKET_SOURCES, SetupPacketService } from './services/setup-packet.service';
 import { LiveSetupWatchMarket } from './services/setup-watch.market';
@@ -72,6 +74,9 @@ import { SETUP_WATCH_MARKET, SetupWatchService, type SetupWatchMarket } from './
       inject: [ModuleRef, MARKET_QUOTE_RESOLVER, SIGNAL_INFO_BARS, SIGNAL_INFO_MASTER, SignalVocabularyService, SIGNAL_TRADER_CONFIG, ConfigService],
     },
     SetupWatchService,
+    // Nightly grading (18:40 NSE / 23:45 MCX IST) on the trading-day calendar.
+    { provide: AI_SETUP_GRADE_CLOCK, useFactory: () => makeSentinelClock(process.env.HUB_MCX_LATE_CLOSE) },
+    SetupGradeCron,
   ],
   exports: [AiSetupsRepository, AI_SETUPS_CONFIG],
 })

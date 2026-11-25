@@ -39,6 +39,11 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
   let strike: number | null = null;
   for (let i = 1; i < t.length; i++) {
     if ((t[i] === 'CE' || t[i] === 'PE') && isNumber(t[i - 1])) {
+      // The same contract written twice ("cochinship 1280 ce 1280 ce 44-45", prod 2026-11-09) is one contract.
+      if (kind === t[i] && strike === Number(t[i - 1])) {
+        used[i] = used[i - 1] = true;
+        continue;
+      }
       if (kind) return null; // two option contracts in one post
       kind = t[i] as 'CE' | 'PE';
       strike = Number(t[i - 1]);
@@ -166,6 +171,10 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
   // A "range" more than 30% wide is a move being bragged about ("1420CE 37 TO 77 🔥"), not an entry.
   if (entryHigh > entryLow * 1.3) return null;
   const option = kind === 'CE' || kind === 'PE';
+  // "Bullish View On ALKEM LAB 5300CE CMP 145 Support 50" (Stock Gainers, prod 2026-11-12): a named option,
+  // its current premium and a stop under it, with the channel's bullish call as the verb. Without the
+  // bullish word the same layout is a study post ("BN 63000PE CMP 400+ Support 60 points"): no call.
+  const bullishCmp = option && strike !== null && t.includes('CMP') && t.includes('BULLISH') && !t.includes('BEARISH');
   if (!side) {
     if (entryType === 'ABOVE') side = 'BUY';
     else if (entryType === 'BELOW' && (kind === 'FUT' || kind === 'EQ')) side = 'SELL';
@@ -174,6 +183,7 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
     // Cash the same way ("Equity Pick MV ELECTRO CMP 785 Support 765 For 820-850": CMP = the current
     // price, support = the stop, for = the targets; owner 2026-10-27).
     else if ((option || kind === 'EQ') && entryType !== 'BELOW' && sl !== null && sl < entryLow && targets.length > 0 && targets.every((x) => x > entryHigh)) side = 'BUY';
+    else if (bullishCmp && entryType !== 'BELOW' && sl !== null && sl < entryLow && targets.every((x) => x > entryHigh)) side = 'BUY';
     else return null;
   }
   if (!(entryLow > 0)) return null;
@@ -197,7 +207,7 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
   // is a named option bought at a premium under its strike ("BANKNIFTY 54400 PE ABOVE 387", "Buy crude
   // 10700 CE 225/230"): a strike + CE/PE + a price to pay is a call even when the SL / target is withheld.
   const hasSl = sl !== null;
-  const optionBuy = option && side === 'BUY' && (verb || entryType === 'ABOVE') && strike !== null && entryHigh < strike;
+  const optionBuy = option && side === 'BUY' && (verb || entryType === 'ABOVE' || (bullishCmp && hasSl)) && strike !== null && entryHigh < strike;
   if (!optionBuy && (verb ? !(hasSl || tgts.length > 0) : !(hasSl && tgts.length > 0))) return null;
 
   // A cash pick whose first target is ≥ 4% away is a swing trade, not intraday ("For 3700-4200" on 3300).

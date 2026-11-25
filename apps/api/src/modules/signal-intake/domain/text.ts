@@ -36,6 +36,8 @@ const SYNONYMS: Array<[RegExp, string]> = [
   [/\bBECHO\b|\bBECH\s*DO\b/g, ' SELL '],
   [/\bHERO\s*-?\s*ZERO\b/g, ' HEROZERO '],
   [/\bCOST\s+TO\s+COST\b/g, ' CTC '],
+  // Stock Gainers' "SUPPORT 3 VUEW 15" (prod 2026-11-20): a typo of its VIEW (= target) word.
+  [/\bVUEW\b/g, ' VIEW '],
 ];
 
 export interface Normalised {
@@ -115,6 +117,8 @@ export function normalise(raw: string, vocab: Vocabulary): Normalised {
   // Fused contract tokens: TATAMOTORS950CE / BNF52000PE / NIFTYFUT / 24000CE.
   s = s.replace(/\b([A-Z&]{2,}?)(\d{2,6}(?:\.\d+)?)(CE|PE)\b/g, '$1 $2 $3');
   s = s.replace(/(\d)(CE|PE|FUT)\b/g, '$1 $2');
+  // "SUNPHARMA 1920 ce.47" (prod 2026-11-09): the premium glued to the contract by a dot.
+  s = s.replace(/(\d\s*)(CE|PE)\.(?=\d)/g, '$1$2 ');
   s = s.replace(/\b([A-Z&]{3,})FUT\b/g, '$1 FUT');
   // Number ranges "300-310" / "300 TO 310" become a TO token; any other dash is a separator.
   s = s.replace(/(\d)\s*(?:-|–|—|~|\bTO\b)\s*(?=\d)/g, '$1 TO ');

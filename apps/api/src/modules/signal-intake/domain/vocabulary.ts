@@ -32,7 +32,8 @@ export const INDEX_ALIASES: Readonly<Record<string, readonly string[]>> = {
   NIFTY: ['NIFTY', 'NIFTY50', 'NF'],
   BANKNIFTY: ['BANKNIFTY', 'BNF', 'BN', 'BANK NIFTY', 'NIFTYBANK', 'NIFTY BANK', 'BANKNIFT'],
   FINNIFTY: ['FINNIFTY', 'FN', 'FIN NIFTY', 'FINIFTY', 'NIFTY FIN SERVICE', 'NIFTY FIN SERVICES', 'NIFTY FINANCIAL SERVICES', 'NIFTY FIN', 'NIFTYFIN'],
-  MIDCPNIFTY: ['MIDCPNIFTY', 'MIDCAPNIFTY', 'MIDCAP NIFTY', 'MIDCP NIFTY', 'NIFTY MIDCAP SELECT', 'NIFTY MID SELECT', 'MIDCAP SELECT', 'MIDCAPSELECT'],
+  // "MIDCP" / "MIDCO" (Stock Gainers, 2026-11) count only beside a strike + CE/PE: see AMBIGUOUS_SYMBOLS.
+  MIDCPNIFTY: ['MIDCPNIFTY', 'MIDCAPNIFTY', 'MIDCAP NIFTY', 'MIDCP NIFTY', 'NIFTY MIDCAP SELECT', 'NIFTY MID SELECT', 'MIDCAP SELECT', 'MIDCAPSELECT', 'MIDCP', 'MIDCO'],
   NIFTYNXT50: ['NIFTYNXT50', 'NIFTY NEXT 50', 'NIFTY NEXT50', 'NIFTYNEXT50', 'NIFTY NXT 50', 'NIFTY JUNIOR'],
   SENSEX: ['SENSEX', 'SX', 'BSE SENSEX'],
   BANKEX: ['BANKEX'],
@@ -77,6 +78,13 @@ export const STOCK_ALIASES: Readonly<Record<string, string>> = {
   // "KPIT TECH 540CE" (2026-10-27) read as TECH-EQ, a different cash line with no options.
   'KPIT TECH': 'KPITTECH',
   KPIT: 'KPITTECH',
+  // Stock Gainers (SEBI Registered) nicknames, prod 2026-11 (filed INFO before). Targets checked in the Angel master.
+  HUL: 'HINDUNILVR',
+  'ALKEM LAB': 'ALKEM',
+  'INDIAN BNK': 'INDIANB',
+  INDIANBNK: 'INDIANB',
+  INDUSBANK: 'INDUSINDBK',
+  'KALYAN JEWELLERS': 'KALYANKJIL',
 };
 
 /**
@@ -90,6 +98,7 @@ export const AMBIGUOUS_SYMBOLS: ReadonlySet<string> = new Set([
   'KEY', 'TIME', 'HOT', 'STAR', 'FIRST', 'ZERO', 'HERO', 'JOIN', 'VIP', 'FREE', 'OK', 'NG', 'SX', 'FN', 'BN', 'NF',
   'MCX', 'BSE', 'NSE', 'RAIN', 'IDEA', 'INDIA', 'LUX', 'HOME', 'GLOBAL', 'ANY', 'TOP', 'UP', 'DOWN', 'CUT', 'NO',
   'LEVEL', 'RANGE', 'GREAT', 'MAX', 'EXIT', 'ENTRY', 'PRICE', 'ONLY', 'AT', 'TO', 'LINK', 'DONE', 'HIT', 'BOOK',
+  'MIDCP', 'MIDCO',
 ]);
 
 /** Build the vocabulary from the static index/commodity lists plus the cash symbols in `stocks`. */
@@ -207,7 +216,8 @@ export function resolveLooseNames(tokens: readonly string[], v: Vocabulary): str
     if (word(a) && word(b) && aClass !== 'INDEX' && aClass !== 'COMMODITY') {
       const joined = `${a}${b}`;
       // The 10-letter cut must keep part of the second word: ATHERENERG + ON cut back to ATHERENERG is no join.
-      const hit = [joined, joined.slice(0, 10)].find((j) => j.length >= 5 && j !== a && isStock(j));
+      // A hyphenated symbol arrives as two words ("Bajaj auto" / "BAJAJ-AUTO" → BAJAJ-AUTO): `normalise` splits dashes.
+      const hit = [joined, joined.slice(0, 10), `${a}-${b}`].find((j) => j.length >= 5 && j !== a && isStock(j));
       if (hit) {
         out.push(v.names.get(hit) as string);
         i++;

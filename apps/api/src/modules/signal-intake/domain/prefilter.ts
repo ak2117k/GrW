@@ -19,6 +19,8 @@ export const AD_RE = /\b(JOIN|SUBSCRIBE|SUBSCRIPTION|WHATSAPP|WATSAPP|WHAT\s*S\s
 export const RECAP_RE = /\b(PNL|P&L|P\/L|TOTAL\s+PROFIT|TODAY'?S?\s+PROFIT|NET\s+PROFIT|PROFIT\s+OF|PROFIT\s+\+?\d{3,}|\d{3,}\s*\+?\s*PROFIT|ACCURACY|SCREENSHOT|TESTIMONIAL|MONTHLY\s+REPORT|WEEKLY\s+REPORT|POINTS\s+CAPTURED|PTS\s+CAPTURED)\b/;
 
 const LEVEL_CALL_RE = /\bSUPPORT \d+(\.\d+)? .*\b(VIEW|FOR) \d/;
+/** "Bullish View On ALKEM LAB 5300CE CMP 145 Support 50" — an option call with no target (Stock Gainers, 2026-11-12). */
+const BULLISH_CMP_CALL_RE = /\bBULLISH\b.*\bCMP \d+(\.\d+)? .*\bSUPPORT \d/;
 /** A cash pick laid out "CMP 785 SUPPORT 765 FOR 820" (CMP = current price, support = stop, for = target). */
 const CASH_LEVEL_CALL_RE = /\bCMP \d+(\.\d+)? .*\bSUPPORT \d+(\.\d+)? .*\b(VIEW|FOR|TGT) \d/;
 
@@ -68,7 +70,7 @@ export function prefilter(raw: string, vocab: Vocabulary): PrefilterResult {
   if (hits.length === 0 && !hasStrikePair(t)) return fail(t.includes(SECTOR_INDEX_TOKEN) ? 'sector-index' : 'no-instrument');
   // An option post laid out as "<strike> CE 15-16 SUPPORT 9 VIEW 21" (Stock Gainers) is a call without an action word.
   const cashCall = hits.some((h) => vocab.classOf.get(h.name) === 'STOCK') && CASH_LEVEL_CALL_RE.test(norm.text);
-  const levelCall = (hasStrikePair(t) && LEVEL_CALL_RE.test(norm.text)) || cashCall;
+  const levelCall = (hasStrikePair(t) && (LEVEL_CALL_RE.test(norm.text) || BULLISH_CMP_CALL_RE.test(norm.text))) || cashCall;
   if (!levelCall && !t.some((w) => ACTION_WORDS.has(w))) return fail('no-action', underlyings);
   let prices = 0;
   for (let i = 0; i < t.length; i++) if (isPriceLike(t, i)) prices++;

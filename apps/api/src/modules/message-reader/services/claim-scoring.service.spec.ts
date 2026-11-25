@@ -43,7 +43,7 @@ const row = (r: Partial<UnscoredReading>): UnscoredReading => ({
   ...r,
 });
 
-type Opts = { rows?: UnscoredReading[]; niftyClose?: number; owner?: string | null; breadth?: { adRatio: number; total: number }; noIntraday?: boolean };
+type Opts = { rows?: UnscoredReading[]; niftyClose?: number; owner?: string | null; breadth?: { adRatio: number; total: number }; noIntraday?: boolean; m15?: IntradayBar[]; failToken?: string };
 
 function make(o: Opts = {}) {
   const repo = {
@@ -52,8 +52,11 @@ function make(o: Opts = {}) {
     storeCloseBreadth: jest.fn(async () => 4),
   };
   const bars = {
-    daily: jest.fn(async (_ex: string, token: string) => (token === '99926000' ? daily(o.niftyClose ?? 26100) : token === '99926009' ? daily(25900) : [])),
-    ...(o.noIntraday ? {} : { intraday15m: jest.fn(async () => m15) }),
+    daily: jest.fn(async (_ex: string, token: string) => {
+      if (token === o.failToken) throw new Error('broker timeout');
+      return token === '99926000' ? daily(o.niftyClose ?? 26100) : token === '99926009' ? daily(25900) : [];
+    }),
+    ...(o.noIntraday ? {} : { intraday15m: jest.fn(async () => o.m15 ?? m15) }),
   };
   const breadth = { getBreadth: jest.fn(async () => ({ advances: 0, declines: 0, unchanged: 0, ...(o.breadth ?? { adRatio: 0.8, total: 50 }) })) };
   const svc = new ClaimScoringService(repo, bars, breadth, { ownerUserId: o.owner === undefined ? 'owner-1' : o.owner });
@@ -134,7 +137,7 @@ describe('ClaimScoringService', () => {
       const m = make({ rows: [row({ scope: 'INSTRUMENT', claims: [claim({ subject: 'NOSUCH', horizon: 'WEEKS' })] })] });
       await expect(m.svc.scoreNight(NOW)).resolves.toEqual({ filled: 1, pending: 0 });
       const outs = (m.repo.fillOutcome.mock.calls[0] as unknown as [string, Array<{ status: string; why: string }>])[1];
-      expect(outs[0]).toMatchObject({ status: 'NOT_SCORED', why: expect.stringContaining('NOSUCH') });
+      expect(outs[0]).toEqual(expect.objectContaining({ status: 'NOT_SCORED', why: 'instrument unresolved: NOSUCH' }));
     });
 
     it('a pending claim older than 12 days is filled NOT_SCORED', async () => {
@@ -161,11 +164,49 @@ describe('ClaimScoringService', () => {
       expect(m.bars.daily).toHaveBeenCalledWith('NSE', '99926013', expect.any(Date), NOW);
     });
 
-    it('without a 15m source the post-time rules are NOT_SCORED, never guessed', async () => {
+    it('without a 15m loader the post-time rules stay pending (never guessed, never filled)', async () => {
       const m = make({ noIntraday: true, rows: [row({ claims: [claim({ claimType: 'RELATIVE_BREADTH' })], closeBreadth: { session: '2026-11-25', adAtClose: 0.8 } })] });
-      await m.svc.scoreNight(NOW);
-      const outs = (m.repo.fillOutcome.mock.calls[0] as unknown as [string, Array<{ status: string }>])[1];
-      expect(outs[0].status).toBe('NOT_SCORED');
+      await expect(m.svc.scoreNight(NOW)).resolves.toEqual({ filled: 0, pending: 1 });
+      expect(m.repo.fillOutcome).not.toHaveBeenCalled();
+      expect(Logger.prototype.warn).toHaveBeenCalledWith(expect.stringContaining('1 rows pending'));
+    });
+
+    it('a 15m fetch returning [] leaves the row unfilled', async () => {
+      const m = make({ m15: [], rows: [row({ claims: [claim({ claimType: 'RELATIVE_BREADTH' })], closeBreadth: { session: '2026-11-25', adAtClose: 0.8 } })] });
+      await expect(m.svc.scoreNight(NOW)).resolves.toEqual({ filled: 0, pending: 1 });
+      expect(m.repo.fillOutcome).not.toHaveBeenCalled();
+    });
+
+    it('the same row is filled NOT_SCORED "data unavailable" once stale', async () => {
+      const old = row({
+        postedAt: new Date('2026-11-12T04:50:00Z'),
+        sessionDate: '2026-11-12',
+        claims: [claim({ claimType: 'RELATIVE_BREADTH' })],
+        closeBreadth: { session: '2026-11-12', adAtClose: 0.8 },
+      });
+      const m = make({ m15: [], rows: [old] });
+      await expect(m.svc.scoreNight(NOW)).resolves.toEqual({ filled: 1, pending: 0 });
+      const outs = (m.repo.fillOutcome.mock.calls[0] as unknown as [string, Array<{ status: string; why: string }>])[1];
+      expect(outs[0]).toMatchObject({ status: 'NOT_SCORED', why: expect.stringContaining('data unavailable') });
+    });
+
+    it('a subject fetch that throws leaves the row unfilled', async () => {
+      const m = make({ failToken: '99926009', rows: [row({ scope: 'INSTRUMENT', claims: [claim({ subject: 'BANKNIFTY', bias: 'BEAR' })] })] });
+      await expect(m.svc.scoreNight(NOW)).resolves.toEqual({ filled: 0, pending: 1 });
+      expect(m.repo.fillOutcome).not.toHaveBeenCalled();
+    });
+
+    it('a NIFTY daily fetch that throws leaves every row with claims unfilled', async () => {
+      const m = make({ failToken: '99926000', rows: [row({ claims: [claim({})] })] });
+      await expect(m.svc.scoreNight(NOW)).resolves.toEqual({ filled: 0, pending: 1 });
+      expect(m.repo.fillOutcome).not.toHaveBeenCalled();
+    });
+
+    it('a mixed row (one scorable, one pending claim) stays unfilled', async () => {
+      const claims = [claim({ subject: 'MARKET', bias: 'BULL' }), claim({ subject: 'BANKNIFTY', bias: 'BEAR' })];
+      const m = make({ failToken: '99926009', rows: [row({ claims })] });
+      await expect(m.svc.scoreNight(NOW)).resolves.toEqual({ filled: 0, pending: 1 });
+      expect(m.repo.fillOutcome).not.toHaveBeenCalled();
     });
 
     it('a row with no claims is filled with an empty list', async () => {

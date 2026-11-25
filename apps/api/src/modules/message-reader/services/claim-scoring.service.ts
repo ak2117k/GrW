@@ -7,13 +7,16 @@ import { SignalVocabularyService } from '../../signal-intake/services/signal-voc
 import { infoRefOf, SIGNAL_INFO_BARS, SIGNAL_INFO_MASTER, type InfoBars } from '../../signal-intake/services/signal-outcome.service';
 import type { SignalTraderConfig } from '../../signal-trader/domain/signal-trader.config';
 import { SIGNAL_TRADER_CONFIG } from '../../signal-trader/services/signal-trader.service';
-import { evaluateClaim, marketContext, postSessionOf, sectorRefOf, type ClaimEvaluation, type IntradayBar } from '../domain/claim-outcome';
+import { DATA_UNAVAILABLE, evaluateClaim, marketContext, postSessionOf, sectorRefOf, type ClaimEvaluation, type IntradayBar } from '../domain/claim-outcome';
 import type { Claim } from '../domain/reading.types';
 import { MessageReaderRepository, type UnscoredReading } from '../repositories/message-reader.repository';
 
 /** Rows posted within this many days are (re)tried. */
 const LOOKBACK_DAYS = 20;
-/** A row with a claim still pending (DAYS / WEEKS horizon not over) after this many days is filled NOT_SCORED. */
+/**
+ * A row with a claim still pending (DAYS / WEEKS horizon not over, or its bars empty / failed / short of the
+ * post's session) is retried nightly; after this many days it is filled NOT_SCORED "data unavailable".
+ */
 const PENDING_DAYS = 12;
 /** Daily bars per instrument: the lookback + 20-day median / ATR14 + holidays. */
 const DAILY_BARS_DAYS = 80;
@@ -46,7 +49,9 @@ export interface ClaimOutcomeRow {
  * parked on its rows (the A/D at read time is not the close); at 18:30 IST every row whose NSE session is
  * over is scored claim by claim (`evaluateClaim`) on NIFTY / subject daily bars and NIFTY 15m bars, all over
  * the owner's own Angel session via signal-intake's `SIGNAL_INFO_BARS`. A claim whose DAYS / WEEKS horizon
- * is not over keeps its row open; after PENDING_DAYS it is filled NOT_SCORED.
+ * is not over, or whose bars are empty / failed (a broker hiccup must not wipe a night's scores), keeps its row
+ * open; after PENDING_DAYS it is filled NOT_SCORED "data unavailable". Only an unresolvable instrument and the
+ * rule-level cases (FLOW / GAP / OTHER, inside the flat band) fill at once. A row fills when no claim is pending.
  */
 @Injectable()
 export class ClaimScoringService {
@@ -123,10 +128,14 @@ export class ClaimScoringService {
         const evals: Array<{ c: Claim; e: ClaimEvaluation }> = [];
         for (const c of r.claims) {
           if (!session || !market) {
-            evals.push({ c, e: { status: 'NOT_SCORED', why: 'no NIFTY session in the bars for the post' } });
+            evals.push({ c, e: { status: 'PENDING', why: `${DATA_UNAVAILABLE}: no NIFTY session in the bars for the post` } });
             continue;
           }
           const ref = needsSubject(c) ? await this.refOf(c, r.postedAt, lookups) : null;
+          if (needsSubject(c) && !ref) {
+            evals.push({ c, e: { status: 'NOT_SCORED', why: `instrument unresolved: ${c.subject}` } });
+            continue;
+          }
           const e = evaluateClaim(c, {
             niftyDaily,
             subjectDaily: ref ? await dailyOf(ref) : null,
@@ -149,7 +158,7 @@ export class ClaimScoringService {
           verdict: c.verdict,
           session,
           status: e.status === 'PENDING' ? 'NOT_SCORED' : e.status,
-          why: e.why,
+          why: e.status === 'PENDING' ? `${DATA_UNAVAILABLE} after ${PENDING_DAYS} days (${e.why})` : e.why,
         }));
         await this.repo.fillOutcome(r.messageId, outcomes, now);
         filled++;
@@ -159,11 +168,15 @@ export class ClaimScoringService {
       }
     }
     this.logger.log(`[message-reader] night scoring: ${filled} filled, ${pending} pending`);
+    if (pending > 0) this.logger.warn(`[message-reader] night scoring left ${pending} rows pending (horizon not over or data unavailable; retried nightly for ${PENDING_DAYS} days)`);
     return { filled, pending };
   }
 
   private async nifty15m(from: Date, to: Date): Promise<IntradayBar[]> {
-    if (!this.bars.intraday15m) return [];
+    if (!this.bars.intraday15m) {
+      this.logger.warn('[message-reader] no NIFTY 15m loader (SIGNAL_INFO_BARS.intraday15m): post-time rules stay pending');
+      return [];
+    }
     try {
       return await this.bars.intraday15m(NIFTY.exchange, NIFTY.token, from, to);
     } catch (e) {

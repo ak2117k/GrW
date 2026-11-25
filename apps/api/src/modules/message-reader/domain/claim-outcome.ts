@@ -55,7 +55,11 @@ export interface IntradayBar {
   close: number;
 }
 
-/** A claim the horizon has not reached yet: the night job waits; {@link scoreClaim} reports it NOT_SCORED. */
+/**
+ * PENDING = the claim cannot be judged YET: its horizon is not over, or the bars it needs are empty / do not
+ * reach the post's session ("data unavailable", e.g. a broker hiccup at 18:30). The night job keeps the row
+ * open and retries the next night; {@link scoreClaim} reports it NOT_SCORED.
+ */
 export type ClaimEvaluation = { status: ClaimScoreStatus | 'PENDING'; why: string };
 
 export const CLAIM_BAND_ATR = INFO_BAND_ATR;
@@ -74,21 +78,23 @@ const istMinutes = (d: Date) => {
   return i.getUTCHours() * 60 + i.getUTCMinutes();
 };
 const notScored = (why: string): ClaimEvaluation => ({ status: 'NOT_SCORED', why });
+export const DATA_UNAVAILABLE = 'data unavailable';
+const unavailable = (what: string): ClaimEvaluation => ({ status: 'PENDING', why: `${DATA_UNAVAILABLE}: ${what}` });
 
-/** One claim's score; a horizon not yet over is NOT_SCORED "pending". */
+/** One claim's score; a horizon not yet over or missing data is NOT_SCORED ("pending" / "data unavailable"). */
 export function scoreClaim(c: Claim, ctx: ClaimScoreCtx): ClaimScore {
   const e = evaluateClaim(c, ctx);
   return e.status === 'PENDING' ? { status: 'NOT_SCORED', why: e.why } : { status: e.status, why: e.why };
 }
 
-/** As {@link scoreClaim}, but keeps PENDING apart so the night job can wait for a DAYS / WEEKS horizon. */
+/** As {@link scoreClaim}, but keeps PENDING apart so the night job can wait (horizon not over, data unavailable). */
 export function evaluateClaim(c: Claim, ctx: ClaimScoreCtx): ClaimEvaluation {
   switch (c.claimType) {
     case 'DIRECTION':
       if (c.subject === 'MARKET') return direction(c, ctx.niftyDaily, 'NIFTY', ctx.postSession);
-      return ctx.subjectDaily ? direction(c, ctx.subjectDaily, c.subject, ctx.postSession) : notScored(`no daily bars for ${c.subject}`);
+      return ctx.subjectDaily?.length ? direction(c, ctx.subjectDaily, c.subject, ctx.postSession) : unavailable(`no daily bars for ${c.subject}`);
     case 'SECTOR':
-      return ctx.subjectDaily ? direction(c, ctx.subjectDaily, c.subject, ctx.postSession) : notScored(`no sector index bars for ${c.subject}`);
+      return ctx.subjectDaily?.length ? direction(c, ctx.subjectDaily, c.subject, ctx.postSession) : unavailable(`no sector index bars for ${c.subject}`);
     case 'CAUTION':
       return caution(ctx);
     case 'RELATIVE_BREADTH':
@@ -107,7 +113,7 @@ function direction(c: Claim, bars: readonly DailyBar[], label: string, postSessi
   );
   if (o.status === 'PENDING') return { status: 'PENDING', why: `pending: ${c.horizon} horizon from ${postSession} not over` };
   if (o.ret === null || o.band === null || o.status === 'NO_DATA' || o.status === 'NO_BIAS' || o.status === 'NOT_JUDGED_MONTHS') {
-    return notScored(`no ${label} daily bars / ATR around ${postSession}`);
+    return unavailable(`no ${label} daily bars / ATR around ${postSession}`);
   }
   const why = `${label} ${signed(o.ret)} close-to-close (${o.baseClose} → ${o.judgedClose}, ${o.session}) vs band ±${o.band}`;
   if (o.status === 'FLAT') return notScored(`flat: ${why}`);
@@ -124,7 +130,7 @@ function caution(ctx: ClaimScoreCtx): ClaimEvaluation {
   if (canFall && postClose - sessionClose >= CLAIM_BAND_ATR * atr14) {
     return { status: 'RIGHT', why: `NIFTY fell ${r2(postClose - sessionClose)} (${postClose} → ${sessionClose}) ≥ 0.3×ATR14 ${r2(CLAIM_BAND_ATR * atr14)}` };
   }
-  if (!canRange || !canFall) return notScored('missing NIFTY range / post level / ATR14 to check the caution');
+  if (!canRange || !canFall) return unavailable('NIFTY 15m range / post level / ATR14 to check the caution');
   return {
     status: 'WRONG',
     why: `calm: range ${r2(sessionRange as number)} < median ${r2(medianRange20 as number)}, NIFTY ${signed((sessionClose as number) - (postClose as number))} from the post (fall < 0.3×ATR14 ${r2(CLAIM_BAND_ATR * (atr14 as number))})`,
@@ -133,8 +139,9 @@ function caution(ctx: ClaimScoreCtx): ClaimEvaluation {
 
 function relativeBreadth(ctx: ClaimScoreCtx): ClaimEvaluation {
   const { postClose, sessionClose, adAtClose } = ctx;
-  if (postClose === null || sessionClose === null) return notScored('missing NIFTY post level / session close');
+  // A missing 15:25 A/D never comes back (it is taken live), so it is not waited for.
   if (adAtClose === null) return notScored('no 15:25 IST advance/decline for the session');
+  if (postClose === null || sessionClose === null) return unavailable('NIFTY 15m post level / session close');
   const ret = sessionClose - postClose;
   const pct = (ret / postClose) * 100;
   const why = `NIFTY ${signed(ret)} (${signed(pct)}%) from the post to the close, A/D ${adAtClose} at 15:25 IST`;

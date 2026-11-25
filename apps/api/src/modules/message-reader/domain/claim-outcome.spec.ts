@@ -1,6 +1,6 @@
 import type { DailyBar } from '../../signal-intake/domain/info-outcome';
 import type { Claim } from './reading.types';
-import { marketContext, postSessionOf, scoreClaim, sectorRefOf, type ClaimScoreCtx, type IntradayBar } from './claim-outcome';
+import { evaluateClaim, marketContext, postSessionOf, scoreClaim, sectorRefOf, type ClaimScoreCtx, type IntradayBar } from './claim-outcome';
 
 /** 30 NIFTY sessions ending 2026-11-25: every bar has a 100-point range (ATR14 = 100), closes flat at 26000. */
 function niftyDays(last: Partial<DailyBar> = {}): DailyBar[] {
@@ -94,6 +94,23 @@ describe('scoreClaim', () => {
     const r = scoreClaim(claim({ subject: 'RELIANCE', bias: 'BEAR' }), ctx({ subjectDaily: niftyDays({ close: 25950 }) }));
     expect(r.status).toBe('RIGHT');
     expect(r.why).toContain('RELIANCE');
+  });
+
+  it('missing bars are PENDING "data unavailable" (retried), reported NOT_SCORED by scoreClaim', () => {
+    for (const [c, x] of [
+      [claim({ subject: 'RELIANCE' }), ctx({ subjectDaily: [] })],
+      [claim({ claimType: 'SECTOR', subject: 'IT' }), ctx({ subjectDaily: null })],
+      [claim({ subject: 'MARKET' }), ctx({ niftyDaily: [] })],
+      [claim({ claimType: 'CAUTION' }), ctx({ sessionRange: null, postClose: null })],
+      [claim({ claimType: 'RELATIVE_BREADTH' }), ctx({ postClose: null, adAtClose: 0.8 })],
+    ] as const) {
+      expect(evaluateClaim(c, x)).toEqual({ status: 'PENDING', why: expect.stringContaining('data unavailable') });
+      expect(scoreClaim(c, x).status).toBe('NOT_SCORED');
+    }
+  });
+
+  it('a missing 15:25 A/D is NOT_SCORED at once (it never comes back)', () => {
+    expect(evaluateClaim(claim({ claimType: 'RELATIVE_BREADTH' }), ctx({ adAtClose: null })).status).toBe('NOT_SCORED');
   });
 
   it('INSTRUMENT with no bars is NOT_SCORED', () => {

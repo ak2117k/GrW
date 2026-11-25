@@ -14,6 +14,8 @@ export interface AiSetupsConfig {
   cooldownMin: 30;
   /** AI_SETUP_MIN_OI — minimum open interest (contracts) of the named option strike. */
   minOi: number;
+  /** AI_SETUP_MAX_AI_CALLS_PER_DAY — setup AI (Opus) calls per IST day, NO_TRADE replies included (default 15). */
+  maxAiCallsPerDay: number;
 }
 
 export const AI_SETUPS_CONFIG = Symbol('AI_SETUPS_CONFIG');
@@ -35,5 +37,6 @@ export function parseAiSetupsConfig(env: Record<string, string | undefined>): Ai
     maxPerDay: 3,
     cooldownMin: 30,
     minOi: int(env.AI_SETUP_MIN_OI, 500, 0, 100_000_000),
+    maxAiCallsPerDay: int(env.AI_SETUP_MAX_AI_CALLS_PER_DAY, 15, 0, 1_000),
   };
 }

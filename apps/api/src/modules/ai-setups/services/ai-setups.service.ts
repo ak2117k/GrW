@@ -22,7 +22,7 @@ export const AI_SETUPS_CLOCK = Symbol('AI_SETUPS_CLOCK');
 /** Setup jobs (packet → AI → checks) running at once (plan: concurrency 2). */
 export const AI_SETUPS_MAX_IN_FLIGHT = 2;
 
-export type SetupStore = Pick<AiSetupsRepository, 'insert' | 'setupsToday' | 'recentOnUnderlying' | 'openOnUnderlying' | 'channelTitle'>;
+export type SetupStore = Pick<AiSetupsRepository, 'insert' | 'setupsToday' | 'aiCallsToday' | 'recentOnUnderlying' | 'openOnUnderlying' | 'channelTitle'>;
 export type SetupPacketPort = Pick<SetupPacketService, 'build'>;
 export type SetupLlmPort = Pick<SetupLlm, 'build'>;
 export interface SetupClock {
@@ -84,7 +84,10 @@ function istInstant(now: Date, hhmm: string): Date {
  *   entry time; no open / pending signal trade, live position, armed trigger or AI setup (PENDING / FILLED) on the
  *   underlying; no AI-built row on it in the last 30 min; fewer than 3 setups today (PENDING / FILLED / EXITED /
  *   EXPIRED rows, plus jobs in flight that passed the guards — a job that would only exceed the cap because of
- *   one in flight waits for it, then re-counts). A guard failure is stored SKIPPED with its reason.
+ *   one in flight waits for it, then re-counts); fewer than AI_SETUP_MAX_AI_CALLS_PER_DAY rows today that reached the
+ *   AI (checks.stage ai / checks, NO_TRADE included; same in-flight rule) — else SKIPPED `ai_daily_cap`, no AI call.
+ *   A guard failure is stored SKIPPED with its reason. A throw while building → SKIPPED (stage checks), so the
+ *   cooldown and the AI call cap still see it.
  * - Then: packet (a throw → SKIPPED); quote / bars15m / chain unavailable → NO_TRADE with the reason, no AI call;
  *   the AI (an error → SKIPPED with it); the AI's NO_TRADE → NO_TRADE; a SETUP → checkSetup + the named option
  *   must be a chain row + validUntil still ahead → PENDING (validUntil) or NO_TRADE naming the failed check.
@@ -178,7 +181,14 @@ export class AiSetupsService {
       return;
     }
     try {
-      await this.store(await this.build(job));
+      let r: AiSetupWrite;
+      try {
+        r = await this.build(job);
+      } catch (e) {
+        // An unexpected reply shape etc.: still one row, so the cooldown and the AI call cap see this job.
+        r = this.skipRow(job, 'checks', `setup build failed: ${errText(e)}`);
+      }
+      await this.store(r);
     } finally {
       this.releaseReservation();
     }
@@ -210,10 +220,13 @@ export class AiSetupsService {
     }
 
     for (;;) {
-      const made = await this.repo.setupsToday(this.now());
+      const at = this.now();
+      const made = await this.repo.setupsToday(at);
       if (made >= this.cfg.maxPerDay) return { ok: false, reason: `daily cap: ${made} AI setups already today (max ${this.cfg.maxPerDay})` };
-      if (made + this.reserved < this.cfg.maxPerDay) break;
-      // Only the jobs in flight could fill the cap: wait for one to store its row, then count again.
+      const calls = await this.repo.aiCallsToday(at);
+      if (calls >= this.cfg.maxAiCallsPerDay) return { ok: false, reason: `ai_daily_cap: ${calls} setup AI calls already today (max ${this.cfg.maxAiCallsPerDay}, AI_SETUP_MAX_AI_CALLS_PER_DAY)` };
+      if (made + this.reserved < this.cfg.maxPerDay && calls + this.reserved < this.cfg.maxAiCallsPerDay) break;
+      // Only the jobs in flight could fill a cap: wait for one to store its row, then count again.
       await new Promise<void>((r) => this.reservationWaiters.push(r));
     }
     this.reserved++;

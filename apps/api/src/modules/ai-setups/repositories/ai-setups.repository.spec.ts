@@ -69,6 +69,18 @@ describe('AiSetupsRepository packet sources', () => {
   });
 });
 
+describe('AiSetupsRepository.aiCallsToday', () => {
+  it("counts today's IST rows whose checks.stage is ai or checks (rows that reached the AI), any status", async () => {
+    const m = make();
+    expect(await m.repo.aiCallsToday(NOW)).toBe(2);
+    const where = (m.prisma.aiSetup.count.mock.calls[0] as unknown as [{ where: Record<string, unknown> }])[0].where;
+    expect(where).toEqual({
+      createdAt: { gte: new Date('2026-11-24T18:30:00Z') },
+      OR: [{ checks: { path: ['stage'], equals: 'ai' } }, { checks: { path: ['stage'], equals: 'checks' } }],
+    });
+  });
+});
+
 describe('AiSetupsRepository.setupsForSession', () => {
   it("reads one IST session's rows newest first (no packet) and adds each channel's title", async () => {
     const rows = [

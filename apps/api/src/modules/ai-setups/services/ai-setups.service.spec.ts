@@ -84,7 +84,7 @@ const setupReply = (u = 'DABUR', plan: Partial<SetupPlan> = {}): SetupReply => (
 
 type Row = AiSetupWrite & { createdAt: Date };
 
-function make(o: { mode?: string; open?: Record<string, string>; rows?: Row[]; reply?: (u: string) => Promise<SetupReply>; packet?: (u: string) => Promise<SetupPacket>; isOpen?: boolean } = {}) {
+function make(o: { aiCap?: string; mode?: string; open?: Record<string, string>; rows?: Row[]; reply?: (u: string) => Promise<SetupReply>; packet?: (u: string) => Promise<SetupPacket>; isOpen?: boolean } = {}) {
   const rows: Row[] = [...(o.rows ?? [])];
   let now = NOW;
   const repo = {
@@ -100,6 +100,11 @@ function make(o: { mode?: string; open?: Record<string, string>; rows?: Row[]; r
       if (o.open?.[u]) return o.open[u];
       const s = rows.find((r) => r.underlying === u && (r.status === 'PENDING' || r.status === 'FILLED'));
       return s ? `AI setup ${s.status} on ${u}` : null;
+    }),
+    aiCallsToday: jest.fn(async (at: Date) => {
+      const dayStart = new Date(Date.UTC(2026, 10, 24, 18, 30));
+      const stage = (c: unknown) => (c && typeof c === 'object' ? (c as { stage?: unknown }).stage : undefined);
+      return rows.filter((r) => ['ai', 'checks'].includes(String(stage(r.checks))) && r.createdAt >= dayStart && r.createdAt <= at).length;
     }),
     channelTitle: jest.fn(async () => 'Stock Gainers'),
   };
@@ -118,7 +123,7 @@ function make(o: { mode?: string; open?: Record<string, string>; rows?: Row[]; r
       }
     }),
   };
-  const cfg = parseAiSetupsConfig({ AI_SETUPS: o.mode ?? 'paper', AI_SETUP_MODEL: 'claude-opus-test' });
+  const cfg = parseAiSetupsConfig({ AI_SETUPS: o.mode ?? 'paper', AI_SETUP_MODEL: 'claude-opus-test', AI_SETUP_MAX_AI_CALLS_PER_DAY: o.aiCap });
   const clock = { isOpen: jest.fn(() => o.isOpen ?? true) };
   const svc = new AiSetupsService(repo, packet, llm, cfg, () => now, clock);
   return { svc, repo, packet, llm, rows, clock, maxInFlight: () => maxInFlight, setNow: (d: Date) => (now = d) };
@@ -321,6 +326,45 @@ describe('AiSetupsService', () => {
     await m.svc.whenIdle();
     expect(m.llm.build).not.toHaveBeenCalled();
     expect(m.rows[0]).toMatchObject({ status: 'SKIPPED', reason: expect.stringContaining('broker down') });
+  });
+
+  it('a throw while building (unexpected reply shape) → one SKIPPED row (stage checks), and the cooldown then blocks the next claim', async () => {
+    const m = make({ reply: async (u) => setupReply(u, { validUntil: 1500 as unknown as string }) });
+    m.svc.onReadingStored(event());
+    await m.svc.whenIdle();
+    expect(m.rows).toHaveLength(1);
+    expect(m.rows[0]).toMatchObject({ underlying: 'DABUR', decision: 'SKIPPED', status: 'SKIPPED', reason: expect.stringMatching(/^setup build failed: /), checks: expect.objectContaining({ stage: 'checks' }) });
+    m.setNow(new Date(NOW.getTime() + 5 * MIN));
+    m.svc.onReadingStored(event({ messageId: 'msg-2' }));
+    await m.svc.whenIdle();
+    expect(m.llm.build).toHaveBeenCalledTimes(1);
+    expect(m.rows[1]).toMatchObject({ status: 'SKIPPED', reason: expect.stringContaining('cooldown') });
+  });
+
+  it('AI call cap: rows that reached the AI today (stage ai / checks) count, NO_TRADE included; at the cap → SKIPPED ai_daily_cap, no packet, no AI', async () => {
+    const earlier = (u: string, status: string, stage: string): Row => ({ readingId: 'x', underlying: u, channelId: 'c', decision: 'NO_TRADE', reason: 'r', status, checks: { stage }, createdAt: new Date(NOW.getTime() - 120 * MIN) });
+    const m = make({ aiCap: '3', rows: [earlier('ITC', 'NO_TRADE', 'ai'), earlier('TCS', 'NO_TRADE', 'checks'), earlier('INFY', 'NO_TRADE', 'packet'), earlier('SBIN', 'SKIPPED', 'guard')] });
+    m.svc.onReadingStored(event());
+    await m.svc.whenIdle();
+    expect(m.rows[4]).toMatchObject({ underlying: 'DABUR', status: 'PENDING' });
+    m.svc.onReadingStored(event({ messageId: 'msg-2', claims: [claimOn('WIPRO')] }));
+    await m.svc.whenIdle();
+    expect(m.llm.build).toHaveBeenCalledTimes(1);
+    expect(m.packet.build).toHaveBeenCalledTimes(1);
+    expect(m.rows[5]).toMatchObject({ underlying: 'WIPRO', decision: 'SKIPPED', status: 'SKIPPED', reason: expect.stringMatching(/^ai_daily_cap/), checks: expect.objectContaining({ stage: 'guard' }) });
+  });
+
+  it('AI call cap counts jobs in flight: a burst never makes more AI calls than the cap', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const m = make({ aiCap: '2', reply: async () => (await gate, { decision: 'NO_TRADE', reason: 'stale', setup: null }) });
+    for (const [i, u] of ['DABUR', 'ITC', 'TCS', 'INFY'].entries()) m.svc.onReadingStored(event({ messageId: `m${i}`, claims: [claimOn(u)] }));
+    await new Promise((r) => setImmediate(r));
+    release();
+    await m.svc.whenIdle();
+    expect(m.llm.build).toHaveBeenCalledTimes(2);
+    expect(m.rows.filter((r) => r.status === 'NO_TRADE')).toHaveLength(2);
+    expect(m.rows.filter((r) => /^ai_daily_cap/.test(r.reason))).toHaveLength(2);
   });
 
   it('never throws into the reader: a store or guard failure is logged only', async () => {

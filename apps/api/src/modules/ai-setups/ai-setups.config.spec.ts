@@ -9,7 +9,15 @@ describe('parseAiSetupsConfig', () => {
       maxPerDay: 3,
       cooldownMin: 30,
       minOi: 500,
+      maxAiCallsPerDay: 15,
     });
+  });
+
+  it('AI_SETUP_MAX_AI_CALLS_PER_DAY: read as an integer; junk / out of range keeps 15', () => {
+    expect(parseAiSetupsConfig({ AI_SETUP_MAX_AI_CALLS_PER_DAY: '8' }).maxAiCallsPerDay).toBe(8);
+    expect(parseAiSetupsConfig({ AI_SETUP_MAX_AI_CALLS_PER_DAY: '0' }).maxAiCallsPerDay).toBe(0);
+    expect(parseAiSetupsConfig({ AI_SETUP_MAX_AI_CALLS_PER_DAY: 'abc' }).maxAiCallsPerDay).toBe(15);
+    expect(parseAiSetupsConfig({ AI_SETUP_MAX_AI_CALLS_PER_DAY: '-2' }).maxAiCallsPerDay).toBe(15);
   });
 
   it('reads AI_SETUPS=paper (trimmed, any case)', () => {

@@ -104,6 +104,9 @@ export function findByChannel(summary: unknown, depth = 0): Record<string, unkno
   return null;
 }
 
+/** checks.stage values the setup service writes on rows that made an AI call. */
+export const AI_CALL_STAGES = ['ai', 'checks'] as const;
+
 const json = (v: unknown) => (v === undefined || v === null ? Prisma.JsonNull : (v as Prisma.InputJsonValue));
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** A broker symbol on `u`: the bare name, its -EQ cash line, or a dated derivative (DABUR29DEC25430CE, CRUDEOIL19DEC25FUT). */
@@ -137,6 +140,16 @@ export class AiSetupsRepository implements SetupPacketSources {
   /** AI setups made today (IST): PENDING / FILLED / EXITED / EXPIRED rows — from the DB, never from memory. */
   setupsToday(now: Date): Promise<number> {
     return this.prisma.aiSetup.count({ where: { status: { in: [...COUNTED_SETUP_STATUSES] }, createdAt: { gte: istDayStart(now) } } });
+  }
+
+  /** Rows made today (IST) that reached the setup AI (checks.stage ai | checks), whatever their status — the AI call cap. */
+  aiCallsToday(now: Date): Promise<number> {
+    return this.prisma.aiSetup.count({
+      where: {
+        createdAt: { gte: istDayStart(now) },
+        OR: AI_CALL_STAGES.map((stage) => ({ checks: { path: ['stage'], equals: stage } })),
+      },
+    });
   }
 
   /** Every ai_setups row on `underlying` since `since` (the cooldown; the caller decides which rows count). */

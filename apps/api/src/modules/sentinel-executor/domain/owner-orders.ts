@@ -50,6 +50,34 @@ export function isOwnerExitOrder(row: unknown, exitSide: 'BUY' | 'SELL'): boolea
   return !isOurs(String(r?.ordertag ?? '').trim()) && up(r?.transactiontype) === exitSide;
 }
 
+const STOP_TYPES = new Set(['STOPLOSS_LIMIT', 'STOPLOSS_MARKET', 'SL', 'SL-M']);
+
+/**
+ * FLOOR_BROKER_SL_AT=ceiling: what an owner exit-side order is, against the position.
+ *  - 'target':    a LIMIT on the profit side of LTP (SELL above it for a long, BUY below it for a short).
+ *  - 'full-stop': an SL / SL-M whose trigger is on the loss side of LTP, for at least the position's quantity
+ *                 (`positionQty` in the order book's unit).
+ *  - 'other':     anything else (a loss-side LIMIT, a partial stop, an unreadable price).
+ */
+export function ownerOrderShape(row: unknown, exitSide: 'BUY' | 'SELL', ltp: number, positionQty: number): 'target' | 'full-stop' | 'other' {
+  const r = row as Row;
+  const type = up(r?.ordertype);
+  if (!Number.isFinite(ltp) || ltp <= 0) return 'other';
+  if (type === 'LIMIT') {
+    const px = numOrNull(r?.price);
+    if (px == null || px <= 0) return 'other';
+    return (exitSide === 'SELL' ? px > ltp : px < ltp) ? 'target' : 'other';
+  }
+  if (STOP_TYPES.has(type)) {
+    const trg = numOrNull(r?.triggerprice);
+    const qty = numOrNull(r?.quantity);
+    if (trg == null || trg <= 0 || qty == null) return 'other';
+    const lossSide = exitSide === 'SELL' ? trg < ltp : trg > ltp;
+    return lossSide && qty >= positionQty ? 'full-stop' : 'other';
+  }
+  return 'other';
+}
+
 const toCancellable = (o: Row, owner: boolean): CancellableOrder => ({
   orderId: String(o?.orderid ?? '').trim(),
   variety: up(o?.variety) || 'NORMAL',

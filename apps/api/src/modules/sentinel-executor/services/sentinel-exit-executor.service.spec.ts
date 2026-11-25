@@ -936,6 +936,40 @@ describe('SentinelExitExecutor — an owner order resting on the contract must n
     expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
   });
 
+  it('review fix 1: the owner order part-FILLS during the cancel window and positions still lag (40) → no exit this pass; the next pass exits only the remainder', async () => {
+    const partly = env([own({ status: 'cancelled', filledshares: '20' })]);
+    const h = harness({ tracker: TRK, positions: [pos('40')], books: [env([own()]), partly] });
+    await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OWNER_ORDER_FILLED' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(h.lastPatch()).toEqual(expect.objectContaining({ status: 'SKIPPED', reason: 'OWNER_ORDER_FILLED', brokerMessage: expect.stringContaining('OWN1 filled 20') }));
+    expect(alert).toHaveBeenCalledWith('owner-order-filled:t1', expect.stringContaining('OWN1 filled 20'));
+    // Next pass: positions now show 20; the owner order is terminal, so nothing is in the way.
+    const next = harness({ tracker: TRK, positions: [pos('20'), pos('0')], books: [partly, env([own({ status: 'cancelled', filledshares: '20' }), { orderid: 'O1', status: 'complete', symboltoken: '1171', exchange: 'BFO' }])] });
+    await expect(next.ex.process({ ...SV, id: 'cm9verdict000000000000003' }, PROD, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(next.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(next.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(next.session.placeOrderClassified.mock.calls[0][0]).toEqual(expect.objectContaining({ side: 'SELL', quantity: 20 }));
+  });
+
+  it('review fix 2: a cancel SENT but not confirmed says "your order may be gone"; one never sent says "could not be cancelled"', async () => {
+    const h = harness({ tracker: TRK, positions: [pos('40')], books: [env([own()])], cancel: [{ status: 'UNCERTAIN', message: '{}' }] });
+    const warn = jest.spyOn((h.ex as any).logger, 'warn');
+    await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OWNER_ORDER_CANCEL_FAILED' });
+    const sent = 'cancel sent, not confirmed — your order may be gone; check Angel';
+    const line = warn.mock.calls.map((c) => String(c[0])).find((l) => l.includes('OWNER_ORDER_CANCEL_FAILED'));
+    expect(line).toContain(sent);
+    expect(line).toContain('OWN1');
+    expect(alert).toHaveBeenCalledWith('owner-order-cancel-failed:t1', expect.stringContaining(sent));
+    expect(alert).toHaveBeenCalledWith('owner-order-cancel-failed:t1', expect.stringContaining('OWN1'));
+    expect(h.lastPatch()).toEqual(expect.objectContaining({ brokerMessage: expect.stringContaining('order may be gone') }));
+
+    alert.mockClear();
+    const n = harness({ tracker: TRK, positions: [pos('40')], books: [env([own({ orderid: '' })])] });
+    await n.ex.process(SV, PROD, NOW);
+    expect(alert).toHaveBeenCalledWith('owner-order-cancel-failed:t1', expect.stringContaining('could not be cancelled'));
+    expect(alert).not.toHaveBeenCalledWith(expect.anything(), expect.stringContaining('may be gone'));
+  });
+
   it('dry-run says what it WOULD cancel and sell; cancels and places nothing, no alert', async () => {
     const h = harness({ tracker: TRK, positions: [pos('40')], books: [env([own()])] });
     const dry = parseAutoExitConfig({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner' });

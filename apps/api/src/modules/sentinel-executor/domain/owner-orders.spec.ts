@@ -1,6 +1,6 @@
 // apps/api/src/modules/sentinel-executor/domain/owner-orders.spec.ts
 import { floorStopTag } from './floor-broker-sl';
-import { isOwnerExitOrder, ownerExitOrdersFor } from './owner-orders';
+import { isOwnerExitOrder, ownerExitOrdersFor, ownerOrderShape } from './owner-orders';
 
 const EXIT = { exchange: 'BFO', token: '1171', side: 'SELL' as const, trackerId: 't1' };
 const row = (x: Record<string, unknown> = {}) => ({
@@ -55,6 +55,18 @@ describe('ownerExitOrdersFor (EXIT_CANCEL_OWNER_ORDERS)', () => {
     const SHORT = { ...EXIT, side: 'BUY' as const };
     expect(ownerExitOrdersFor([row({ transactiontype: 'BUY' })], SHORT, { cancelOwnStop: true }).kind).toBe('cancel');
     expect(ownerExitOrdersFor([row()], SHORT, { cancelOwnStop: true }).kind).toBe('blocking');
+  });
+
+  it('ownerOrderShape: profit-side LIMIT = target; loss-side full-qty stop = full-stop; anything else = other', () => {
+    expect(ownerOrderShape(row({ price: '520' }), 'SELL', 453, 40)).toBe('target');
+    expect(ownerOrderShape(row({ price: '400' }), 'SELL', 453, 40)).toBe('other');
+    expect(ownerOrderShape(row({ price: '400' }), 'BUY', 453, 40)).toBe('target');
+    const sl = (x: Record<string, unknown> = {}) => row({ ordertype: 'STOPLOSS_MARKET', variety: 'STOPLOSS', triggerprice: '420', price: '0', ...x });
+    expect(ownerOrderShape(sl(), 'SELL', 453, 40)).toBe('full-stop');
+    expect(ownerOrderShape(sl({ quantity: '20' }), 'SELL', 453, 40)).toBe('other');
+    expect(ownerOrderShape(sl({ triggerprice: '480' }), 'SELL', 453, 40)).toBe('other');
+    expect(ownerOrderShape(sl({ triggerprice: '480' }), 'BUY', 453, 40)).toBe('full-stop');
+    expect(ownerOrderShape(row({ ordertype: 'MARKET' }), 'SELL', 453, 40)).toBe('other');
   });
 
   it('isOwnerExitOrder: untagged / foreign tag on the exit side only', () => {

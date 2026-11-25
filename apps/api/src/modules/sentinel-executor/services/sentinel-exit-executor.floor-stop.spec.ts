@@ -172,6 +172,32 @@ describe('FLOOR_BROKER_SL_AT=ceiling and an owner order resting on the contract 
     expect(lines).toHaveLength(1);
   });
 
+  it('review fix 3: the owner\'s own full-position STOP (trigger on the loss side) protects — ours is CANCELLED, none placed, WARN once', async () => {
+    const ownerSl = { ...ownerSell, orderid: 'OWNSL', variety: 'STOPLOSS', ordertype: 'STOPLOSS_MARKET', triggerprice: '150', price: '0', status: 'trigger pending' };
+    const h = harness({ books: [env([ownerSl, ceilingStop()])] });
+    const warn = jest.spyOn((h.ex as any).logger, 'warn');
+    expect((await h.ex.syncFloorStops('owner', [ceilingIntent()], CEIL, NOW))[0]).toMatchObject({ action: 'CANCEL', reason: 'OWNER_STOP_PROTECTS' });
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('STOPLOSS', 'SL1');
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalledWith(expect.anything(), 'OWNSL');
+    expect(warn.mock.calls.map((c) => String(c[0])).some((l) => l.includes("owner's own stop"))).toBe(true);
+    const n = harness({ books: [env([ownerSl])] });
+    const nwarn = jest.spyOn((n.ex as any).logger, 'warn');
+    expect((await n.ex.syncFloorStops('owner', [ceilingIntent()], CEIL, NOW))[0]).toMatchObject({ action: 'NONE', reason: 'OWNER_STOP_PROTECTS' });
+    await n.ex.syncFloorStops('owner', [ceilingIntent()], CEIL, new Date(NOW.getTime() + 2_000));
+    expect(n.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(nwarn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('OWNSL') && l.includes("owner's own stop"))).toHaveLength(1);
+  });
+
+  it('review fix 3: an owner target (profit-side LIMIT) keeps ours; a partial owner stop or a loss-side LIMIT falls to today\'s rule', async () => {
+    const keep = harness({ books: [env([ownerSell, ceilingStop()])] }); // LIMIT 220 above LTP 186 = target
+    expect((await keep.ex.syncFloorStops('owner', [ceilingIntent()], CEIL, NOW))[0]).toMatchObject({ action: 'KEEP', reason: 'OWNER_ORDER_RESTING' });
+    const partial = { ...ownerSell, orderid: 'OWNSL', variety: 'STOPLOSS', ordertype: 'STOPLOSS_MARKET', triggerprice: '150', quantity: '65', status: 'trigger pending' };
+    const p = harness({ books: [env([partial, ceilingStop()])] });
+    expect((await p.ex.syncFloorStops('owner', [ceilingIntent()], CEIL, NOW))[0]).toMatchObject({ action: 'CANCEL', reason: 'OTHER_OPEN_ORDER' });
+    const lossLimit = harness({ books: [env([{ ...ownerSell, price: '170' }, ceilingStop()])] });
+    expect((await lossLimit.ex.syncFloorStops('owner', [ceilingIntent()], CEIL, NOW))[0]).toMatchObject({ action: 'CANCEL', reason: 'OTHER_OPEN_ORDER' });
+  });
+
   it('an entry-side owner order: today\'s rule (OTHER_OPEN_ORDER cancels ours)', async () => {
     const h = harness({ books: [env([{ ...ownerSell, transactiontype: 'BUY' }, ceilingStop()])] });
     expect((await h.ex.syncFloorStops('owner', [ceilingIntent()], CEIL, NOW))[0]).toMatchObject({ action: 'CANCEL', reason: 'OTHER_OPEN_ORDER' });

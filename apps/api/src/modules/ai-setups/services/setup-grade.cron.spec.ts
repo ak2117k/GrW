@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { parseAiSetupsConfig } from '../ai-setups.config';
 import type { SetupPlan } from '../domain/setup.types';
 import type { Bar15m } from '../domain/setup-watch';
 import type { GradeTrade } from '../domain/setup-grade';
@@ -48,7 +49,7 @@ function row(over: Partial<GradeCandidateRow> = {}): GradeCandidateRow {
 /** 10:15 fills at 426 and stops at 420. */
 const LOSS_BARS = [...flat('10:00', '10:15', 430), { ts: IST('10:15').getTime(), open: 430, high: 431, low: 419, close: 421 }, ...flat('10:30', '15:30', 421)];
 
-function harness(rows: GradeCandidateRow[], opts: { bars?: Bar15m[] | Error; tradingDay?: boolean; trade?: GradeTrade | null; prior?: unknown[] } = {}) {
+function harness(rows: GradeCandidateRow[], opts: { mode?: string; bars?: Bar15m[] | Error; tradingDay?: boolean; trade?: GradeTrade | null; prior?: unknown[] } = {}) {
   const written = new Map<string, unknown>();
   const store: jest.Mocked<SetupGradeStore> = {
     // As the repository: no grade, or the grade / plan / what-if still PENDING; the row carries its current grade.
@@ -76,7 +77,8 @@ function harness(rows: GradeCandidateRow[], opts: { bars?: Bar15m[] | Error; tra
   };
   const clock = { isTradingDay: jest.fn(() => opts.tradingDay ?? true) };
   const lease = { runExclusiveFailClosed: jest.fn(async (_n: string, _t: number, fn: () => Promise<unknown>) => fn()) };
-  const cron = new SetupGradeCron(store, market, clock, lease as never, () => NIGHT);
+  const cfg = parseAiSetupsConfig({ AI_SETUPS: opts.mode ?? 'paper' });
+  const cron = new SetupGradeCron(store, market, clock, lease as never, () => NIGHT, cfg);
   return { cron, store, market, clock, lease, written };
 }
 
@@ -177,6 +179,25 @@ describe('SetupGradeCron', () => {
     const h2 = harness([row()]);
     await h2.cron.onNse();
     expect(h2.store.gradeCandidates).not.toHaveBeenCalled();
+  });
+
+  it('AI_SETUPS=off with nothing to grade → returns quietly (no summary line); rows left from before are still graded', async () => {
+    const summary = () => log.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('[ai-setup-grade]'));
+    const quiet = harness([], { mode: 'off' });
+    await quiet.cron.onNse();
+    expect(quiet.store.gradeCandidates).toHaveBeenCalled();
+    expect(quiet.store.gradedSetupGrades).not.toHaveBeenCalled();
+    expect(summary()).toHaveLength(0);
+
+    const left = harness([row()], { mode: 'off' });
+    await left.cron.onNse();
+    expect(left.store.writeGrade).toHaveBeenCalledTimes(1);
+    expect(summary()).toHaveLength(1);
+  });
+
+  it('AI_SETUPS=paper with nothing to grade still logs the summary line', async () => {
+    await harness([]).cron.onNse();
+    expect(log.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('[ai-setup-grade]'))).toHaveLength(1);
   });
 
   it('a store failure is logged, never thrown', async () => {

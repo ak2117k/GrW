@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { CronLeaseService } from '../../../common/cron-lease/cron-lease.service';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { istYmd } from '../../mbm/domain/chain-snapshot';
+import { AI_SETUPS_CONFIG, type AiSetupsConfig } from '../ai-setups.config';
 import { buildGrade, familyOf, gateTotals, gradeSummaryLine, type ExchangeFamily, type SetupGrade } from '../domain/setup-grade';
 import type { Bar15m } from '../domain/setup-watch';
 import { AiSetupsRepository, type GradeCandidateRow } from '../repositories/ai-setups.repository';
@@ -35,7 +36,8 @@ const istDayStart = (at: Date) => new Date(`${istYmd(at)}T00:00:00+05:30`);
  * lease, whatever AI_SETUPS is (rows made while it was on still get graded). Each run reads the ungraded / pending
  * rows of the last 14 days, the underlying's 15m bars (the setup watch's loader, once per underlying per session
  * day), the paper trade, and writes `grade` with a conditional update (unchanged since read). One summary line per
- * run, with the running totals toward the live gate.
+ * run, with the running totals toward the live gate
+ * (none when AI_SETUPS=off and there is nothing to grade).
  */
 @Injectable()
 export class SetupGradeCron {
@@ -47,6 +49,7 @@ export class SetupGradeCron {
     @Inject(AI_SETUP_GRADE_CLOCK) private readonly clock: TradingDayClock,
     @Optional() private readonly lease?: CronLeaseService,
     @Optional() @Inject(AI_SETUP_GRADE_NOW) private readonly nowFn?: () => Date,
+    @Optional() @Inject(AI_SETUPS_CONFIG) private readonly cfg?: AiSetupsConfig,
   ) {}
 
   @Cron(SETUP_GRADE_NSE_CRON, { name: 'ai-setup-grade-nse', timeZone: 'Asia/Kolkata' })
@@ -76,6 +79,8 @@ export class SetupGradeCron {
   async grade(family: ExchangeFamily, now: Date): Promise<SetupGrade[]> {
     const session = istYmd(now);
     const rows = (await this.store.gradeCandidates(new Date(now.getTime() - LOOKBACK_MS), now)).filter((r) => familyOf(r) === family);
+    // Switched off and nothing left to grade: no nightly summary line (rows made while it was on are still graded).
+    if (rows.length === 0 && this.cfg?.mode === 'off') return [];
     const bars = new Map<string, Promise<{ bars: Bar15m[] | null; error: string | null }>>();
     const written: Array<{ prev: unknown; grade: SetupGrade }> = [];
     for (const row of rows) {

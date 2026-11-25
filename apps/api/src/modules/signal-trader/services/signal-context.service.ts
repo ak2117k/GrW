@@ -218,26 +218,31 @@ export class SignalContextService {
     }
   }
 
-  /** `expiry`: the traded contract's (YYYY-MM-DD), so an MCX chain reads that expiry's capture first. */
-  async build(i: { underlying: string; kind: string; exchange: string; ownerUserId: string | null; now: Date; ltp?: number | null; expiry?: string | null }): Promise<Record<string, CtxBlock>> {
+  /**
+   * `expiry`: the traded contract's (YYYY-MM-DD), so an MCX chain reads that expiry's capture first.
+   * `deadlineMs` (optional; the message reader's packet time box): caps every block's own box at it, so a
+   * slow block turns `unavailable` without discarding the others. Absent = the blocks' own boxes (the judge).
+   */
+  async build(i: { underlying: string; kind: string; exchange: string; ownerUserId: string | null; now: Date; ltp?: number | null; expiry?: string | null; deadlineMs?: number }): Promise<Record<string, CtxBlock>> {
     const sym = levelSymbolFor(i.underlying, i.kind);
+    const box = (ms: number) => (i.deadlineMs !== undefined ? Math.min(ms, i.deadlineMs) : ms);
     const [chain, market, structure, news, mbm] = await Promise.all([
       // The chain capture (mbm-chain-capture) snapshots NFO index / stock chains only; an MCX chain is read
       // from the market hub's own 3-minute OI capture instead (mcxChain), in the same block shape.
       i.exchange === 'MCX'
-        ? this.block(MCX_CHAIN_SOURCE, () => this.mcxChain(i))
+        ? this.block(MCX_CHAIN_SOURCE, () => this.mcxChain(i), box(BLOCK_TIMEOUT_MS))
         : this.block('mbm_chain_snapshots', async () => {
             if (!this.chain) return null;
             const c = await this.chain.latestChain(i.underlying);
             if (!c) throw new Error(`no snapshot for ${i.underlying} in the last 10 days`);
             // The newest snapshot can be days old (prod 2026-11-06: MCX's was 2 days, NYKAA's 9): ageMin says so.
             return chainBlockValue(c, i.now);
-          }),
+          }, box(BLOCK_TIMEOUT_MS)),
       this.block('market-context (VIX, breadth, chain aggregate)', async () => {
         if (!this.marketCtx) return null;
         const s = await this.marketCtx.snapshot(i.underlying);
         return { spot: s.spot, vix: s.vix, vixRegime: s.vixRegime, pcr: s.pcr, maxPain: s.maxPain, adRatio: s.adRatio, at: s.capturedAt.toISOString() };
-      }),
+      }, box(BLOCK_TIMEOUT_MS)),
       this.block(
         'signal-generator 15m level book + context factors (trend)',
         async () => {
@@ -251,13 +256,13 @@ export class SignalContextService {
           const book = await this.levels.levelsFor(sym, owner).catch(() => null);
           return { ...st, spot, spotSource: source || null, levels: book?.value ?? null };
         },
-        STRUCTURE_TIMEOUT_MS,
+        box(STRUCTURE_TIMEOUT_MS),
       ),
       this.block('news (sentinel news shim)', async () => {
         if (!this.news) return null;
         const n = await this.news.recentFor(sym);
         return n?.value ?? null;
-      }),
+      }, box(BLOCK_TIMEOUT_MS)),
       this.block('mbm expected move (incl. relative reading)', async () => {
         if (!this.mbm || !this.mbmCfg) return null;
         const inst = mbmInstrumentFor({ symbol: i.underlying, exchange: i.exchange === 'MCX' ? 'MCX' : 'NSE' }, this.mbmCfg.instruments);
@@ -265,7 +270,7 @@ export class SignalContextService {
         if (!this.mbmVisible()) throw new NotApplicable('MBM is withheld from judges by the owner rule until the self-review clears it (MBM_PACKET=on / mbm.packet)');
         const b = await this.mbm.behaviour(inst, i.now.getTime());
         return b.status === 'absent' ? null : b;
-      }),
+      }, box(BLOCK_TIMEOUT_MS)),
     ]);
     return { chain, market, structure, news, mbm };
   }
@@ -522,8 +527,8 @@ export class SignalContextService {
     return q !== null ? { spot: q, source: 'quote' } : { spot: null, source: '' };
   }
 
-  /** LTP of the underlying itself: NSE cash (or the index) for an NSE derivative, the nearest future for MCX. Never throws. */
-  private async underlyingQuote(underlying: string, exchange: string, ownerUserId: string | null, now: Date): Promise<number | null> {
+  /** LTP of the underlying itself: NSE cash (or the index) for an NSE derivative, the nearest future for MCX. Never throws. Public: the message reader prices an MCX underlying with it. */
+  async underlyingQuote(underlying: string, exchange: string, ownerUserId: string | null, now: Date): Promise<number | null> {
     if (!this.feeds || !this.instruments || !ownerUserId) return null;
     try {
       const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());

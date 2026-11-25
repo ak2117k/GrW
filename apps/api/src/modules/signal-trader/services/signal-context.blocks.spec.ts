@@ -243,3 +243,35 @@ describe('SignalContextService.build — an MCX mini reads its parent chain as a
     expect(ctx.chain).toEqual({ status: 'unavailable', reason: expect.stringMatching(/no oi_snapshots capture.*CRUDEOIL proxy: no CRUDEOIL option expiry on or after 2026-11-17/) });
   });
 });
+
+/** 2026-11-25: the message reader caps each block at its packet time box (deadlineMs); the judge does not pass it. */
+describe('SignalContextService.build — deadlineMs caps each block, not the whole build', () => {
+  afterEach(() => {
+    jest.clearAllTimers();
+    jest.useRealTimers();
+  });
+
+  it('a hanging block is unavailable at the deadline; the other blocks are still present', async () => {
+    jest.useFakeTimers();
+    const chain = { latestChain: jest.fn(() => new Promise(() => undefined)) };
+    const mbm = { behaviour: jest.fn().mockResolvedValue({ status: 'ok', horizons: {} }) };
+    const svc = new SignalContextService(chain as any, undefined, undefined, undefined, mbm as any, { instruments: ['NIFTY'], packet: 'on' } as any);
+    const p = svc.build({ underlying: 'NIFTY', kind: 'FUT', exchange: 'NFO', ownerUserId: 'owner', now: NOW, deadlineMs: 1_000 });
+    await jest.advanceTimersByTimeAsync(1_000);
+    const ctx = await p;
+    expect(ctx.chain).toEqual({ status: 'unavailable', reason: expect.stringContaining('timed out after 1000 ms') });
+    expect(ctx.mbm.status).toBe('present');
+  });
+
+  it('without deadlineMs a block keeps its own 8 s box', async () => {
+    jest.useFakeTimers();
+    const chain = { latestChain: jest.fn(() => new Promise(() => undefined)) };
+    const svc = new SignalContextService(chain as any);
+    let done = false;
+    const p = svc.build({ underlying: 'NIFTY', kind: 'FUT', exchange: 'NFO', ownerUserId: 'owner', now: NOW }).then((r) => ((done = true), r));
+    await jest.advanceTimersByTimeAsync(7_999);
+    expect(done).toBe(false);
+    await jest.advanceTimersByTimeAsync(1);
+    expect((await p).chain).toEqual({ status: 'unavailable', reason: expect.stringContaining('timed out after 8000 ms') });
+  });
+});

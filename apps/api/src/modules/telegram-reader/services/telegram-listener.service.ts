@@ -30,8 +30,14 @@ const WATCHDOG_MS = 60_000;
 /** Every 10 min, so a deaf listener shows quickly (2026-10-23: 28 quiet minutes were indistinguishable from no feed). */
 const SUMMARY_MS = 10 * 60_000;
 /** Polling safety net: newest posts of every ticked channel this often (TELEGRAM_POLL_SEC, 0 = off). */
-const DEFAULT_POLL_SEC = 20; // live pushes rarely arrive for this session (prod 2026-10-23/24), so the poll is the main path
+const DEFAULT_POLL_SEC = 6; // live pushes rarely arrive for this session (prod 2026-10-23/24), so the poll is the main path; 2026-11-25 20 → 6 s so a call is seen sooner
+const MIN_POLL_SEC = 5;
 const POLL_LIMIT = 5;
+/** After a FLOOD_WAIT pause the poller runs at double its interval (capped) for this long. */
+const FLOOD_SLOW_MS = 10 * 60_000;
+const FLOOD_SLOW_CAP_SEC = 30;
+/** Image backfill cadence, in time; the poll-tick modulus is derived from the interval. */
+const MEDIA_BACKFILL_EVERY_SEC = 5 * 60;
 
 /** Exponential backoff for attempt n (0-based), capped. */
 export function backoffMs(attempt: number): number {
@@ -69,6 +75,11 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
   private mediaSaved = 0;
   private poller: NodeJS.Timeout | null = null;
   private polling = false;
+  /** Configured poll interval (s), after the clamp. */
+  private pollSec = DEFAULT_POLL_SEC;
+  /** FLOOD_WAIT: no poll before this (ms epoch); doubled interval until floodSlowUntil. */
+  private floodPauseUntil = 0;
+  private floodSlowUntil = 0;
   private stateValue: ListenerState = 'idle';
   private lastError: string | null = null;
   private lastMessageAt: Date | null = null;
@@ -161,17 +172,51 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
 
   private startPoller(): void {
     const sec = Number(this.config.get<string>('TELEGRAM_POLL_SEC') ?? DEFAULT_POLL_SEC);
-    if (this.poller) clearInterval(this.poller);
-    this.poller = null;
+    this.clearPoller();
     if (!Number.isFinite(sec) || sec <= 0) return;
-    this.poller = setInterval(() => void this.pollOnce(), Math.max(15, sec) * 1000);
+    this.pollSec = Math.max(MIN_POLL_SEC, sec);
+    this.schedulePoll(this.generation, this.pollSec * 1000);
+  }
+
+  /** One-shot timer chain (not setInterval) so a FLOOD_WAIT can stretch the next delay. */
+  private schedulePoll(gen: number, delayMs: number): void {
+    this.poller = setTimeout(() => void this.pollTick(gen), delayMs);
     this.poller.unref?.();
+  }
+
+  private async pollTick(gen: number): Promise<void> {
+    const started = Date.now();
+    await this.pollOnce().catch(() => 0);
+    if (gen !== this.generation) return; // stopped / restarted meanwhile: that run owns the timer now
+    this.schedulePoll(gen, this.nextPollDelayMs(started));
+  }
+
+  /** Delay to the next round: the rest of a FLOOD_WAIT pause, else the (possibly doubled) interval from this round's start. */
+  private nextPollDelayMs(roundStartedMs: number): number {
+    const now = Date.now();
+    if (now < this.floodPauseUntil) return this.floodPauseUntil - now;
+    const base = this.pollSec * 1000;
+    const interval = now < this.floodSlowUntil ? Math.max(base, Math.min(FLOOD_SLOW_CAP_SEC * 1000, base * 2)) : base;
+    return Math.max(1_000, interval - (now - roundStartedMs));
+  }
+
+  /** Telegram asked us to slow down: no poll for `wait` s, then double interval for 10 min. One warning each. */
+  private noteFloodWait(wait: number): void {
+    this.floodPauseUntil = Date.now() + wait * 1000;
+    this.floodSlowUntil = this.floodPauseUntil + FLOOD_SLOW_MS;
+    const slowSec = Math.max(this.pollSec, Math.min(FLOOD_SLOW_CAP_SEC, this.pollSec * 2));
+    this.logger.warn(`telegram-reader: FLOOD_WAIT ${wait} s — polling paused ${wait} s, then every ${slowSec} s for 10 min`);
+  }
+
+  private clearPoller(): void {
+    if (this.poller) clearTimeout(this.poller);
+    this.poller = null;
   }
 
   /** Fetch the newest posts of every ticked channel; handle() stores only what is new. Public for tests. */
   async pollOnce(): Promise<number> {
     const c = this.client;
-    if (!c?.recentMessages || this.polling || this.stateValue !== 'listening') return 0;
+    if (!c?.recentMessages || this.polling || this.stateValue !== 'listening' || Date.now() < this.floodPauseUntil) return 0;
     this.polling = true;
     let found = 0;
     try {
@@ -181,11 +226,15 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
           for (const m of msgs.reverse()) if (await this.handle(m, 'poll')) found++;
         } catch (err) {
           const wait = floodWaitSeconds(err);
-          if (wait) break; // Telegram asked us to slow down: skip this round
+          if (wait) {
+            this.noteFloodWait(wait); // Telegram asked us to slow down: skip this round and back off
+            break;
+          }
         }
       }
-      // Every ~5 min (15 polls of 20 s), a few images that came back empty are fetched again.
-      if (++this.pollTicks % 15 === 0) await this.backfillMedia(new Date()).catch((err) => this.logger.warn(`telegram-reader: image backfill failed: ${describe(err)}`));
+      // Every ~5 min (e.g. 50 polls of 6 s), a few images that came back empty are fetched again.
+      const every = Math.max(1, Math.round(MEDIA_BACKFILL_EVERY_SEC / this.pollSec));
+      if (++this.pollTicks % every === 0) await this.backfillMedia(new Date()).catch((err) => this.logger.warn(`telegram-reader: image backfill failed: ${describe(err)}`));
     } finally {
       this.polling = false;
     }
@@ -194,8 +243,7 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
   }
 
   async stop(): Promise<void> {
-    if (this.poller) clearInterval(this.poller);
-    this.poller = null;
+    this.clearPoller();
     this.generation++;
     this.clearRetry();
     const c = this.client;

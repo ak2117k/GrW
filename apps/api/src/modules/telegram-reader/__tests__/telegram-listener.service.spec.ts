@@ -175,6 +175,109 @@ describe('TelegramListenerService', () => {
     await svc.stop();
   });
 
+  describe('poll cadence (2026-11-25 speed fix)', () => {
+    const flood = (seconds: number) => Object.assign(new Error('flood'), { errorMessage: 'FLOOD_WAIT_X', seconds });
+
+    function polled(env: Record<string, string> = {}) {
+      const b = build({ env });
+      const c = b.client as any;
+      c.recentMessages = jest.fn(async () => []);
+      return { ...b, c };
+    }
+
+    it('polls every 6 s by default', async () => {
+      jest.useFakeTimers();
+      const { svc, c } = polled();
+      await svc.start();
+      await jest.advanceTimersByTimeAsync(5_999);
+      expect(c.recentMessages).toHaveBeenCalledTimes(0);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(c.recentMessages).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(6_000);
+      expect(c.recentMessages).toHaveBeenCalledTimes(2);
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(c.recentMessages).toHaveBeenCalledTimes(12);
+      await svc.stop();
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(c.recentMessages).toHaveBeenCalledTimes(12); // stop clears the timer
+    });
+
+    it('TELEGRAM_POLL_SEC=3 is clamped to 5', async () => {
+      jest.useFakeTimers();
+      const { svc, c } = polled({ TELEGRAM_POLL_SEC: '3' });
+      await svc.start();
+      await jest.advanceTimersByTimeAsync(4_999);
+      expect(c.recentMessages).toHaveBeenCalledTimes(0);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(c.recentMessages).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(5_000);
+      expect(c.recentMessages).toHaveBeenCalledTimes(2);
+      await svc.stop();
+    });
+
+    it('FLOOD_WAIT 12 pauses polling 12 s then runs at double interval for 10 min', async () => {
+      jest.useFakeTimers();
+      const { svc, c, prisma } = polled();
+      prisma.telegramChannel.findMany.mockResolvedValue([
+        { id: 'ch1', tgChannelId: '-1001', title: 'Alpha' },
+        { id: 'ch2', tgChannelId: '-1002', title: 'Beta' },
+      ] as any);
+      c.recentMessages.mockRejectedValueOnce(flood(12));
+      const warn = jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      await svc.start();
+
+      await jest.advanceTimersByTimeAsync(6_000); // round 1: first channel floods, rest of round skipped
+      expect(c.recentMessages).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('12 s');
+
+      await jest.advanceTimersByTimeAsync(11_999); // paused until 18 s
+      expect(c.recentMessages).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(1); // 18 s: polling resumes
+      expect(c.recentMessages).toHaveBeenCalledTimes(3); // both channels
+
+      await jest.advanceTimersByTimeAsync(11_999); // doubled interval: 12 s
+      expect(c.recentMessages).toHaveBeenCalledTimes(3);
+      await jest.advanceTimersByTimeAsync(1); // 30 s
+      expect(c.recentMessages).toHaveBeenCalledTimes(5);
+
+      // Slow window = 10 min from the end of the pause (18 s → 618 s): rounds at 18, 30, …, 606, 618.
+      await jest.advanceTimersByTimeAsync(618_000 - 30_000);
+      const atEndOfSlow = c.recentMessages.mock.calls.length;
+      expect(atEndOfSlow).toBe(1 + 2 * (1 + (618 - 18) / 12)); // the flooded call + 51 rounds × 2 channels
+      await jest.advanceTimersByTimeAsync(6_000); // back to the configured 6 s
+      expect(c.recentMessages).toHaveBeenCalledTimes(atEndOfSlow + 2);
+      await jest.advanceTimersByTimeAsync(6_000);
+      expect(c.recentMessages).toHaveBeenCalledTimes(atEndOfSlow + 4);
+      expect(warn).toHaveBeenCalledTimes(1);
+      await svc.stop();
+    });
+
+    it('media backfill still runs about every 5 min at 6 s', async () => {
+      jest.useFakeTimers();
+      const { svc } = polled();
+      const backfill = jest.spyOn(svc, 'backfillMedia').mockResolvedValue(0);
+      await svc.start();
+      await jest.advanceTimersByTimeAsync(299_999);
+      expect(backfill).toHaveBeenCalledTimes(0);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(backfill).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(300_000);
+      expect(backfill).toHaveBeenCalledTimes(2);
+      await svc.stop();
+    });
+
+    it('restart does not leave a second poll timer running', async () => {
+      jest.useFakeTimers();
+      const { svc, c } = polled();
+      await svc.start();
+      await svc.restart();
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(c.recentMessages).toHaveBeenCalledTimes(10);
+      await svc.stop();
+    });
+  });
+
   it('flag parsing and backoff', () => {
     expect(readerEnabled(undefined)).toBe(true);
     expect(readerEnabled('on')).toBe(true);

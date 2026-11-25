@@ -54,10 +54,17 @@ const DABUR_SETUP: SetupPlan = {
   ],
 };
 
-const reply = (setup: Partial<SetupPlan> = {}): SetupReply => ({
+/**
+ * Owner decision 2026-11-25 (7b6e3dd0): R:R is measured from the WORST fill (a CE pullback's zone top). The worked
+ * example's zone 424–426 then gives (433.5 − 426) / (426 − 419.5) = 7.5 / 6.5 = 1.15 < 1.2. The tightened zone
+ * 424–425 gives (433.5 − 425) / (425 − 419.5) = 8.5 / 5.5 = 1.55: the default setup the per-check tests vary.
+ */
+const DABUR_OK: SetupPlan = { ...DABUR_SETUP, entry: { type: 'LIMIT_PULLBACK', low: 424, high: 425, trigger: null, level: 425 } };
+
+const reply = (setup: Partial<SetupPlan> = {}, base: SetupPlan = DABUR_OK): SetupReply => ({
   decision: 'SETUP',
   reason: 'breakout real but late: buy the pullback to 13:00 support',
-  setup: { ...DABUR_SETUP, ...setup },
+  setup: { ...base, ...setup },
 });
 
 /** DABUR: 15m ATR ~3, ATM-ish delta 0.5, lot 1250, ₹3,000 stock-option ceiling, spread 1.2 %, OI 1480 contracts. */
@@ -76,16 +83,16 @@ const ctx = (over: Partial<SetupCheckContext> = {}): SetupCheckContext => ({
 });
 
 describe('checkSetup — the DABUR worked example', () => {
-  it('passes every check except the loss ceiling: as given (lot 1250) it is sl_too_wide against ₹3,000', () => {
-    // Pullback zone 424–426 sits below LTP 431.3 (no chase). R:R to T1 from the zone mid 425:
-    // (433.5 − 425) / (425 − 419.5) = 8.5 / 5.5 = 1.55 ≥ 1.2.
-    // SL fits the ceiling? Worst fill in the zone is its top 426 (a bull pullback fills coming down):
-    // (426 − 419.5) × |0.5| × 1250 = 6.5 × 0.5 × 1250 = ₹4,062.5 > ₹3,000  ⇒  sl_too_wide.
-    const r = checkSetup(reply(), ctx());
-    expect(r).toEqual({ ok: false, failed: 'sl_too_wide', detail: expect.stringContaining('4062.5') });
+  it('as given (zone 424–426, SL 419.5, T1 433.5) it fails rr_below_min: R:R from the worst fill (zone top 426) is 1.15', () => {
+    // (433.5 − 426) / (426 − 419.5) = 7.5 / 6.5 = 1.15 < 1.2 — even with room under any ceiling.
+    const r = checkSetup(reply({}, DABUR_SETUP), ctx({ ceiling: 10_000 }));
+    expect(r).toEqual({ ok: false, failed: 'rr_below_min', detail: expect.stringContaining('1.15') });
+    expect(r).toMatchObject({ detail: expect.stringContaining('worst fill 426') });
   });
 
-  it('passes all checks when the ceiling covers ₹4,062.5 (e.g. the ₹5,000 STOCK_OPT example table)', () => {
+  it('the tightened zone 424–425 passes R:R (1.55) and then meets the loss ceiling: sl_too_wide at ₹3,000, ok at ₹5,000', () => {
+    // ₹ risk from the worst fill 425: (425 − 419.5) × |0.5| × 1250 = ₹3,437.5.
+    expect(checkSetup(reply(), ctx())).toEqual({ ok: false, failed: 'sl_too_wide', detail: expect.stringContaining('3437.5') });
     expect(checkSetup(reply(), ctx({ ceiling: 5000 }))).toEqual({ ok: true });
   });
 
@@ -145,7 +152,7 @@ describe('checkSetup — each check', () => {
 
   it('prevHigh and a 15m swing high are levels', () => {
     // pullback anchored to prevHigh 403 (the broken 60-day high)
-    const prevHigh = reply({ entry: { type: 'LIMIT_PULLBACK', low: 424, high: 426, trigger: null, level: 403 } });
+    const prevHigh = reply({ entry: { type: 'LIMIT_PULLBACK', low: 424, high: 425, trigger: null, level: 403 } });
     expect(checkSetup(prevHigh, OK)).toEqual({ ok: true });
     // breakout over the 13:30 swing high 432.9: |434 − 432.9| = 1.1 ≤ 4.5
     const swing = reply({ entry: { type: 'BREAKOUT_TRIGGER', low: 434, high: 434, trigger: 434, level: 432.9 }, sl: 427, targets: [445] });
@@ -153,7 +160,7 @@ describe('checkSetup — each check', () => {
   });
 
   it('a pullback that cites a level must cite a packet level too', () => {
-    const r = reply({ entry: { type: 'LIMIT_PULLBACK', low: 424, high: 426, trigger: null, level: 425.5 } });
+    const r = reply({ entry: { type: 'LIMIT_PULLBACK', low: 424, high: 425, trigger: null, level: 425.5 } });
     expect(checkSetup(r, OK)).toMatchObject({ ok: false, failed: 'level_not_a_level' });
   });
 
@@ -172,11 +179,20 @@ describe('checkSetup — each check', () => {
     expect(checkSetup(r, OK)).toMatchObject({ ok: false, failed: 'pullback_wrong_side' });
   });
 
-  it('R:R 1.1 to T1 fails', () => {
-    // mid 425, risk 5.5 → T1 = 425 + 1.1 × 5.5 = 431.05
+  it('R:R 1.1 to T1 fails; R:R is from the worst fill for every entry type', () => {
+    // worst fill = zone top 425, risk 5.5 → T1 = 425 + 1.1 × 5.5 = 431.05
     expect(checkSetup(reply({ targets: [431.05, 440] }), OK)).toMatchObject({ ok: false, failed: 'rr_below_min' });
     // exactly 1.2 passes: 425 + 1.2 × 5.5 = 431.6
     expect(checkSetup(reply({ targets: [431.6, 440] }), OK)).toEqual({ ok: true });
+    // CE breakout: worst = max(high, trigger) = 435 (not the trigger 434): (443.3 − 435) / (435 − 428) = 1.19 fails; 443.4 passes.
+    const bo = (t1: number) => reply({ entry: { type: 'BREAKOUT_TRIGGER', low: 434, high: 435, trigger: 434, level: 433.6 }, sl: 428, targets: [t1] });
+    expect(checkSetup(bo(443.3), OK)).toMatchObject({ ok: false, failed: 'rr_below_min' });
+    expect(checkSetup(bo(443.4), OK)).toEqual({ ok: true });
+    // PE pullback: worst = zone bottom 433 (not the mid 433.3): T1 429.4 → 1.2 passes, 429.5 → 1.17 fails.
+    const pe = (t1: number) =>
+      reply({ instrument: { ...DABUR_SETUP.instrument, optionType: 'PE' }, entry: { type: 'LIMIT_PULLBACK', low: 433, high: 433.6, trigger: null, level: 433.6 }, sl: 436, targets: [t1] });
+    expect(checkSetup(pe(429.4), ctx({ ceiling: 10_000, delta: -0.45 }))).toEqual({ ok: true });
+    expect(checkSetup(pe(429.5), ctx({ ceiling: 10_000, delta: -0.45 }))).toMatchObject({ ok: false, failed: 'rr_below_min' });
   });
 
   it('SL must be on the protective side', () => {
@@ -191,17 +207,17 @@ describe('checkSetup — each check', () => {
   });
 
   it('wide SL against the ₹3,000 stock ceiling fails sl_too_wide', () => {
-    // zone 424–426, SL 416: (426 − 416) × 0.5 × 1250 = ₹6,250
+    // zone 424–425, SL 416: (425 − 416) × 0.5 × 1250 = ₹5,625
     expect(checkSetup(reply({ sl: 416, targets: [440] }), ctx({ ceiling: 3000 }))).toMatchObject({ ok: false, failed: 'sl_too_wide' });
-    // a smaller lot fits: (426 − 419.5) × 0.5 × 900 = ₹2,925
+    // a smaller lot fits: (425 − 419.5) × 0.5 × 900 = ₹2,475
     expect(checkSetup(reply(), ctx({ ceiling: 3000, lotSize: 900 }))).toEqual({ ok: true });
   });
 
   it('no class ceiling (table off) uses ₹2,000', () => {
     expect(DEFAULT_SETUP_CEILING_RUPEES).toBe(2000);
-    // ₹2,925 > ₹2,000
+    // ₹2,475 > ₹2,000
     expect(checkSetup(reply(), ctx({ ceiling: null, lotSize: 900 }))).toMatchObject({ ok: false, failed: 'sl_too_wide' });
-    // (426 − 419.5) × 0.5 × 600 = ₹1,950 fits
+    // (425 − 419.5) × 0.5 × 600 = ₹1,650 fits
     expect(checkSetup(reply(), ctx({ ceiling: null, lotSize: 600 }))).toEqual({ ok: true });
   });
 
@@ -235,6 +251,32 @@ describe('checkSetup — each check', () => {
     const fromUnavailable = [...DABUR_SETUP.evidence, { fact: 'results beat', value: '403', source: 'news60m' }];
     expect(checkSetup(reply({ evidence: fromUnavailable }), OK)).toMatchObject({ ok: false, failed: 'evidence_not_in_packet' });
     expect(checkSetup(reply({ evidence: [] }), OK)).toMatchObject({ ok: false, failed: 'no_evidence' });
+  });
+
+  it('a cited value must be INSIDE its named source block, not merely somewhere in the packet', () => {
+    // 403 is in daily60 and quote (prevHigh) but not in chain.
+    const wrongBlock = [...DABUR_SETUP.evidence, { fact: '60d high', value: '403', source: 'chain' }];
+    expect(checkSetup(reply({ evidence: wrongBlock }), OK)).toMatchObject({ ok: false, failed: 'evidence_not_in_packet', detail: expect.stringContaining('not in packet block chain') });
+    expect(checkSetup(reply({ evidence: [{ fact: 'vwap', value: '424.8', source: 'daily60' }] }), OK)).toMatchObject({ ok: false, failed: 'evidence_not_in_packet' });
+    // A dotted path into a block works; a block that does not exist does not.
+    expect(checkSetup(reply({ evidence: [{ fact: 'vwap', value: '424.8', source: 'bars15m.vwap' }] }), OK)).toEqual({ ok: true });
+    expect(checkSetup(reply({ evidence: [{ fact: 'ltp', value: '431.3', source: 'futures' }] }), OK)).toMatchObject({
+      ok: false,
+      failed: 'evidence_not_in_packet',
+      detail: expect.stringContaining('no packet block futures'),
+    });
+  });
+
+  it('claim and rules are never evidence (read-time context / our constants, not present state)', () => {
+    const packet = { ...PACKET, claim: { status: 'present', source: 'reader', value: { evidence: [{ value: '431' }] } }, rules: { minRewardRisk: 1.2 } };
+    const c = ctx({ ceiling: 10_000, packet });
+    expect(checkSetup(reply({ evidence: [{ fact: 'reader saw ltp', value: '431', source: 'claim' }] }), c)).toMatchObject({
+      ok: false,
+      failed: 'evidence_not_in_packet',
+      detail: expect.stringContaining('"claim" is not evidence'),
+    });
+    expect(checkSetup(reply({ evidence: [{ fact: 'min rr', value: '1.2', source: 'rules' }] }), c)).toMatchObject({ ok: false, failed: 'evidence_not_in_packet' });
+    expect(checkSetup(reply({ evidence: [{ fact: 'reader saw ltp', value: '431', source: 'claim.evidence' }] }), c)).toMatchObject({ ok: false, failed: 'evidence_not_in_packet' });
   });
 
   it('intraday only: validUntil ≤ 15:15 IST on NSE/BSE options, ≤ 23:00 on MCX', () => {

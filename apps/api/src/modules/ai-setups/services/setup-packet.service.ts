@@ -53,8 +53,6 @@ export interface SetupNewsSource {
 /** The reading the claim came from (only what the packet needs). */
 export interface SetupReadingRef {
   channelId: string;
-  /** The reader's one-line summary of the post. */
-  summary?: string | null;
 }
 
 export interface SetupPacket {
@@ -62,8 +60,12 @@ export interface SetupPacket {
   underlying: string;
   /** Where the underlying's options trade (NFO / BFO / MCX). */
   optionExchange: string;
-  /** The verified claim the setup is built from (the reader's verdict and its evidence). */
-  claim: { text: string; subject: string; bias: string; horizon: string; claimType: string; verdict: string; evidence: unknown[]; readingSummary: string | null };
+  /**
+   * Which way the verified claim points — labels only, no numbers. The claim's text, its read-time evidence and
+   * the reading summary are NOT in the packet (they are read-time, not present state); SetupLlm sends them in the
+   * user message as context. `claim` is never an evidence source (checkSetup rejects it).
+   */
+  claim: { subject: string; bias: string; horizon: string; claimType: string; verdict: string };
   /** The code rules every setup must pass (plan Global Constraints). */
   rules: { optionBuysOnly: true; minRewardRisk: number; antiChaseAtr15m: number; maxSpreadPct: number; minOi: number; maxSetupsPerDay: number };
   quote: PacketBlock;
@@ -168,16 +170,7 @@ export class SetupPacketService {
       at: i.now.toISOString(),
       underlying: u,
       optionExchange,
-      claim: {
-        text: c.text,
-        subject: c.subject,
-        bias: c.bias,
-        horizon: c.horizon,
-        claimType: c.claimType,
-        verdict: c.verdict,
-        evidence: c.evidence ?? [],
-        readingSummary: i.reading.summary ?? null,
-      },
+      claim: { subject: c.subject, bias: c.bias, horizon: c.horizon, claimType: c.claimType, verdict: c.verdict },
       rules: {
         optionBuysOnly: true,
         minRewardRisk: MIN_REWARD_RISK,

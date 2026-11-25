@@ -19,7 +19,7 @@ const CLAIM: Claim = {
   verdict: 'CONFIRMED',
   evidence: [{ fact: 'ltp above 60d high', value: '431', source: 'instruments.DABUR.quote' }],
 };
-const READING = { channelId: 'ch-1', summary: 'Dabur breakout, confirmed: ltp 431 above high60d 403' };
+const READING = { channelId: 'ch-1' };
 
 const MASTER = [
   { exch_seg: 'NSE', symbol: 'DABUR-EQ', token: '772', name: 'DABUR' },
@@ -147,7 +147,10 @@ describe('SetupPacketService.build', () => {
     expect(typeof ms).toBe('number');
     expect(packet.underlying).toBe('DABUR');
     expect(packet.optionExchange).toBe('NFO');
-    expect(packet.claim).toMatchObject({ text: 'Dabur breakout', verdict: 'CONFIRMED', readingSummary: READING.summary });
+    // Only the claim's labels: its text, read-time evidence and the reading summary are not in the packet (not present state).
+    expect(packet.claim).toEqual({ subject: 'DABUR', bias: 'BULL', horizon: 'INTRADAY', claimType: 'DIRECTION', verdict: 'CONFIRMED' });
+    expect(JSON.stringify(packet)).not.toContain('Dabur breakout');
+    expect(JSON.stringify(packet)).not.toContain('ltp above 60d high');
     expect(packet.rules).toMatchObject({ minRewardRisk: 1.2, antiChaseAtr15m: 1.5, maxSpreadPct: 2, minOi: 500, maxSetupsPerDay: 3 });
 
     expect(val(packet.quote)).toMatchObject({ ltp: 431, dayHigh: 433, dayLow: 403.5, open: 404, volume: 14_500_000 });

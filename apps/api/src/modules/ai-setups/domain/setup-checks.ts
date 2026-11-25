@@ -6,11 +6,12 @@ import { SETUP_ENTRY_TYPES, type SetupEvidence, type SetupPlan, type SetupReply 
  * The deterministic checks that can veto an AI setup (plan Global Constraints). Pure: everything it needs is
  * in the reply and the context the caller measured. Any failure ⇒ the caller stores NO_TRADE with `failed`.
  *
- * Entry reference prices (underlying):
- *  - expected fill (R:R): LIMIT_PULLBACK = zone mid; BREAKOUT_TRIGGER = trigger; MARKET_NOW = current LTP.
- *  - worst fill (loss ceiling): a CE pullback fills coming DOWN, so at the zone top (a PE's at the zone bottom);
- *    a breakout at the far side of its zone/trigger; MARKET_NOW at LTP. The ceiling check is a safety bound,
- *    so it uses the worst fill.
+ * Entry reference price (underlying) — the WORST fill, for reward:risk AND the ₹ loss ceiling (owner decision,
+ * 2026-11-25, 7b6e3dd0): a CE pullback fills coming DOWN, so at the zone top (a PE's at the zone bottom); a CE
+ * breakout at max(high, trigger) (a PE's at min(low, trigger)); MARKET_NOW at LTP.
+ *
+ * Evidence: every cited value must be inside the block its `source` names (not merely somewhere in the packet),
+ * and `claim` / `rules` are never evidence (read-time context and our own constants, not present market state).
  */
 
 /** Plan Global Constraints: no class ceiling (HARD_LOSS_CEILING_BY_CLASS off / class not listed) ⇒ ₹2,000. */
@@ -95,10 +96,41 @@ function valueInPacket(value: string, idx: PacketIndex): boolean {
   return s.length > 0 && idx.serialized.includes(s);
 }
 
-/** Every evidence item holds: none cites an unavailable block, every value is in the packet. */
-function badEvidence(evidence: SetupEvidence[], idx: PacketIndex): SetupEvidence | null {
+/** Packet parts that are never evidence: the reader's read-time claim and our own rule constants. */
+export const NON_EVIDENCE_SOURCES: ReadonlySet<string> = new Set(['claim', 'rules']);
+const UNAVAILABLE = Symbol('unavailable');
+
+/**
+ * The packet node a dotted evidence source names ("quote", "bars15m", "chain.rows"): walks keys, stepping into a
+ * present block's `value`. UNAVAILABLE when the path crosses an unavailable block; undefined when it names nothing.
+ */
+function sourceNode(packet: unknown, source: string): unknown {
+  const path = source.trim().split('.').map((k) => k.trim()).filter(Boolean);
+  if (path.length === 0) return undefined;
+  let node: unknown = packet;
+  for (const key of path) {
+    if (!isRec(node)) return undefined;
+    if (node.status === 'unavailable') return UNAVAILABLE;
+    if (key in node) node = node[key];
+    else if (node.status === 'present' && isRec(node.value) && key in node.value) node = node.value[key];
+    else return undefined;
+  }
+  if (isRec(node) && node.status === 'unavailable') return UNAVAILABLE;
+  return node;
+}
+
+/**
+ * Every evidence item holds: its source names a present packet block (never `claim` / `rules`), and its value is
+ * INSIDE that block — a number found only elsewhere in the packet does not count.
+ */
+function badEvidence(evidence: SetupEvidence[], packet: unknown): { e: SetupEvidence; why: string } | null {
   for (const e of evidence) {
-    if (idx.statusOf(e.source) === 'unavailable' || !valueInPacket(e.value, idx)) return e;
+    const root = e.source.trim().split('.')[0]?.trim() ?? '';
+    if (NON_EVIDENCE_SOURCES.has(root)) return { e, why: `"${root}" is not evidence (read-time context / rule constants)` };
+    const node = sourceNode(packet, e.source);
+    if (node === UNAVAILABLE) return { e, why: `block ${e.source} is unavailable` };
+    if (node === undefined) return { e, why: `no packet block ${e.source}` };
+    if (!valueInPacket(e.value, indexPacket(node))) return { e, why: `not in packet block ${e.source}` };
   }
   return null;
 }
@@ -165,7 +197,7 @@ function shapeError(s: SetupPlan): string | null {
  * Check one setup reply against the mandatory code rules, in order: contract (option BUY, well-formed), data
  * present (LTP, ATR15m, delta, lot, spread, OI — missing numbers never pass), evidence (every cited value in the
  * packet), sides (SL protective, targets beyond entry in order, pullback below price for a CE / above for a PE),
- * anti-chase (BREAKOUT_TRIGGER / MARKET_NOW within 1.5 × ATR15m of a cited packetLevels level, never LTP / strike / OI / volume), R:R to T1 ≥ 1.2,
+ * anti-chase (BREAKOUT_TRIGGER / MARKET_NOW within 1.5 × ATR15m of a cited packetLevels level, never LTP / strike / OI / volume), R:R to T1 ≥ 1.2 from the worst fill,
  * liquidity (spread ≤ 2 %, OI ≥ minOi), intraday validUntil, and SL distance × |delta| × lot ≤ ceiling.
  * NO_TRADE has nothing to veto (ok).
  */
@@ -188,10 +220,9 @@ export function checkSetup(reply: SetupReply, ctx: SetupCheckContext): SetupChec
   if (!finite(spreadPct) || spreadPct < 0) return fail('spread_unavailable', 'no option bid/ask spread');
   if (!finite(oi) || oi < 0) return fail('oi_unavailable', 'no option OI');
 
-  const idx = indexPacket(ctx.packet);
   if (s.evidence.length === 0) return fail('no_evidence', 'a setup must cite packet numbers');
-  const bad = badEvidence(s.evidence, idx);
-  if (bad) return fail('evidence_not_in_packet', `"${bad.fact}" = ${bad.value} (${bad.source}) is not in the packet`);
+  const bad = badEvidence(s.evidence, ctx.packet);
+  if (bad) return fail('evidence_not_in_packet', `"${bad.e.fact}" = ${bad.e.value} (${bad.e.source}): ${bad.why}`);
 
   const { entry } = s;
   // The cited level must be a real level (day / prior / 60d high-low, prior close, a 15m swing, VWAP) — never the
@@ -208,8 +239,7 @@ export function checkSetup(reply: SetupReply, ctx: SetupCheckContext): SetupChec
 
   const bull = s.instrument.optionType === 'CE';
   const dir = bull ? 1 : -1;
-  // Expected fill (R:R) and worst fill (loss ceiling) on the underlying.
-  const expected = entry.type === 'LIMIT_PULLBACK' ? (entry.low + entry.high) / 2 : entry.type === 'BREAKOUT_TRIGGER' ? (entry.trigger as number) : ltp;
+  // The worst fill on the underlying: the reference for targets, reward:risk and the ₹ loss ceiling.
   const worst =
     entry.type === 'MARKET_NOW' ? ltp
     : entry.type === 'BREAKOUT_TRIGGER' ? (bull ? Math.max(entry.high, entry.trigger as number) : Math.min(entry.low, entry.trigger as number))
@@ -218,10 +248,10 @@ export function checkSetup(reply: SetupReply, ctx: SetupCheckContext): SetupChec
 
   // SL protective: beyond every possible fill (below the zone for a CE, above it for a PE).
   if (dir * (nearEdge - s.sl) <= 0) return fail('sl_wrong_side', `SL ${s.sl} is not ${bull ? 'below' : 'above'} the entry ${nearEdge}`);
-  // Targets beyond the expected fill, nearest first.
+  // Targets beyond the worst fill, nearest first.
   if (s.targets.length === 0) return fail('targets_wrong_side', 'no targets');
   for (let i = 0; i < s.targets.length; i++) {
-    const prev = i === 0 ? expected : s.targets[i - 1];
+    const prev = i === 0 ? worst : s.targets[i - 1];
     if (dir * (s.targets[i] - prev) <= 0) return fail('targets_wrong_side', `target ${s.targets[i]} is not ${bull ? 'above' : 'below'} ${r2(prev)}`);
   }
 
@@ -238,9 +268,9 @@ export function checkSetup(reply: SetupReply, ctx: SetupCheckContext): SetupChec
     }
   }
 
-  const risk = dir * (expected - s.sl);
-  const rr = (dir * (s.targets[0] - expected)) / risk;
-  if (rr < MIN_REWARD_RISK - EPS) return fail('rr_below_min', `R:R to T1 ${r2(rr)} (entry ${r2(expected)}, SL ${s.sl}, T1 ${s.targets[0]}) < ${MIN_REWARD_RISK}`);
+  const risk = dir * (worst - s.sl);
+  const rr = (dir * (s.targets[0] - worst)) / risk;
+  if (rr < MIN_REWARD_RISK - EPS) return fail('rr_below_min', `R:R to T1 ${r2(rr)} (worst fill ${r2(worst)}, SL ${s.sl}, T1 ${s.targets[0]}) < ${MIN_REWARD_RISK}`);
 
   if (spreadPct > MAX_SPREAD_PCT + EPS) return fail('spread_too_wide', `option spread ${spreadPct}% > ${MAX_SPREAD_PCT}%`);
   if (oi < ctx.minOi) return fail('oi_too_low', `option OI ${oi} < ${ctx.minOi}`);

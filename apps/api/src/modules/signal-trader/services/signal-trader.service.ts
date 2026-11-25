@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { performance } from 'node:perf_hooks';
 import { Inject, Injectable, Logger, Optional, type OnApplicationBootstrap, type OnModuleDestroy } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { contractValueFactor } from '@td/shared';
@@ -42,6 +43,109 @@ import { SIGNAL_PAPER_SKIP_REASON, SIGNAL_PAPER_STRATEGY, paperAlert, paperCause
 export const EVAL_TIMEOUT_MS = 5 * 60_000;
 /** The running queue job's real start (ms), for the live-order age guard; unset outside the queue. */
 const queueJob = new AsyncLocalStorage<{ startedAt: number }>();
+/**
+ * Where a decision's time went (2026-11-25 signal speed): stored as `judge.timings` on every exit that writes the
+ * judge. RECORD ONLY — nothing reads it back for a decision. A step that did not run (or could not be timed) is null.
+ * `contextBlocks` = each market-context block's ms from the start of the context collection, with its status.
+ * `totalToSendMs` = decision start → the moment the outcome is written (a live TAKE: just before the order is sent).
+ */
+export interface DecisionTimings {
+  receivedToStartMs: number | null;
+  contextMs: number | null;
+  contextBlocks: Record<string, { status: CtxBlock['status']; ms: number }> | null;
+  noiseMs: number | null;
+  lateRoomMs: number | null;
+  modelMs: number | null;
+  oiCheckMs: number | null;
+  delayedCheckMs: number | null;
+  preSendQuoteMs: number | null;
+  totalToSendMs: number | null;
+}
+export type TimedStep = 'contextMs' | 'noiseMs' | 'lateRoomMs' | 'modelMs' | 'oiCheckMs' | 'delayedCheckMs' | 'preSendQuoteMs';
+
+/** A per-decision monotonic stopwatch (performance.now). Every method is total: a broken clock gives nulls, never a throw. */
+export class Stopwatch {
+  private readonly t0: number | null;
+  private readonly steps: Partial<Record<TimedStep, number>> = {};
+  private readonly blocks: Record<string, { status: CtxBlock['status']; ms: number }> = {};
+  private receivedToStartMs: number | null = null;
+
+  constructor(private readonly clock: () => number = () => performance.now()) {
+    this.t0 = this.read();
+  }
+
+  /** The clock, or null when it cannot be read. */
+  read(): number | null {
+    try {
+      const v = this.clock();
+      return typeof v === 'number' && Number.isFinite(v) ? v : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Telegram receipt → this decision's start (wall clock; both are Dates). */
+  received(receivedAt: Date | null | undefined, start: Date): void {
+    try {
+      if (receivedAt instanceof Date && Number.isFinite(receivedAt.getTime())) this.receivedToStartMs = Math.round(start.getTime() - receivedAt.getTime());
+    } catch {
+      // record only
+    }
+  }
+
+  /** Runs `work` unchanged (same value, same error) and records its ms under `step`. */
+  async time<T>(step: TimedStep, work: () => Promise<T>): Promise<T> {
+    const a = this.read();
+    try {
+      return await work();
+    } finally {
+      this.record(step, a);
+    }
+  }
+
+  /** A step's ms from the clock read `a`; a missing read leaves the step null. */
+  record(step: TimedStep, a: number | null): void {
+    try {
+      const b = this.read();
+      if (a !== null && b !== null) this.steps[step] = Math.round(b - a);
+    } catch {
+      // record only
+    }
+  }
+
+  block(key: string, status: CtxBlock['status'] | undefined, ms: number | null): void {
+    try {
+      if (status && ms !== null && Number.isFinite(ms)) this.blocks[key] = { status, ms: Math.round(ms) };
+    } catch {
+      // record only
+    }
+  }
+
+  /** The timings so far; null only if even building the object failed. */
+  snapshot(): DecisionTimings | null {
+    try {
+      const now = this.read();
+      const s = (k: TimedStep) => this.steps[k] ?? null;
+      return {
+        receivedToStartMs: this.receivedToStartMs,
+        contextMs: s('contextMs'),
+        contextBlocks: Object.keys(this.blocks).length ? { ...this.blocks } : null,
+        noiseMs: s('noiseMs'),
+        lateRoomMs: s('lateRoomMs'),
+        modelMs: s('modelMs'),
+        oiCheckMs: s('oiCheckMs'),
+        delayedCheckMs: s('delayedCheckMs'),
+        preSendQuoteMs: s('preSendQuoteMs'),
+        totalToSendMs: now !== null && this.t0 !== null ? Math.round(now - this.t0) : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+}
+/** The running evaluation's / trigger fire's stopwatch; unset outside one (then nothing is timed or stamped). */
+const decisionClock = new AsyncLocalStorage<Stopwatch>();
+
 /** Claimed decisions still undecided after this are closed by the sweeper (must exceed EVAL_TIMEOUT_MS). */
 export const STUCK_DECISION_MS = 10 * 60_000;
 
@@ -339,7 +443,11 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
   }
 
   /** One evaluation of one signal. Never throws: every claimed decision is finished. */
-  async evaluate(e: SignalReadyEvent, now: Date = new Date()): Promise<EvaluationResult | null> {
+  evaluate(e: SignalReadyEvent, now: Date = new Date()): Promise<EvaluationResult | null> {
+    return decisionClock.run(new Stopwatch(), () => this.evaluateTimed(e, now));
+  }
+
+  private async evaluateTimed(e: SignalReadyEvent, now: Date): Promise<EvaluationResult | null> {
     const prior = await this.repo.decisionsFor(e.signalId);
     let evaluation = 1;
     if (prior.length > 0) {
@@ -358,6 +466,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     } catch (err) {
       readError = errText(err);
     }
+    decisionClock.getStore()?.received(signal?.receivedAt, now);
     const decisionId = await this.repo.claimDecision({
       signalId: e.signalId,
       evaluation,
@@ -413,6 +522,24 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     ]);
     const slEnf = slEnforceability(this.env, owner, c?.exchange ?? null, c?.tradingsymbol ?? null);
     return { contract, c, marketOpen, minutesToClose, ltp, tradesToday, signalLossToday, clusterTaken, clusterId: e.clusterId ?? null, holding, coreOff, slEnf };
+  }
+
+  /** Runs `work` exactly as before; inside an evaluation / trigger fire, its ms is recorded under `step` (record only). */
+  private timed<T>(step: TimedStep, work: () => Promise<T>): Promise<T> {
+    const sw = decisionClock.getStore();
+    return sw ? sw.time(step, work) : work();
+  }
+
+  /** The judge record with this evaluation's `timings` (a plain-object record only; else unchanged). Never throws. */
+  private stamp(judge: unknown): unknown {
+    try {
+      const sw = decisionClock.getStore();
+      if (!sw || !judge || typeof judge !== 'object' || Array.isArray(judge)) return judge;
+      const timings = sw.snapshot();
+      return timings ? { ...(judge as Record<string, unknown>), timings } : judge;
+    } catch {
+      return judge;
+    }
   }
 
   private async safe<T>(fn: () => Promise<T>): Promise<T | null> {
@@ -573,8 +700,20 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const conflict = e.conflict === true || cluster?.conflict === true;
     // 2026-11-04: event days reach the judge only on the default-TAKE prompt (skip = the v5 packet exactly).
     const takeDefault = cfg.judgeDefault === 'take';
-    const [market, channelStats, channelViews, events, trend] = await Promise.all([
-      this.context.build({ underlying: s.underlying, kind: s.instrumentKind, exchange: plan.exchange, ownerUserId: owner, now, ltp: plan.ltp, expiry: contract?.expiry ?? null }),
+    // Timings (record only): each context block's ms from the start of the collection.
+    const sw = decisionClock.getStore();
+    const blockMs: Record<string, number> = {};
+    const ctxStart = sw ? sw.read() : null;
+    const blockDone = (key: string) => {
+      try {
+        const t = sw?.read() ?? null;
+        if (ctxStart !== null && t !== null) blockMs[key] = t - ctxStart;
+      } catch {
+        // record only
+      }
+    };
+    const [market, channelStats, channelViews, events, trend] = await this.timed('contextMs', () => Promise.all([
+      this.context.build({ underlying: s.underlying, kind: s.instrumentKind, exchange: plan.exchange, ownerUserId: owner, now, ltp: plan.ltp, expiry: contract?.expiry ?? null, ...(sw ? { onBlock: (key: string, ms: number) => { blockMs[key] = ms; } } : {}) }),
       this.repo.channelStats(s.channelId).catch(() => null),
       // Telegram channels' market views on this underlying (read-only context; never a trigger).
       Promise.resolve()
@@ -582,9 +721,13 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         .catch((err: unknown) => ({ status: 'unavailable', reason: `channel views: ${err instanceof Error ? err.message : String(err)}` })),
       takeDefault ? this.eventsFor(s.underlying, now) : Promise.resolve(null),
       // Informational (record only): WITH / AGAINST / MIXED / UNKNOWN the 15m trend, or unavailable with the reason.
-      this.trendBlock(s, now),
-    ]);
+      this.trendBlock(s, now).then((b) => {
+        blockDone('trend');
+        return b;
+      }),
+    ]));
     market.trend = trend;
+    if (sw) for (const [key, ms] of Object.entries(blockMs)) sw.block(key, market[key]?.status, ms);
     // 2026-11-04: the per-trade cap the judge reasons with is the underlying's own (GOLD ₹7,500 via
     // HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING) — the same figure the gate sized against (gate.ts riskCapFor).
     // It said ₹2,000 for GOLD, so reward/risk on a GOLD call was judged against a cap 3.75× too small.
@@ -592,9 +735,11 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     // The judge's numbers (domain/judge-noise): noise units + both stops in them, intrinsic from SPOT, chain labels.
     const facts = packetMarketFacts(market);
     const lotQty = plan.lots > 0 ? plan.qty / plan.lots : plan.lotSize;
-    market.noise = await Promise.resolve()
-      .then(() => this.context.noise({ signal: s, contract: contract ?? null, price: plan.ltp, planSl: plan.sl > 0 ? plan.sl : null, cap: lossCap, lotQty, spot: facts.spot, vix: facts.vix, ownerUserId: owner, now }))
-      .catch((err: unknown) => ({ status: 'unavailable' as const, reason: `noise units: ${err instanceof Error ? err.message : String(err)}` }));
+    market.noise = await this.timed('noiseMs', () =>
+      Promise.resolve()
+        .then(() => this.context.noise({ signal: s, contract: contract ?? null, price: plan.ltp, planSl: plan.sl > 0 ? plan.sl : null, cap: lossCap, lotQty, spot: facts.spot, vix: facts.vix, ownerUserId: owner, now }))
+        .catch((err: unknown) => ({ status: 'unavailable' as const, reason: `noise units: ${err instanceof Error ? err.message : String(err)}` })),
+    );
     labelChain(market);
     const optionValueBlock = optionValue({
       kind: s.instrumentKind,
@@ -632,7 +777,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         lots: plan.lots,
         qty: plan.qty,
         riskRupees: plan.riskRupees,
-        late: plan.late ? { ...plan.late, room: await this.lateRoomFor(s, plan, market, contract ?? null, owner, now) } : null,
+        late: plan.late ? { ...plan.late, room: await this.timed('lateRoomMs', () => this.lateRoomFor(s, plan, market, contract ?? null, owner, now)) } : null,
         optionValue: optionValueBlock,
       },
       caps: { maxLots: cfg.maxLots, maxLossPerTrade: lossCap, tradesToday, maxTradesPerDay: cfg.maxTradesPerDay },
@@ -640,10 +785,12 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       ...(events ? { events } : {}),
       ...(judgeLessons.length ? { lessons: judgeLessons } : {}),
     };
-    const out = await this.judge.judge(packet, {
-      model: cfg.judgeModel, timeoutMs: cfg.judgeTimeoutMs, slotWaitMs: cfg.judgeSlotWaitMs, userId: owner,
-      system: signalJudgeSystem(cfg.judgeDefault, cfg.judgeMinConfidence),
-    });
+    const out = await this.timed('modelMs', () =>
+      this.judge.judge(packet, {
+        model: cfg.judgeModel, timeoutMs: cfg.judgeTimeoutMs, slotWaitMs: cfg.judgeSlotWaitMs, userId: owner,
+        system: signalJudgeSystem(cfg.judgeDefault, cfg.judgeMinConfidence),
+      }),
+    );
     if (!out.ok) {
       return { ok: false, reason: out.reason, detail: out.detail, record: { unavailable: out.reason, detail: out.detail, latencyMs: out.latencyMs, packet } };
     }
@@ -677,7 +824,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     // A delayed call (a re-posted screenshot, or a price already past the band) goes live only with room left
     // from OUR price to the next target it has not reached since the call; the reached ones are dropped.
     if (cfg.mode === 'live' && !learnOnly && routed === null) {
-      const d = await this.delayedCheck(s, finalPlan, owner, now);
+      const d = await this.timed('delayedCheckMs', () => this.delayedCheck(s, finalPlan, owner, now));
       if (d) {
         judgeWithChanges = { ...judgeWithChanges, delayed: d };
         if (!d.room.ok) routed = { reason: 'delayed_no_room', detail: `call ${d.ageMin} min old — ${d.room.detail}` };
@@ -687,7 +834,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     if (cfg.mode === 'paper' || (cfg.mode === 'live' && (learnOnly || routed !== null))) {
       const judge = routed ? { ...judgeWithChanges, liveRouted: routed } : judgeWithChanges;
       if (routed) this.logger.log(`[signal-trader] ${what}: live TAKE paper-traded — ${routed.reason}: ${routed.detail}`);
-      await this.repo.finishDecision(decisionId, { gate: gateChecks, judge, plan: finalPlan, decision: 'PAPER', skipReason: null });
+      await this.repo.finishDecision(decisionId, { gate: gateChecks, judge: this.stamp(judge), plan: finalPlan, decision: 'PAPER', skipReason: null });
       const n: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: base.c?.expiry ?? null, channel, what, required: finalPlan.limitPrice * finalPlan.qty * contractValueFactor(finalPlan.exchange, finalPlan.tradingsymbol), available: null, method: 'premium' };
       const cause = paperCause({ trigger: 'paper_mode', mode: cfg.mode, record: j.record as Parameters<typeof paperCause>[0]['record'], routed });
       const paper = await this.openPaper(n, 'paper_mode', undefined, cause);
@@ -696,13 +843,13 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
 
     // ---- shadow: identical pipeline, no order ----
     if (cfg.mode !== 'live') {
-      await this.repo.finishDecision(decisionId, { gate: gateChecks, judge: judgeWithChanges, plan: finalPlan, decision: 'TAKE', skipReason: null });
+      await this.repo.finishDecision(decisionId, { gate: gateChecks, judge: this.stamp(judgeWithChanges), plan: finalPlan, decision: 'TAKE', skipReason: null });
       void sendOpsAlert(`signal-take:${decisionId}`, takeAlert({ mode: cfg.mode, channel, plan: finalPlan, agreeCount, conflict, confidence: j.effectiveConfidence, reasons: v.reasons }));
       return { decisionId, decision: 'TAKE', skipReason: null };
     }
 
     // ---- live: re-check price (the judge took time) right before the order ----
-    const fresh = await this.quotes.ltp(owner as string, finalPlan.token, finalPlan.exchange).catch(() => null);
+    const fresh = await this.timed('preSendQuoteMs', () => this.quotes.ltp(owner as string, finalPlan.token, finalPlan.exchange).catch(() => null));
     const inBand = fresh !== null && fresh >= finalPlan.bandLow - 1e-9 && fresh <= finalPlan.bandHigh + 1e-9;
     const stillProtective = fresh !== null && (finalPlan.side === 'BUY' ? finalPlan.sl < fresh : finalPlan.sl > fresh);
     const recheck: GateCheck = { name: 'pre_send_price', ok: inBand && stillProtective, required: true, detail: fresh === null ? 'no fresh quote before sending' : `LTP ${fresh} vs band [${finalPlan.bandLow}, ${finalPlan.bandHigh}], SL ${finalPlan.sl}` };
@@ -745,7 +892,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     if (jobStart !== undefined && Date.now() - jobStart > EVAL_TIMEOUT_MS) {
       return this.skip(decisionId, 'evaluation_timeout', `evaluation took ${Math.round((Date.now() - jobStart) / 1000)} s — too late to send`, checks, judgeWithChanges, finalPlan, channel, what);
     }
-    await this.repo.finishDecision(decisionId, { gate: checks, judge: judgeWithChanges, plan: finalPlan, decision: 'TAKE', skipReason: null });
+    await this.repo.finishDecision(decisionId, { gate: checks, judge: this.stamp(judgeWithChanges), plan: finalPlan, decision: 'TAKE', skipReason: null });
     void sendOpsAlert(`signal-take:${decisionId}`, takeAlert({ mode: 'live', channel, plan: finalPlan, agreeCount, conflict, confidence: j.effectiveConfidence, reasons: v.reasons }));
     const placed = await this.executor.place({
       decisionId,
@@ -821,9 +968,11 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       retry,
     };
     const planWithRetry: EntryPlan = { ...plan, trigger };
-    if (!(await this.repo.armTrigger(decisionId, { gate: checks, judge: j.record, plan: planWithRetry }))) return null;
+    // The stored and the watched record are the same stamped one, so a later expiry SKIP keeps these timings.
+    const armedRecord = this.stamp(j.record);
+    if (!(await this.repo.armTrigger(decisionId, { gate: checks, judge: armedRecord, plan: planWithRetry }))) return null;
     this.pending.set(decisionId, {
-      decisionId, signal: s, event: { signalId: s.id, clusterId: base.clusterId, agreeCount: j.agreeCount, conflict: j.conflict }, channel, trigger, gate: checks, judge: j, plan: planWithRetry,
+      decisionId, signal: s, event: { signalId: s.id, clusterId: base.clusterId, agreeCount: j.agreeCount, conflict: j.conflict }, channel, trigger, gate: checks, judge: { ...j, record: armedRecord }, plan: planWithRetry,
       nextPollAt: now.getTime() + ENTRY_RETRY_POLL_SEC * 1000, persistedAt: now.getTime(),
     });
     this.ensureTimer();
@@ -921,8 +1070,10 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const checks: GateCheck[] = [
       ...hyp.gate.checks.map((c) => (c.name === 'entry_tolerance' ? { ...c, ok: null, required: true, detail: `waiting for ${trig.op} ${trig.price} (LTP ${base.ltp}); band [${trig.bandLow}, ${trig.bandHigh}]` } : c)),
     ];
-    if (!(await this.repo.armTrigger(decisionId, { gate: checks, judge: j.record, plan: planAtTrigger }))) return null;
-    this.pending.set(decisionId, { decisionId, signal: s, event: e, channel, trigger, gate: checks, judge: j, plan: planAtTrigger, nextPollAt: 0, persistedAt: now.getTime() });
+    // The stored and the watched record are the same stamped one, so a later expiry SKIP keeps these timings.
+    const armedRecord = this.stamp(j.record);
+    if (!(await this.repo.armTrigger(decisionId, { gate: checks, judge: armedRecord, plan: planAtTrigger }))) return null;
+    this.pending.set(decisionId, { decisionId, signal: s, event: e, channel, trigger, gate: checks, judge: { ...j, record: armedRecord }, plan: planAtTrigger, nextPollAt: 0, persistedAt: now.getTime() });
     this.ensureTimer();
     void sendOpsAlert(
       `signal-arm:${decisionId}`,
@@ -1008,7 +1159,14 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
    * then the normal shadow / live path (pre-send price, funds, LIMIT order). Price back out of the
    * band by now → keep waiting.
    */
-  async fire(p: PendingTrigger, now: Date): Promise<EvaluationResult | 'WAIT'> {
+  fire(p: PendingTrigger, now: Date): Promise<EvaluationResult | 'WAIT'> {
+    return decisionClock.run(new Stopwatch(), () => {
+      decisionClock.getStore()?.received(p.signal?.receivedAt, now);
+      return this.fireTimed(p, now);
+    });
+  }
+
+  private async fireTimed(p: PendingTrigger, now: Date): Promise<EvaluationResult | 'WAIT'> {
     const s = p.signal;
     const what = describeSignal(s);
     try {
@@ -1107,7 +1265,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       const why = this.paper ? 'paper-on-no-funds is OFF' : 'paper path not wired';
       return this.skip(n.decisionId, SIGNAL_PAPER_SKIP_REASON, `${check.detail} — ${why}`, checks, judge, n.plan, n.channel, n.what);
     }
-    await this.repo.finishDecision(n.decisionId, { gate: checks, judge, plan: n.plan, decision: 'PAPER', skipReason: SIGNAL_PAPER_SKIP_REASON });
+    await this.repo.finishDecision(n.decisionId, { gate: checks, judge: this.stamp(judge), plan: n.plan, decision: 'PAPER', skipReason: SIGNAL_PAPER_SKIP_REASON });
     const paper = await this.openPaper(n, 'funds_check');
     return { decisionId: n.decisionId, decision: 'PAPER', skipReason: SIGNAL_PAPER_SKIP_REASON, paper };
   }
@@ -1169,7 +1327,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     what: string,
   ): Promise<EvaluationResult> {
     try {
-      await this.repo.finishDecision(decisionId, { gate: checks, judge, plan, decision: 'SKIP', skipReason: reason });
+      await this.repo.finishDecision(decisionId, { gate: checks, judge: this.stamp(judge), plan, decision: 'SKIP', skipReason: reason });
     } catch (err) {
       this.logger.error(`[signal-trader] could not record SKIP for ${decisionId}: ${errText(err)}`);
     }

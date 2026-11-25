@@ -275,3 +275,28 @@ describe('SignalContextService.build — deadlineMs caps each block, not the who
     expect((await p).chain).toEqual({ status: 'unavailable', reason: expect.stringContaining('timed out after 8000 ms') });
   });
 });
+
+/** 2026-11-25 signal speed: the judge's per-step timings ask build for each block's ms (record only). */
+describe('SignalContextService.build — onBlock reports each block\'s ms', () => {
+  const mk = () => {
+    const chain = { latestChain: jest.fn().mockResolvedValue(null) };
+    const mbm = { behaviour: jest.fn().mockResolvedValue({ status: 'ok', horizons: {} }) };
+    return new SignalContextService(chain as any, undefined, undefined, undefined, mbm as any, { instruments: ['NIFTY'], packet: 'on' } as any);
+  };
+  const args = { underlying: 'NIFTY', kind: 'CE', exchange: 'NFO', ownerUserId: 'owner', now: NOW, ltp: 100 };
+
+  it('reports every block key once with a non-negative ms; the blocks are the same as without it', async () => {
+    const seen: Record<string, number> = {};
+    const timed = await mk().build({ ...args, onBlock: (k, ms) => { seen[k] = ms; } });
+    const plain = await mk().build(args);
+    expect(Object.keys(seen).sort()).toEqual(['chain', 'market', 'mbm', 'news', 'structure']);
+    for (const ms of Object.values(seen)) expect(ms).toBeGreaterThanOrEqual(0);
+    expect(timed).toEqual(plain);
+  });
+
+  it('a throwing onBlock is ignored', async () => {
+    const plain = await mk().build(args);
+    const timed = await mk().build({ ...args, onBlock: () => { throw new Error('boom'); } });
+    expect(timed).toEqual(plain);
+  });
+});

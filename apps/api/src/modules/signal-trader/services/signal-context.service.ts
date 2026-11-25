@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { MarketContextService } from '../../market-data/services/market-context.service';
 import { MbmChainReader } from '../../mbm/services/mbm-chain-reader.service';
@@ -222,11 +223,14 @@ export class SignalContextService {
    * `expiry`: the traded contract's (YYYY-MM-DD), so an MCX chain reads that expiry's capture first.
    * `deadlineMs` (optional; the message reader's packet time box): caps every block's own box at it, so a
    * slow block turns `unavailable` without discarding the others. Absent = the blocks' own boxes (the judge).
+   * `onBlock` (optional, record only): told each block's key and how long it took (ms). A throwing callback
+   * is ignored; the returned blocks are the same with or without it.
    */
-  async build(i: { underlying: string; kind: string; exchange: string; ownerUserId: string | null; now: Date; ltp?: number | null; expiry?: string | null; deadlineMs?: number }): Promise<Record<string, CtxBlock>> {
+  async build(i: { underlying: string; kind: string; exchange: string; ownerUserId: string | null; now: Date; ltp?: number | null; expiry?: string | null; deadlineMs?: number; onBlock?: (key: string, ms: number) => void }): Promise<Record<string, CtxBlock>> {
     const sym = levelSymbolFor(i.underlying, i.kind);
     const box = (ms: number) => (i.deadlineMs !== undefined ? Math.min(ms, i.deadlineMs) : ms);
-    const [chain, market, structure, news, mbm] = await Promise.all([
+    const t0 = i.onBlock ? clockMs() : null;
+    const [chain, market, structure, news, mbm] = await timedBlocks(t0, i.onBlock, ['chain', 'market', 'structure', 'news', 'mbm'], [
       // The chain capture (mbm-chain-capture) snapshots NFO index / stock chains only; an MCX chain is read
       // from the market hub's own 3-minute OI capture instead (mcxChain), in the same block shape.
       i.exchange === 'MCX'
@@ -590,6 +594,37 @@ export class SignalContextService {
       return { status: 'unavailable', reason: `${source}: ${errText(err)}` };
     }
   }
+}
+
+/** A monotonic clock read for record-only timings; null when it cannot be read. Never throws. */
+function clockMs(): number | null {
+  try {
+    const v = performance.now();
+    return Number.isFinite(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Promise.all over the blocks; with `onBlock`, each block's ms since `t0` is reported when it settles.
+ * Record only: the blocks resolve to exactly the same values, and a throwing clock / callback is ignored.
+ */
+function timedBlocks(t0: number | null, onBlock: ((key: string, ms: number) => void) | undefined, keys: string[], blocks: Promise<CtxBlock>[]): Promise<CtxBlock[]> {
+  if (!onBlock) return Promise.all(blocks);
+  return Promise.all(
+    blocks.map((p, n) =>
+      p.then((b) => {
+        try {
+          const t1 = clockMs();
+          if (t0 !== null && t1 !== null) onBlock(keys[n], t1 - t0);
+        } catch {
+          // record only: never into the decision path
+        }
+        return b;
+      }),
+    ),
+  );
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {

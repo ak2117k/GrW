@@ -93,3 +93,21 @@
 - [ ] Set `FLOOR_BROKER_SL_AT=ceiling` (still `FLOOR_BROKER_SL` shadow) for one week; report shadow fills vs actual exits.
 - [ ] With owner OK: set `HARD_LOSS_CEILING_BY_CLASS` (new floor live in code); then `FLOOR_BROKER_SL=live` (real resting stops). Recreate the API after 15:35 each time.
 - [ ] Night review: list every floor fire; each one is a question for Plan 2's trade agent ("should it have exited first?").
+
+### Task 5: An owner order resting on the contract must not block a needed exit (added 2026-11-25)
+
+Evidence: 2026-11-25 SENSEX26NOV83600PE ×40 — six AI exits 13:24:59–13:30:07 were SKIPPED `OPEN_ORDER_EXISTS` because the owner had a manual order resting at Angel (not in `core_orders`); closed at 360, −₹3,646 (a resting stop would have been 453.2). The task-3 review also found the executor's `OTHER_OPEN_ORDER` eligibility cancels/blocks the ceiling broker stop in the same situation. Owner OK: "go with the recommendation".
+
+**Files:** `apps/api/src/modules/sentinel-executor/services/sentinel-exit-executor.service.ts` (OPEN_ORDER_EXISTS / `others` ~503-513 and the exit path), `.../domain/*` guards as needed; tests alongside.
+
+**Behaviour:**
+- `EXIT_CANCEL_OWNER_ORDERS=on|off`, **default on**. When an exit must be sent for a tracker (AI EXIT_NOW, hard-loss / floor code rules, price triggers, target ladder) and the broker order book has non-terminal orders on the **same token + exchange** that are **exit-side** for the position (SELL for a long, BUY for a short) and **not ours** (tag check as today): cancel each of them, confirm the cancel (re-read the book; the SDK resolves errors to empty objects — never trust a missing error), then send the exit as today. Entry-side orders and orders on other contracts are never touched.
+- A cancel that fails or cannot be confirmed within 5 s → the exit is SKIPPED `OWNER_ORDER_CANCEL_FAILED` with the order id and broker message (visible, not silent) and retried on the next pass.
+- HOLD-list positions: unchanged — never exited, never cancelled.
+- Record every cancelled owner order (order id, type, price, qty, reason, the exit it made room for) in `ai_exit_executions` detail / a log line `[exit] cancelled owner order … to exit …`, and send an ops alert `owner-order-cancelled:<trackerId>`.
+- Ceiling broker stop (`FLOOR_BROKER_SL_AT=ceiling`): an owner exit-side order no longer **cancels** a resting ceiling stop; placement while an owner exit-side order rests stays blocked (double-exit risk) but logs a WARN once per tracker `ceiling stop blocked by owner order <id>`; the code exit path above covers it while the app is up. Noise mode: unchanged.
+- `EXIT_CANCEL_OWNER_ORDERS=off` = today's behaviour exactly.
+
+- [ ] Step 1: failing tests — SENSEX case (owner SELL LIMIT resting, AI EXIT_NOW → owner order cancelled, confirmed, exit sent, recorded); cancel fails → SKIPPED OWNER_ORDER_CANCEL_FAILED, no exit sent; entry-side owner BUY order untouched; other-contract order untouched; HOLD position untouched; off → OPEN_ORDER_EXISTS as today; ceiling stop not cancelled by an owner order.
+- [ ] Step 2: run, expect FAIL. Step 3: implement. Step 4: `cd apps/api && npx jest src/modules/sentinel-executor src/modules/trade-sentinel` PASS.
+- [ ] Step 5: commit `fix(sentinel-executor): cancel an owner order resting on the contract before a needed exit (EXIT_CANCEL_OWNER_ORDERS)`.

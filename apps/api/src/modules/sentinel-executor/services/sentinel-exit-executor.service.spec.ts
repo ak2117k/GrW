@@ -695,24 +695,43 @@ describe('SentinelExitExecutor — cancel the protective stop-loss, then exit (A
     expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
   });
 
-  it('the SL filled during the cancel and the position is flat → SKIPPED: PROTECTIVE_FILLED, no exit order', async () => {
+  it('the SL filled during the cancel and the position is flat → SKIPPED: OWNER_ORDER_FILLED, no exit order', async () => {
     const h = harness({
       cancel: [{ status: 'REJECTED', message: 'Order already complete' }],
       positions: [env([posRow('100')]), env([posRow('0')])],
       books: [env([sl()]), done({ status: 'complete' })],
     });
-    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'PROTECTIVE_FILLED' });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OWNER_ORDER_FILLED' });
     expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
   });
 
-  it('the SL partly filled before the cancel took → exits only the fresh remainder', async () => {
+  it('final review I-1: the SL partly filled before the cancel took → no exit this pass (even with fresh positions), SKIPPED: OWNER_ORDER_FILLED', async () => {
     const h = harness({
       positions: [env([posRow('100')]), env([posRow('60')]), env([posRow('0')])],
       books: [env([sl()]), done({ filledshares: '40' }), done({ filledshares: '40' }), filledExit],
     });
-    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'FILLED' });
-    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
-    expect(h.session.placeOrderClassified.mock.calls[0][0]).toEqual(expect.objectContaining({ side: 'SELL', quantity: 60 }));
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OWNER_ORDER_FILLED' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(h.lastPatch()).toEqual(expect.objectContaining({ status: 'SKIPPED', reason: 'OWNER_ORDER_FILLED', brokerMessage: expect.stringContaining('SL1 filled 40') }));
+  });
+
+  it('final review I-1: protective cancel, the SL part-fills, positions LAG (still 100) → no exit, SKIPPED: OWNER_ORDER_FILLED; the next pass exits the remainder once', async () => {
+    const partly = done({ filledshares: '40' });
+    const h = harness({ positions: [env([posRow('100')])], books: [env([sl()]), partly] });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OWNER_ORDER_FILLED' });
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(h.calls.filter((c) => c === 'positions')).toHaveLength(1); // the lagging positions are never re-read and acted on
+    expect(h.lastPatch()).toEqual(expect.objectContaining({ status: 'SKIPPED', reason: 'OWNER_ORDER_FILLED', brokerMessage: expect.stringContaining('SL1 filled 40') }));
+    // Next pass: positions now show 60; the SL is terminal, so nothing is in the way — one SELL of 60.
+    const next = harness({
+      positions: [env([posRow('60')]), env([posRow('0')])],
+      books: [partly, env([sl({ status: 'cancelled', filledshares: '40' }), { orderid: 'O1', status: 'complete', symboltoken: '445566', exchange: 'MCX' }])],
+    });
+    await expect(next.ex.process({ ...V, id: 'cm9verdict000000000000004' }, LIVE_CP, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(next.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(next.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(next.session.placeOrderClassified.mock.calls[0][0]).toEqual(expect.objectContaining({ side: 'SELL', quantity: 60 }));
   });
 
   it('a non-protective open order (entry side) → SKIPPED: OPEN_ORDER_EXISTS, nothing cancelled', async () => {
@@ -848,6 +867,67 @@ describe('SentinelExitExecutor — an owner order resting on the contract must n
     expect(line).toContain('to exit');
     expect(line).toContain('thesis broken');
     expect(alert).toHaveBeenCalledWith('owner-order-cancelled:t1', expect.stringContaining('OWN1'));
+    // Final review M-1: the exit is not sent yet when this alert goes — a final position check comes first.
+    expect(alert).toHaveBeenCalledWith('owner-order-cancelled:t1', expect.stringContaining('An exit will be sent after a final position check.'));
+    expect(alert).not.toHaveBeenCalledWith(expect.anything(), expect.stringContaining('being sent now'));
+  });
+
+  describe('final review I-2: every outcome after a confirmed owner cancel keeps the "cancelled owner order" record', () => {
+    const NOTE = 'cancelled owner order OWN1 (LIMIT SELL 80 @ 520) to make room for this exit';
+    /** The row's brokerMessage as the database ends up holding it (the last write that set it). */
+    const finalMessage = (h: ReturnType<typeof harness>) =>
+      h.patches().filter((p) => p.brokerMessage !== undefined).at(-1)?.brokerMessage as string | undefined;
+
+    it('PLACED / FILLED', async () => {
+      const h = harness({ tracker: TRK, positions: [pos('40'), pos('40'), pos('0')], books: [env([own()]), cancelled, cancelled, filled] });
+      await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'FILLED' });
+      expect(finalMessage(h)).toBe(`SUCCESS | ${NOTE}`);
+    });
+
+    it('REJECTED (exit refused after the cancel) → UNPROTECTED_AFTER_CANCEL:BROKER_REJECTED, broker text + note', async () => {
+      const h = harness({
+        tracker: TRK, positions: [pos('40')], books: [env([own()]), cancelled],
+        place: [{ orderId: '', status: 'REJECTED', message: 'Insufficient margin' }],
+      });
+      await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'REJECTED', reason: 'UNPROTECTED_AFTER_CANCEL:BROKER_REJECTED' });
+      expect(finalMessage(h)).toBe(`Insufficient margin | ${NOTE}`);
+    });
+
+    it('FAILED ORDER_UNCERTAIN (exit fate unknown after the cancel) → broker text + note', async () => {
+      const h = harness({
+        tracker: TRK, positions: [pos('40')], books: [env([own()]), cancelled],
+        place: [{ orderId: '', status: 'UNCERTAIN', message: 'timeout' }],
+      });
+      await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'ORDER_UNCERTAIN' });
+      expect(finalMessage(h)).toBe(`timeout | ${NOTE}`);
+    });
+
+    it('FAILED UNPROTECTED_AFTER_CANCEL:* (the final position check refuses) → the note', async () => {
+      const entry = own({ orderid: 'NEW1', transactiontype: 'BUY', quantity: '40' });
+      const h = harness({ tracker: TRK, positions: [pos('40')], books: [env([own()]), env([own({ status: 'cancelled' }), entry])] });
+      await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'UNPROTECTED_AFTER_CANCEL:OPEN_ORDER_EXISTS' });
+      expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+      expect(finalMessage(h)).toBe(NOTE);
+    });
+
+    it('SKIPPED ALREADY_FLAT (flat at the final check, nothing filled) → the note', async () => {
+      const h = harness({ tracker: TRK, positions: [pos('40'), pos('0')], books: [env([own()]), cancelled] });
+      await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'ALREADY_FLAT' });
+      expect(finalMessage(h)).toBe(NOTE);
+    });
+
+    it('SKIPPED OWNER_ORDER_FILLED (one owner order cancelled, another part-filled) → fill detail + the cancelled one', async () => {
+      const own2 = (x: Record<string, unknown> = {}) => own({ orderid: 'OWN2', price: '540', ...x });
+      const h = harness({
+        tracker: TRK, positions: [pos('40')],
+        books: [env([own(), own2()]), env([own({ status: 'cancelled' }), own2({ status: 'cancelled', filledshares: '20' })])],
+      });
+      await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OWNER_ORDER_FILLED' });
+      expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+      const msg = finalMessage(h)!;
+      expect(msg).toContain('OWN2 filled 20');
+      expect(msg.endsWith(` | ${NOTE}`)).toBe(true);
+    });
   });
 
   it('a cancel that is not confirmed within 5 s → SKIPPED: OWNER_ORDER_CANCEL_FAILED with the id and broker message, NO exit sent', async () => {
@@ -1528,13 +1608,13 @@ describe('SentinelExitExecutor — PRICE_TRIGGER (sentinel price triggers)', () 
       expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
     });
 
-    it('the SL filled during the cancel and the position is flat → SKIPPED: PROTECTIVE_FILLED', async () => {
+    it('the SL filled during the cancel and the position is flat → SKIPPED: OWNER_ORDER_FILLED', async () => {
       const h = harness({
         cancel: [{ status: 'REJECTED', message: 'Order already complete' }],
         positions: [env([posRow('100')]), env([posRow('0')])],
         books: [env([sl()]), done({ status: 'complete' })],
       });
-      await expect(h.ex.execute('row1', TV, LIVE_CP, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'SKIPPED', reason: 'PROTECTIVE_FILLED' });
+      await expect(h.ex.execute('row1', TV, LIVE_CP, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'SKIPPED', reason: 'OWNER_ORDER_FILLED' });
       expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
     });
 

@@ -255,12 +255,12 @@ describe('exits and the floor stop never overlap', () => {
     expect(market).toBeGreaterThan(cancel);
   });
 
-  it('if our stop FILLED while the exit was cancelling it, the exit sells nothing (PROTECTIVE_FILLED)', async () => {
+  it('if our stop FILLED while the exit was cancelling it, the exit sells nothing (OWNER_ORDER_FILLED)', async () => {
     const h = harness({
       positions: [env([pos('130', '175')]), env([pos('0', '180')])],
       books: [env([ourStop()]), env([ourStop({ status: 'complete', filledshares: '130' })])],
     });
-    await expect(h.ex.process(V, EXIT, NOW)).resolves.toMatchObject({ status: 'SKIPPED', reason: 'PROTECTIVE_FILLED' });
+    await expect(h.ex.process(V, EXIT, NOW)).resolves.toMatchObject({ status: 'SKIPPED', reason: 'OWNER_ORDER_FILLED' });
     expect(h.calls.some((c) => c.startsWith('place:MARKET'))).toBe(false);
   });
 

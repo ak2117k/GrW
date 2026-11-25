@@ -135,7 +135,7 @@ interface Run {
   now: Date;
   /** Wall clock (Date.now) when the attempt started: read retries are budgeted from here. */
   startedMs: number;
-  /** EXIT_CANCEL_OWNER_ORDERS: "cancelled owner order …", appended to the PLACED row's brokerMessage. */
+  /** EXIT_CANCEL_OWNER_ORDERS: "cancelled owner order …", appended to every later row brokerMessage (see `noted`). */
   ownerNote?: string;
 }
 
@@ -178,8 +178,20 @@ class SessionTokenExpiredError extends Error {}
 const refusal = (pre: Exclude<PreCheck, { kind: 'ok' }>) => (pre.kind === 'protective' ? 'OPEN_ORDER_EXISTS' : pre.reason);
 /** "AI exit (verdict cm…: thesis broken)" — the exit an owner order is cancelled for. */
 const exitFor = (run: Run) => `${run.trigger} exit (verdict ${run.v.id}: ${String(run.v.reason ?? '').slice(0, 160)})`;
-/** The PLACED row's brokerMessage, with the owner orders cancelled to make room for it (unchanged when none). */
-const noted = (run: Run, message: string) => (run.ownerNote ? `${message} | ${run.ownerNote}`.slice(0, 500) : message);
+/**
+ * A brokerMessage with the owner orders cancelled to make room for this exit appended (unchanged when none).
+ * Final review I-2: used on EVERY row write after a cancel (PLACED, REJECTED, FAILED, SKIPPED), so no outcome
+ * loses the record; the message is cut, never the note.
+ */
+function noted(run: Run, message: string): string;
+function noted(run: Run, message: string | null | undefined): string | null | undefined;
+function noted(run: Run, message: string | null | undefined): string | null | undefined {
+  const note = run.ownerNote?.slice(0, 500);
+  if (!note) return message;
+  if (!message) return note;
+  const room = 500 - note.length - 3;
+  return room > 0 ? `${message.slice(0, room)} | ${note}` : note;
+}
 /** "SL1 (STOPLOSS_MARKET SELL 100), T1 (LIMIT SELL 100)" */
 const describeProtective = (orders: ProtectiveOrder[]) =>
   orders.map((o) => `${o.orderId} (${o.orderType} ${o.side} ${o.quantity})`).join(', ');
@@ -395,7 +407,7 @@ export class SentinelExitExecutor {
         return this.finish(id, v, 'SKIPPED', 'NO_FEED_SESSION', { brokerMessage: err.message });
       }
       // Once an order has been sent, any later fault means its fate is unknown.
-      outcome = await this.finish(id, v, 'FAILED', run.sent ? 'ORDER_UNCERTAIN' : 'SESSION', { brokerMessage: errText(err) });
+      outcome = await this.finish(id, v, 'FAILED', run.sent ? 'ORDER_UNCERTAIN' : 'SESSION', { brokerMessage: noted(run, errText(err)) });
     }
     return this.flagUnprotected(run, outcome);
   }
@@ -625,16 +637,17 @@ export class SentinelExitExecutor {
    * 2. Cancel each order; the cancel ANSWER is never trusted — the order book is
    *    re-read (+1 s, +3 s, +6 s) until every order is terminal. Still open or
    *    unknown (book unanswered) ⇒ FAILED: CANCEL_UNCERTAIN, no exit is sent.
-   * 3. Fresh positions + order book (no second cancel): flat ⇒ SKIPPED
-   *    PROTECTIVE_FILLED (or ALREADY_FLAT); anything else refusing ⇒ FAILED
-   *    UNPROTECTED_AFTER_CANCEL:<reason>; ok ⇒ the normal exit of the FRESH |netqty|.
+   * 3. ANY fill (whole or part) on a cancelled order, either path ⇒ SKIPPED OWNER_ORDER_FILLED, no exit this
+   *    pass (positions may lag the book; the next pass exits only what is left — final review I-1).
+   * 4. Otherwise fresh positions + order book (no second cancel): flat ⇒ SKIPPED ALREADY_FLAT; anything else
+   *    refusing ⇒ FAILED UNPROTECTED_AFTER_CANCEL:<reason>; ok ⇒ the normal exit of the FRESH |netqty|.
    *
    * `via` 'owner' (EXIT_CANCEL_OWNER_ORDERS, 2026-11-25): the same steps for the owner's exit-side orders, with
    * intent CANCELLING_OWNER_ORDERS:<ids>; the cancel must be confirmed from the book within 5 s
    * (OWNER_CANCEL_CONFIRM_STEPS_MS, one read per step) or the attempt ends SKIPPED OWNER_ORDER_CANCEL_FAILED —
-   * no exit sent, loud, retried on the next pass; a flat position after it ⇒ SKIPPED OWNER_ORDER_FILLED.
+   * no exit sent, loud, retried on the next pass.
    * Either way, with EXIT_CANCEL_OWNER_ORDERS on, every confirmed-cancelled owner order is recorded (log line,
-   * ops alert, the PLACED row's brokerMessage) before the exit is sent.
+   * ops alert, and every later brokerMessage of the row via `noted`) before the exit is sent.
    */
   private async cancelProtective(
     s: UserBrokerSession, t: Tracker, run: Run, orders: CancellableOrder[], via: 'protective' | 'owner' = 'protective',
@@ -678,13 +691,6 @@ export class SentinelExitExecutor {
       const still = state ? state.open.join(',') : ids.join(',');
       return { kind: 'stop', outcome: await this.ownerCancelFailed(run, `not confirmed cancelled within 5 s: ${still}; ${answers.join('; ')}`) };
     }
-    if (owner && state && state.filled.length > 0) {
-      // Review fix: an order (often the owner's own stop) traded while we cancelled it. Angel's positions are not
-      // atomic with its order book — a lagging read would sell the old qty ON TOP of that fill (a reversed
-      // position). Send nothing this pass; the next pass re-reads positions fresh and exits only what is left.
-      this.recordOwnerCancels(run, orders, state.filled, false);
-      return { kind: 'stop', outcome: await this.ownerOrderFilled(run, state.filled, lastBook) };
-    }
     if (!state || state.open.length > 0) {
       const still = state ? state.open.join(',') : ids.join(',');
       this.logger.warn(
@@ -696,17 +702,24 @@ export class SentinelExitExecutor {
       }) };
     }
 
+    if (state.filled.length > 0) {
+      // Review fix (owner path) + final review I-1 (protective path too — prod runs
+      // AI_AUTO_EXIT_CANCEL_PROTECTIVE=true, so the owner's usual SL/LIMIT is caught here as 'protective'):
+      // an order traded, wholly or partly, while we cancelled it. Angel's positions are not atomic with its
+      // order book — a lagging read would sell the old qty ON TOP of that fill (a reversed / naked position).
+      // Send nothing this pass; the next pass re-reads positions fresh and exits only what is left.
+      this.recordOwnerCancels(run, orders, state.filled, false);
+      return { kind: 'stop', outcome: await this.ownerOrderFilled(run, state.filled, lastBook) };
+    }
+
     this.recordOwnerCancels(run, orders, state.filled);
 
     const pre = await this.preOrderCheck(s, t, run, false);
     if (pre.kind === 'skip' && pre.reason === 'ALREADY_FLAT') {
-      const reason = state.filled.length > 0 ? (owner ? 'OWNER_ORDER_FILLED' : 'PROTECTIVE_FILLED') : 'ALREADY_FLAT';
-      return { kind: 'stop', outcome: await this.finish(id, v, 'SKIPPED', reason, {
-        brokerMessage: state.filled.length > 0 ? `${owner ? 'owner' : 'protective'} order(s) ${state.filled.join(',')} filled` : undefined,
-      }) };
+      return { kind: 'stop', outcome: await this.finish(id, v, 'SKIPPED', 'ALREADY_FLAT', { brokerMessage: noted(run, undefined) }) };
     }
     if (pre.kind !== 'ok') {
-      return { kind: 'stop', outcome: await this.finish(id, v, 'FAILED', `${UNPROTECTED_AFTER_CANCEL}:${refusal(pre)}`) };
+      return { kind: 'stop', outcome: await this.finish(id, v, 'FAILED', `${UNPROTECTED_AFTER_CANCEL}:${refusal(pre)}`, { brokerMessage: noted(run, undefined) }) };
     }
     return { kind: 'ok', pre };
   }
@@ -759,7 +772,7 @@ export class SentinelExitExecutor {
         `GrW: on ${v.symbol} your order ${fills} at Angel while GrW was cancelling it to exit. No exit sent this pass; the next pass exits only what is left.`,
       ).catch(() => undefined);
     }
-    return this.finish(id, v, 'SKIPPED', 'OWNER_ORDER_FILLED', { brokerMessage: what.slice(0, 500) }, true);
+    return this.finish(id, v, 'SKIPPED', 'OWNER_ORDER_FILLED', { brokerMessage: noted(run, what.slice(0, 500)) }, true);
   }
 
   /**
@@ -776,7 +789,7 @@ export class SentinelExitExecutor {
     void sendOpsAlert(
       `owner-order-cancelled:${run.v.trackerId}`,
       `GrW: cancelled your order ${what} on ${run.v.symbol} at Angel to make room for the ${exitFor(run)}. ` +
-        (sendingExit ? 'The exit is being sent now.' : 'Another order traded meanwhile, so no exit this pass; the next pass exits what is left.'),
+        (sendingExit ? 'An exit will be sent after a final position check.' : 'Another order traded meanwhile, so no exit this pass; the next pass exits what is left.'),
     ).catch(() => undefined);
   }
 
@@ -823,7 +836,7 @@ export class SentinelExitExecutor {
     if (!definitive) await this.sleep(TAG_LOOKUP_DELAY_MS);
     // A read retry here is safe: it only looks for our tag; nothing is ever re-sent.
     const { rows: book } = await this.readRows(run, 'order book', () => s.getOrderBookEnvelope());
-    if (book === null) return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message, ...sentAt });
+    if (book === null) return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: noted(run, r.message), ...sentAt });
     const mine = findOrderByTag(book, aiExitOrderTag(v.id, leg, run.trigger));
 
     if (mine && mine.status !== 'rejected' && mine.status !== 'cancelled') {
@@ -837,21 +850,21 @@ export class SentinelExitExecutor {
     if (mine) {
       const text = mine.text || r.message;
       if (mine.status === 'rejected' && leg === 'M' && isMarketRefusal(text)) {
-        await this.repo.update(id, { orderStatus: 'rejected', brokerMessage: text });
+        await this.repo.update(id, { orderStatus: 'rejected', brokerMessage: noted(run, text) });
         return this.fallback(s, run, o, mine.orderId || null);
       }
       return this.finish(id, v, 'REJECTED', mine.status === 'cancelled' ? 'CANCELLED' : 'BROKER_REJECTED', {
-        orderStatus: mine.status, brokerMessage: text, ...sentAt,
+        orderStatus: mine.status, brokerMessage: noted(run, text), ...sentAt,
       });
     }
     if (definitive) {
       if (leg === 'M' && isMarketRefusal(r.message)) {
-        await this.repo.update(id, { brokerMessage: r.message });
+        await this.repo.update(id, { brokerMessage: noted(run, r.message) });
         return this.fallback(s, run, o, null);
       }
-      return this.finish(id, v, 'REJECTED', 'BROKER_REJECTED', { brokerMessage: r.message, ...sentAt });
+      return this.finish(id, v, 'REJECTED', 'BROKER_REJECTED', { brokerMessage: noted(run, r.message), ...sentAt });
     }
-    return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message, ...sentAt });
+    return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: noted(run, r.message), ...sentAt });
   }
 
   /** A broker read whose throw (timeout, disposed) is treated as "not answered". Never retried (R10 confirm polls). */
@@ -976,13 +989,13 @@ export class SentinelExitExecutor {
     }
     if (last?.status === 'rejected') {
       if (leg === 'M' && isMarketRefusal(last.text)) {
-        await this.repo.update(id, { orderStatus: 'rejected', brokerMessage: last.text });
+        await this.repo.update(id, { orderStatus: 'rejected', brokerMessage: noted(run, last.text) });
         return this.fallback(s, run, o, orderId);
       }
-      return this.finish(id, v, 'REJECTED', 'BROKER_REJECTED', { orderStatus: 'rejected', brokerMessage: last.text });
+      return this.finish(id, v, 'REJECTED', 'BROKER_REJECTED', { orderStatus: 'rejected', brokerMessage: noted(run, last.text) });
     }
     if (last?.status === 'cancelled') {
-      return this.finish(id, v, 'REJECTED', 'CANCELLED', { orderStatus: 'cancelled', brokerMessage: last.text });
+      return this.finish(id, v, 'REJECTED', 'CANCELLED', { orderStatus: 'cancelled', brokerMessage: noted(run, last.text) });
     }
     // E5 (plan item 12): Angel's positions lag its order book. A `complete` order IS
     // the fill: FILLED with its price/qty/exchange time even while positions lag.

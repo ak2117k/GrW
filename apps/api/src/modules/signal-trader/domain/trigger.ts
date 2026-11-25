@@ -92,5 +92,6 @@ export function readTrigger(plan: unknown): TriggerState | null {
     lastLtp: n(t.lastLtp),
     lastCheckAt: typeof t.lastCheckAt === 'string' ? t.lastCheckAt : null,
     ...(readRetry(t.retry) ? { retry: readRetry(t.retry) } : {}),
+    ...(t.rearmed === true ? { rearmed: true } : {}),
   };
 }

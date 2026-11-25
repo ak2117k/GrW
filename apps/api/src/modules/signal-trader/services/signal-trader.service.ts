@@ -974,11 +974,14 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
   /**
    * A TAKE that failed only on funds or on the price band: keep the decision PENDING in the trigger watch for
    * SIGNAL_ENTRY_RETRY_MIN. Each try is the full gate and this same path, so nothing is bypassed; the judge is reused
-   * while fresh. null = no waiting (the caller gives up as before). A real ABOVE / BELOW trigger that fired is not
-   * converted: it has already had its own wait.
+   * while fresh. null = no waiting (the caller gives up as before). A real ABOVE / BELOW trigger that fired and then
+   * slipped on price goes back to its own wait (rearmTrigger); on funds it is not converted, as before.
    */
   private async retryEntry(retry: EntryRetry, decisionId: string, s: SignalView, channel: string, now: Date, checks: GateCheck[], plan: EntryPlan, j: JudgeTake, ltp: number | null, base: BaseFacts): Promise<EvaluationResult | null> {
     const waitingNow = { decisionId, decision: 'PENDING' as const, skipReason: null };
+    if (plan.trigger && (!plan.trigger.retry || plan.trigger.rearmed)) {
+      return retry.kind === 'price' ? this.rearmTrigger(decisionId, retry, now, checks, plan, j, ltp) : null;
+    }
     if (plan.trigger?.retry) {
       const live = this.pending.get(decisionId);
       if (live) {
@@ -989,7 +992,6 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       }
       return waitingNow;
     }
-    if (plan.trigger) return null;
     const expiresAt = triggerExpiry(now, this.cfg.entryRetryMin, base.minutesToClose, this.cfg.minMinutesToClose);
     if (!expiresAt) return null;
     const pendingNow = await this.safe(() => this.repo.pendingTriggerCount());
@@ -1018,6 +1020,39 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     this.logger.log(`[signal-trader] ${describeSignal(s)}: trying again until ${trigger.expiresAt} — ${retry.detail}`);
     void sendOpsAlert(`signal-retry:${decisionId}`, `Signal ${plan.tradingsymbol}: AI said TAKE but ${retry.detail}. Trying again until ${trigger.expiresAt}.`);
     return waitingNow;
+  }
+
+  /**
+   * HEROMOTOCO 5800 CE ABOVE 140 (2026-11-25): fired at 141, the pre-send quote 18 s later was 138.75 (SL 136.6 still
+   * protective) and the call was dropped while price sat 140–145 for ten minutes. A fired ABOVE / BELOW trigger whose
+   * pre-send quote slipped (the caller has already refused a crossed SL) goes back to waiting on the SAME band and
+   * expiresAt, with `retry` so the expiry SKIPs price_moved. Only while it is still in the watch and before its
+   * expiresAt; the row must still be an armed trigger. The watcher fires one trigger at a time and only drops it
+   * after a non-WAIT result, so a decision still places at most one order. null = give up as before.
+   */
+  private async rearmTrigger(decisionId: string, retry: EntryRetry, now: Date, checks: GateCheck[], plan: EntryPlan, j: JudgeTake, ltp: number | null): Promise<EvaluationResult | null> {
+    const live = this.pending.get(decisionId);
+    if (!live || now.getTime() >= Date.parse(live.trigger.expiresAt)) return null;
+    const trigger: TriggerState = {
+      ...live.trigger,
+      judgedAt: j.judgedAt || live.trigger.judgedAt,
+      lastLtp: ltp,
+      lastCheckAt: now.toISOString(),
+      retry,
+      rearmed: true,
+    };
+    const rearmedPlan: EntryPlan = { ...plan, trigger };
+    // The stored and the watched record are the same stamped one, so a later expiry SKIP keeps this try's timings.
+    const record = this.stamp(j.record);
+    if (!(await this.repo.rearmTrigger(decisionId, { gate: checks, judge: record, plan: rearmedPlan }))) return null;
+    live.trigger = trigger;
+    live.plan = rearmedPlan;
+    live.gate = checks;
+    live.judge = { ...j, record };
+    live.persistedAt = now.getTime();
+    this.logger.log(`[signal-trader] ${describeSignal(live.signal)}: trigger ${trigger.op} ${trigger.price} slipped before sending — waiting again until ${trigger.expiresAt}: ${retry.detail}`);
+    void sendOpsAlert(`signal-rearm:${decisionId}:${trigger.lastCheckAt}`, `Signal ${plan.tradingsymbol}: trigger ${trigger.op} ${trigger.price} hit but ${retry.detail}. Waiting again until ${trigger.expiresAt}.`);
+    return { decisionId, decision: 'PENDING', skipReason: null };
   }
 
   /** The retry window ended: what would have happened at the first try. */
@@ -1177,7 +1212,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       return;
     }
     if (now.getTime() < p.nextPollAt) return;
-    p.nextPollAt = now.getTime() + (t.retry ? Math.max(ENTRY_RETRY_POLL_SEC, this.cfg.triggerPollSec) : this.cfg.triggerPollSec) * 1000;
+    // A re-armed trigger keeps the trigger pace: it waits on price, not on the account (the 30 s funds pace).
+    p.nextPollAt = now.getTime() + (t.retry && !t.rearmed ? Math.max(ENTRY_RETRY_POLL_SEC, this.cfg.triggerPollSec) : this.cfg.triggerPollSec) * 1000;
     const owner = this.cfg.ownerUserId;
     const ltp = owner ? await this.quotes.ltp(owner, p.plan.token, p.plan.exchange).catch(() => null) : null;
     t.lastLtp = ltp;

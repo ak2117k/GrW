@@ -71,6 +71,11 @@ export interface TriggerState {
   lastCheckAt: string | null;
   /** Set when this is not a waiting entry but a TAKE being tried again; what to do if the window ends. */
   retry?: EntryRetry;
+  /**
+   * A real ABOVE / BELOW trigger that fired, then slipped out of its band at the pre-send quote (SL still protective):
+   * put back to waiting on the SAME band and expiresAt. Only a price slip re-arms it; funds never make it wait.
+   */
+  rearmed?: boolean;
 }
 
 /** Why the last try of a TAKE failed. Funds → paper when the window ends; price → SKIP('price_moved'). */

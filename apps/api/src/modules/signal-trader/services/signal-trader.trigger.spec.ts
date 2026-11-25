@@ -49,6 +49,12 @@ function makeRepo(signal: SignalView) {
       return true;
     }),
     touchTrigger: jest.fn(async () => undefined),
+    rearmTrigger: jest.fn(async (id: string, f: Record<string, any>) => {
+      const d = decisions.find((x) => x.id === id);
+      if (!d || d.status !== 'PENDING' || d.decision !== 'PENDING') return false;
+      Object.assign(d, f);
+      return true;
+    }),
     pendingTriggers: jest.fn(async () => decisions.filter((d) => d.status === 'PENDING' && d.decision === 'PENDING')),
     pendingTriggerCount: jest.fn(async () => decisions.filter((d) => d.status === 'PENDING' && d.decision === 'PENDING').length),
     tradesToday: jest.fn(async () => decisions.filter((d) => d.decision === 'TAKE').length),
@@ -509,6 +515,147 @@ describe('SignalTraderService — a call the live gate refuses keeps the reason 
     expect(d.judge).toMatchObject({ liveGateBlocked: 'risk_manager', liveGateDetail: expect.stringMatching(/Max concurrent positions reached: 10\/10/) });
     expect(d.gate).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'live_gate', ok: false, detail: expect.stringMatching(/risk_manager: .*10\/10/) })]));
     expect(alerts().some((a) => /not sent live/.test(a) && /10\/10/.test(a))).toBe(true);
+    expect(t.executor.place).not.toHaveBeenCalled();
+    t.svc.onModuleDestroy();
+  });
+});
+
+describe('SignalTraderService — a fired trigger whose pre-send quote slipped waits again (HEROMOTOCO 2026-11-25)', () => {
+  // HEROMOTOCO 5800 CE ABOVE 140: armed at LTP 133, fired at 141, pre-send quote 18 s later 138.75 (band [140, 144.2],
+  // SL 136.6 still protective) → skipped for good; price then sat 140–145 for ten minutes.
+  const hero: Partial<SignalView> = { entryType: 'ABOVE', entryLow: 140, entryHigh: 140, sl: 136.6, targets: [160], qty: 1 };
+  const later = (s: number) => new Date(T0.getTime() + s * 1000);
+  beforeEach(() => {
+    process.env.LIVE_TRADING_ENABLED = 'true';
+    setCoreKillSwitchReader({ isOn: async () => false, isOnForPlatform: async () => false, invalidate: () => undefined });
+    (sendOpsAlert as jest.Mock).mockClear();
+  });
+  afterAll(() => setCoreKillSwitchReader(null));
+
+  /** Armed at 133; the watcher and the gate read `px.ltp`; the gate's risk call moves it to `px.preSend` for the pre-send quote. */
+  async function armedHero(over: { funds?: number } = {}) {
+    const px = { ltp: 133, preSend: null as number | null };
+    const t = build({ cfg: { mode: 'live' }, signal: hero, ltp: () => px.ltp, funds: over.funds });
+    expect(await t.svc.evaluate(ev, T0)).toMatchObject({ decision: 'PENDING' });
+    const armed = { ...t.repo.decisions[0].plan.trigger };
+    expect(armed).toMatchObject({ price: 140, op: 'ABOVE', bandLow: 140, bandHigh: 144.2 });
+    // The risk manager runs in the gate, after the fire's LTP read and before the pre-send quote.
+    (t.svc as any).risk.validateTrade = jest.fn(async () => {
+      if (px.preSend !== null) px.ltp = px.preSend;
+      return { allowed: true };
+    });
+    return { t, px, armed };
+  }
+
+  it('a fired trigger whose pre-send quote slipped below the band re-arms until its expiry', async () => {
+    const { t, px, armed } = await armedHero();
+    px.ltp = 141;
+    px.preSend = 138.75;
+    await t.svc.checkTriggers(later(60));
+    expect(t.executor.place).not.toHaveBeenCalled();
+    expect(t.svc.pendingIds()).toEqual(['d1']);
+    const d = t.repo.decisions[0];
+    expect(d).toMatchObject({ decision: 'PENDING', status: 'PENDING' });
+    expect(d.plan.trigger).toMatchObject({
+      price: 140, op: 'ABOVE', bandLow: 140, bandHigh: 144.2, expiresAt: armed.expiresAt, armedAt: armed.armedAt, rearmed: true,
+      retry: { kind: 'price', detail: expect.stringMatching(/LTP 138\.75 vs band \[140, 144\.2\], SL 136\.6/) },
+    });
+    expect(d.gate).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'pre_send_price', ok: false })]));
+    expect(d.judge.timings).toEqual(expect.objectContaining({ preSendQuoteMs: expect.any(Number) }));
+    const watched = (t.svc as any).pending.get('d1');
+    expect(watched.trigger).toMatchObject({ expiresAt: armed.expiresAt, rearmed: true, retry: { kind: 'price' } });
+    expect(alerts().some((a) => /waiting again/i.test(a))).toBe(true);
+    t.svc.onModuleDestroy();
+  });
+
+  it('re-armed trigger fires again when price returns and places one order', async () => {
+    const { t, px } = await armedHero();
+    px.ltp = 141;
+    px.preSend = 138.75;
+    await t.svc.checkTriggers(later(60));
+    expect(t.svc.pendingIds()).toEqual(['d1']);
+    // still below the band: keeps waiting, polled at the trigger pace (not the 30 s funds pace)
+    px.preSend = null;
+    px.ltp = 139;
+    await t.svc.checkTriggers(later(66));
+    expect(t.executor.place).not.toHaveBeenCalled();
+    px.ltp = 141.5;
+    await t.svc.checkTriggers(later(72));
+    expect(t.executor.place).toHaveBeenCalledTimes(1);
+    expect(t.repo.decisions[0]).toMatchObject({ decision: 'TAKE', status: 'DONE' });
+    expect(t.svc.pendingIds()).toEqual([]);
+    await t.svc.checkTriggers(later(80));
+    await t.svc.checkTriggers(later(120));
+    expect(t.executor.place).toHaveBeenCalledTimes(1);
+    t.svc.onModuleDestroy();
+  });
+
+  it('SL crossed at pre-send → SKIP, no re-arm', async () => {
+    const { t, px } = await armedHero();
+    px.ltp = 141;
+    px.preSend = 136;
+    await t.svc.checkTriggers(later(60));
+    expect(t.repo.decisions[0]).toMatchObject({ decision: 'SKIP', skipReason: 'price_moved', status: 'DONE' });
+    expect(t.svc.pendingIds()).toEqual([]);
+    expect(t.repo.rearmTrigger).not.toHaveBeenCalled();
+    expect(t.executor.place).not.toHaveBeenCalled();
+    t.svc.onModuleDestroy();
+  });
+
+  it('pre-send slip after expiresAt → SKIP price_moved', async () => {
+    const { t, px, armed } = await armedHero();
+    px.ltp = 141;
+    px.preSend = 138.75;
+    const p = (t.svc as any).pending.get('d1');
+    const r = await t.svc.fire(p, new Date(Date.parse(armed.expiresAt) + 1_000));
+    expect(r).toMatchObject({ decision: 'SKIP', skipReason: 'price_moved' });
+    expect(t.repo.decisions[0]).toMatchObject({ decision: 'SKIP', skipReason: 'price_moved', status: 'DONE' });
+    expect(t.repo.rearmTrigger).not.toHaveBeenCalled();
+    expect(t.executor.place).not.toHaveBeenCalled();
+    t.svc.onModuleDestroy();
+  });
+
+  it('a re-armed trigger never fires after its original expiry: SKIP price_moved at expiresAt', async () => {
+    const { t, px, armed } = await armedHero();
+    px.ltp = 141;
+    px.preSend = 138.75;
+    await t.svc.checkTriggers(later(60));
+    px.preSend = null;
+    px.ltp = 141;
+    await t.svc.checkTriggers(new Date(Date.parse(armed.expiresAt)));
+    expect(t.executor.place).not.toHaveBeenCalled();
+    expect(t.repo.decisions[0]).toMatchObject({ decision: 'SKIP', skipReason: 'price_moved', status: 'DONE' });
+    expect(t.svc.pendingIds()).toEqual([]);
+    t.svc.onModuleDestroy();
+  });
+
+  it('restart-safe: a re-armed trigger resumes with its retry and the same expiry', async () => {
+    const { t: a, px, armed } = await armedHero();
+    px.ltp = 141;
+    px.preSend = 138.75;
+    await a.svc.checkTriggers(later(60));
+    a.svc.onModuleDestroy();
+    const b = build({ cfg: { mode: 'live' }, signal: hero, ltp: () => 139 });
+    b.repo.decisions.push(...a.repo.decisions);
+    expect(await b.svc.resumeTriggers(later(90))).toBe(1);
+    expect((b.svc as any).pending.get('d1').trigger).toMatchObject({ expiresAt: armed.expiresAt, rearmed: true, retry: { kind: 'price' } });
+    await b.svc.checkTriggers(new Date(Date.parse(armed.expiresAt) + 1));
+    expect(b.repo.decisions[0]).toMatchObject({ decision: 'SKIP', skipReason: 'price_moved' });
+    expect(b.executor.place).not.toHaveBeenCalled();
+    b.svc.onModuleDestroy();
+  });
+
+  it('funds short on a re-armed trigger: paper at once, as for any fired trigger (no funds wait)', async () => {
+    const { t, px } = await armedHero({ funds: 500 });
+    px.ltp = 141;
+    px.preSend = 138.75;
+    await t.svc.checkTriggers(later(60));
+    expect(t.svc.pendingIds()).toEqual(['d1']);
+    px.preSend = null;
+    px.ltp = 141;
+    await t.svc.checkTriggers(later(66));
+    expect(t.repo.decisions[0]).toMatchObject({ decision: 'PAPER', skipReason: 'insufficient_funds', status: 'DONE' });
+    expect(t.svc.pendingIds()).toEqual([]);
     expect(t.executor.place).not.toHaveBeenCalled();
     t.svc.onModuleDestroy();
   });

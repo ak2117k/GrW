@@ -344,6 +344,22 @@ export class SignalTraderRepository {
     return r.count === 1;
   }
 
+  /**
+   * A fired trigger put back to waiting (pre-send slip): gate, judge (with this try's timings) and plan of a row that
+   * is still an armed trigger. false = the row is no longer an armed trigger (decided elsewhere): do not watch it.
+   */
+  async rearmTrigger(id: string, f: { gate: unknown; judge: unknown; plan: unknown }): Promise<boolean> {
+    const r = await this.prisma.signalDecision.updateMany({
+      where: { id, status: 'PENDING', decision: 'PENDING' },
+      data: {
+        gate: (f.gate ?? Prisma.JsonNull) as Prisma.InputJsonValue,
+        judge: (f.judge ?? Prisma.JsonNull) as Prisma.InputJsonValue,
+        plan: (f.plan ?? Prisma.JsonNull) as Prisma.InputJsonValue,
+      },
+    });
+    return r.count === 1;
+  }
+
   /** Persist the latest watch state (last LTP / check time) of an armed trigger. */
   async touchTrigger(id: string, plan: unknown): Promise<void> {
     await this.prisma.signalDecision.updateMany({

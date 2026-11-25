@@ -236,8 +236,10 @@ export class ReaderPacketService {
    * previous-session, 20-session volume and 60-session range stats from daily bars, and the last closed
    * 15m bars. Cached per underlying like the pulse (60 s; 10 s when unavailable), shared by concurrent
    * posts; daily bars are fetched once per instrument per IST session day. Every broker read is raced
-   * against the packet deadline. Present only when the live quote arrived; missing bars leave nulls and
-   * a `missing` reason.
+   * against the packet deadline. Present only when a fresh live quote arrived (a quote over 5 min old in
+   * the session is `stale quote`); missing bars leave nulls and a `missing` reason. Broker load is capped
+   * process-wide: 6 new underlyings per rolling minute (`reader quote budget`) and 2 fetches in flight
+   * (`reader quote limit`); a refused underlying makes no broker call at all.
    */
   private quote(underlying: string, owner: string | null, now: Date, packetStartedAt: number): Promise<PacketBlock> {
     const at = Date.now();

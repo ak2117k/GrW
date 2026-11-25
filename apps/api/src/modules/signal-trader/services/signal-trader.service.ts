@@ -309,6 +309,23 @@ export interface EvaluationResult {
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/**
+ * `work`'s result, or `onTimeout('timed out after <ms> ms')` when it has not settled within `ms`
+ * (SIGNAL_CONTEXT_DEADLINE_MS on the judge's market data). The timer is cleared when either side wins and
+ * never holds the process open; a `work` that rejects after the deadline is absorbed by the race (no
+ * unhandled rejection). `work` should already turn its own errors into its unavailable shape.
+ */
+function withinDeadline<T>(work: Promise<T>, ms: number, onTimeout: (reason: string) => T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout(`timed out after ${ms} ms`)), ms);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  return Promise.race([work, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 export function describeSignal(s: SignalView): string {
   const inst = s.instrumentKind === 'CE' || s.instrumentKind === 'PE' ? `${s.underlying} ${s.strike ?? '?'} ${s.instrumentKind}` : `${s.underlying} ${s.instrumentKind}`;
   const entry = s.entryType === 'RANGE' ? `${s.entryLow}-${s.entryHigh}` : `${s.entryType} ${s.entryLow}`;
@@ -689,6 +706,21 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     });
   }
 
+  /**
+   * `{ room }` from {@link lateRoomFor} within `deadlineMs`; past it `{ room: null, roomUnavailable: 'late room: timed out after <n> ms' }`
+   * (the packet's other keys unchanged). Never throws.
+   */
+  private lateRoomWithin(s: SignalView, plan: EntryPlan, market: Record<string, CtxBlock>, contract: ResolvedContract | null, owner: string | null, now: Date, deadlineMs: number): Promise<{ room: LateRoom | null; roomUnavailable?: string }> {
+    return withinDeadline<{ room: LateRoom | null; roomUnavailable?: string }>(
+      this.lateRoomFor(s, plan, market, contract, owner, now).then(
+        (room) => ({ room }),
+        (err: unknown) => ({ room: null, roomUnavailable: `late room: ${errText(err)}` }),
+      ),
+      deadlineMs,
+      (reason) => ({ room: null, roomUnavailable: `late room: ${reason}` }),
+    );
+  }
+
   /** The AI judge on a plan. Never throws (an unavailable judge = SKIP). */
   private async runJudge(decisionId: string, s: SignalView, e: SignalReadyEvent, channel: string, now: Date, plan: EntryPlan, tradesToday: number | null, contract?: ResolvedContract | null): Promise<JudgeOutcome> {
     // 2026-11-05: the judge's min confidence / default take may be self-review overrides (session-open values).
@@ -700,6 +732,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const conflict = e.conflict === true || cluster?.conflict === true;
     // 2026-11-04: event days reach the judge only on the default-TAKE prompt (skip = the v5 packet exactly).
     const takeDefault = cfg.judgeDefault === 'take';
+    // 2026-11-25 speed: each market-data source gets at most this long; a miss reaches the judge as unavailable.
+    const deadlineMs = cfg.contextDeadlineMs;
     // Timings (record only): each context block's ms from the start of the collection.
     const sw = decisionClock.getStore();
     const blockMs: Record<string, number> = {};
@@ -713,7 +747,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       }
     };
     const [market, channelStats, channelViews, events, trend] = await this.timed('contextMs', () => Promise.all([
-      this.context.build({ underlying: s.underlying, kind: s.instrumentKind, exchange: plan.exchange, ownerUserId: owner, now, ltp: plan.ltp, expiry: contract?.expiry ?? null, ...(sw ? { onBlock: (key: string, ms: number) => { blockMs[key] = ms; } } : {}) }),
+      // SIGNAL_CONTEXT_DEADLINE_MS caps EACH block (a slow one turns `unavailable`; the others are kept).
+      this.context.build({ underlying: s.underlying, kind: s.instrumentKind, exchange: plan.exchange, ownerUserId: owner, now, ltp: plan.ltp, expiry: contract?.expiry ?? null, deadlineMs, ...(sw ? { onBlock: (key: string, ms: number) => { blockMs[key] = ms; } } : {}) }),
       this.repo.channelStats(s.channelId).catch(() => null),
       // Telegram channels' market views on this underlying (read-only context; never a trigger).
       Promise.resolve()
@@ -736,9 +771,13 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const facts = packetMarketFacts(market);
     const lotQty = plan.lots > 0 ? plan.qty / plan.lots : plan.lotSize;
     market.noise = await this.timed('noiseMs', () =>
-      Promise.resolve()
-        .then(() => this.context.noise({ signal: s, contract: contract ?? null, price: plan.ltp, planSl: plan.sl > 0 ? plan.sl : null, cap: lossCap, lotQty, spot: facts.spot, vix: facts.vix, ownerUserId: owner, now }))
-        .catch((err: unknown) => ({ status: 'unavailable' as const, reason: `noise units: ${err instanceof Error ? err.message : String(err)}` })),
+      withinDeadline<CtxBlock>(
+        Promise.resolve()
+          .then(() => this.context.noise({ signal: s, contract: contract ?? null, price: plan.ltp, planSl: plan.sl > 0 ? plan.sl : null, cap: lossCap, lotQty, spot: facts.spot, vix: facts.vix, ownerUserId: owner, now }))
+          .catch((err: unknown) => ({ status: 'unavailable' as const, reason: `noise units: ${err instanceof Error ? err.message : String(err)}` })),
+        deadlineMs,
+        (reason) => ({ status: 'unavailable', reason: `noise units: ${reason}` }),
+      ),
     );
     labelChain(market);
     const optionValueBlock = optionValue({
@@ -777,7 +816,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         lots: plan.lots,
         qty: plan.qty,
         riskRupees: plan.riskRupees,
-        late: plan.late ? { ...plan.late, room: await this.timed('lateRoomMs', () => this.lateRoomFor(s, plan, market, contract ?? null, owner, now)) } : null,
+        late: plan.late ? { ...plan.late, ...(await this.timed('lateRoomMs', () => this.lateRoomWithin(s, plan, market, contract ?? null, owner, now, deadlineMs))) } : null,
         optionValue: optionValueBlock,
       },
       caps: { maxLots: cfg.maxLots, maxLossPerTrade: lossCap, tradesToday, maxTradesPerDay: cfg.maxTradesPerDay },

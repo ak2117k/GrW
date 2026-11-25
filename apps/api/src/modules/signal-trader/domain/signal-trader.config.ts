@@ -39,6 +39,11 @@ export interface SignalTraderConfig {
   judgeTimeoutMs: number;
   /** Judge: how long to wait for a NON-reserved model slot. */
   judgeSlotWaitMs: number;
+  /**
+   * Judge: deadline (ms) on each market-data source its packet collects (every context block, the noise
+   * units, a late call's room). A source that misses it reaches the judge as `unavailable` with the reason.
+   */
+  contextDeadlineMs: number;
   /** Judge: confidence (1–100) a TAKE needs. */
   judgeMinConfidence: number;
   /** Confidence points a non-conflicting strong cluster adds (conflict clusters get none). */
@@ -271,6 +276,7 @@ export const SIGNAL_DEFAULTS = {
   judgeModel: 'claude-opus-5',
   judgeTimeoutMs: 120_000,
   judgeSlotWaitMs: 45_000,
+  contextDeadlineMs: 6_000,
   judgeMinConfidence: 60,
   strongClusterBoost: 10,
   strongChannels: 3,
@@ -347,6 +353,7 @@ export function parseSignalTraderConfig(env: Env): SignalTraderConfig {
     judgeModel: (env.SIGNAL_JUDGE_MODEL ?? '').trim() || (env.SENTINEL_MODEL_TRIGGERED ?? '').trim() || SIGNAL_DEFAULTS.judgeModel,
     judgeTimeoutMs: num(env, 'SIGNAL_JUDGE_TIMEOUT_MS', SIGNAL_DEFAULTS.judgeTimeoutMs, (n) => int(n) && n >= 5_000 && n <= 600_000, problems),
     judgeSlotWaitMs: num(env, 'SIGNAL_JUDGE_SLOT_WAIT_MS', SIGNAL_DEFAULTS.judgeSlotWaitMs, (n) => int(n) && n >= 1_000 && n <= 300_000, problems),
+    contextDeadlineMs: num(env, 'SIGNAL_CONTEXT_DEADLINE_MS', SIGNAL_DEFAULTS.contextDeadlineMs, (n) => int(n) && n >= 1_000 && n <= 30_000, problems),
     judgeMinConfidence: num(env, 'SIGNAL_JUDGE_MIN_CONFIDENCE', SIGNAL_DEFAULTS.judgeMinConfidence, (n) => n >= 1 && n <= 100, problems),
     strongClusterBoost: num(env, 'SIGNAL_STRONG_CLUSTER_BOOST', SIGNAL_DEFAULTS.strongClusterBoost, (n) => n >= 0 && n <= 30, problems),
     strongChannels: num(env, 'SIGNAL_STRONG_CHANNELS', SIGNAL_DEFAULTS.strongChannels, (n) => int(n) && n >= 2 && n <= 20, problems),

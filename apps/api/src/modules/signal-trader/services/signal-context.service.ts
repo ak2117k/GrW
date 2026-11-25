@@ -221,8 +221,8 @@ export class SignalContextService {
 
   /**
    * `expiry`: the traded contract's (YYYY-MM-DD), so an MCX chain reads that expiry's capture first.
-   * `deadlineMs` (optional; the message reader's packet time box): caps every block's own box at it, so a
-   * slow block turns `unavailable` without discarding the others. Absent = the blocks' own boxes (the judge).
+   * `deadlineMs` (optional; the message reader's packet time box, the judge's SIGNAL_CONTEXT_DEADLINE_MS): caps
+   * every block's own box at it, so a slow block turns `unavailable` without discarding the others. Absent = the blocks' own boxes.
    * `onBlock` (optional, record only): told each block's key and how long it took (ms). A throwing callback
    * is ignored; the returned blocks are the same with or without it.
    */

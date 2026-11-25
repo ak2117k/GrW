@@ -122,4 +122,12 @@ describe('EXIT_CANCEL_OWNER_ORDERS (an owner order resting on the contract must 
     expect(junk.cancelOwnerOrders).toBe(true);
     expect(junk.problems).toEqual([expect.stringContaining('EXIT_CANCEL_OWNER_ORDERS=maybe')]);
   });
+
+  it('false / 0 / no (any case, trimmed) also switch it off, with no problem reported', () => {
+    for (const raw of ['false', 'FALSE', ' False ', '0', ' 0 ', 'no', 'NO', 'No']) {
+      const c = parseAutoExitConfig({ EXIT_CANCEL_OWNER_ORDERS: raw });
+      expect(c.cancelOwnerOrders).toBe(false);
+      expect(c.problems).toEqual([]);
+    }
+  });
 });

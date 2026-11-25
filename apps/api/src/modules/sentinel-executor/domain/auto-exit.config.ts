@@ -23,12 +23,13 @@ function num(
   return fallback;
 }
 
-/** `on|off` (any case, trimmed); unset = `fallback`; anything else = `fallback`, reported. */
+/** `on|off` (any case, trimmed; `false`/`0`/`no` also mean off); unset = `fallback`; anything else = `fallback`, reported. */
 function parseOnOff(raw: string | undefined, name: string, fallback: boolean, problems: string[]): boolean {
   const v = String(raw ?? '').trim().toLowerCase();
   if (v === '') return fallback;
   if (v === 'on') return true;
-  if (v === 'off') return false;
+  // Final review M-2: the usual "off" spellings must switch it off, never fall back to the default.
+  if (v === 'off' || v === 'false' || v === '0' || v === 'no') return false;
   problems.push(`${name}=${raw} is not on|off — using ${fallback ? 'on' : 'off'}`);
   return fallback;
 }

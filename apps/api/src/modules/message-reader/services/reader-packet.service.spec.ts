@@ -7,7 +7,7 @@ const NOW = new Date('2026-11-25T05:00:00Z'); // 10:30 IST
 
 const quote = (token: string, ltp: number) => ({ token, symbol: token, exchange: 'NSE', ltp, open: ltp, high: ltp, low: ltp, close: ltp, volume: 0, change: 1, changePercent: 0.5, timestamp: NOW });
 
-function setup(over: { getBreadth?: jest.Mock; contextBuild?: jest.Mock; underlyingQuote?: jest.Mock; context?: unknown } = {}) {
+function setup(over: { getBreadth?: jest.Mock; contextBuild?: jest.Mock; underlyingQuote?: jest.Mock; context?: unknown; cfg?: Partial<MessageReaderConfig> } = {}) {
   const breadth = {
     getBreadth: over.getBreadth ?? jest.fn().mockResolvedValue({ advances: 30, declines: 20, unchanged: 0, adRatio: 1.5, total: 50 }),
     getSectorPerformance: jest.fn().mockResolvedValue([{ sector: 'IT', symbol: 'NIFTY IT', token: '1', changePercent: 1.2, ltp: 100 }]),
@@ -23,7 +23,7 @@ function setup(over: { getBreadth?: jest.Mock; contextBuild?: jest.Mock; underly
     recentChannelPosts: jest.fn().mockResolvedValue([{ at: NOW.toISOString(), text: 'nifty looks weak' }]),
     todayMarketNotes: jest.fn().mockResolvedValue([{ claim: 'market bearish', verdict: 'CONFIRMED' }]),
   };
-  const readerCfg = { packetMs: 3_000 } as MessageReaderConfig;
+  const readerCfg = { packetMs: 3_000, ...over.cfg } as MessageReaderConfig;
   const svc = new ReaderPacketService(breadth as never, quotes, (over.context ?? context) as never, sources, readerCfg, { ownerUserId: 'owner-1' } as never);
   return { svc, breadth, quotes, context, sources };
 }
@@ -156,5 +156,80 @@ describe('ReaderPacketService', () => {
     const { packet } = await p;
     expect(context.build).toHaveBeenCalledWith(expect.objectContaining({ deadlineMs: 1_500 }));
     expect((packet.instruments.CRUDEOIL.frontFuture as { status: string }).status).toBe('unavailable');
+  });
+
+  describe('final review #2 / #8: broker sharing and short cache for unavailable results', () => {
+    it('skips the structure block by default; MESSAGE_READER_SKIP_STRUCTURE=false builds it', async () => {
+      const a = setup();
+      await a.svc.build(input(['NIFTY']));
+      expect(a.context.build).toHaveBeenCalledWith(expect.objectContaining({ skip: ['structure'] }));
+      const b = setup({ cfg: { skipStructure: false } });
+      await b.svc.build(input(['NIFTY']));
+      expect(b.context.build.mock.calls[0][0]).not.toHaveProperty('skip');
+    });
+
+    it('at most 2 instrument builds in flight; an extra underlying waits for a free permit', async () => {
+      let inFlight = 0;
+      let max = 0;
+      const contextBuild = jest.fn(async () => {
+        inFlight++;
+        max = Math.max(max, inFlight);
+        await new Promise((r) => setTimeout(r, 1_000));
+        inFlight--;
+        return { market: { status: 'present', source: 'x', value: 1 } };
+      });
+      const { svc } = setup({ contextBuild });
+      const p = svc.build(input(['NIFTY', 'BANKNIFTY', 'RELIANCE']));
+      await jest.advanceTimersByTimeAsync(0);
+      expect(contextBuild).toHaveBeenCalledTimes(2);
+      await jest.advanceTimersByTimeAsync(1_000);
+      expect(contextBuild).toHaveBeenCalledTimes(3);
+      await jest.advanceTimersByTimeAsync(1_000);
+      const { packet } = await p;
+      expect(max).toBe(2);
+      expect(packet.instruments.RELIANCE.market).toEqual({ status: 'present', source: 'x', value: 1 });
+    });
+
+    it('a build still waiting at the packet deadline is unavailable "reader build limit"', async () => {
+      const contextBuild = jest.fn(() => new Promise(() => undefined));
+      const { svc } = setup({ contextBuild, cfg: { maxInstrumentBuilds: 2 } });
+      const p = svc.build(input(['NIFTY', 'BANKNIFTY', 'RELIANCE']));
+      await jest.advanceTimersByTimeAsync(3_500);
+      const { packet } = await p;
+      expect(contextBuild).toHaveBeenCalledTimes(2);
+      expect(packet.instruments.RELIANCE).toEqual({ context: { status: 'unavailable', source: expect.any(String), reason: expect.stringContaining('reader build limit') } });
+      // Hung builds keep their permits: a later post's build is refused at its own deadline too.
+      const q = svc.build({ ...input(['SBIN']), now: NOW });
+      await jest.advanceTimersByTimeAsync(3_500);
+      expect((await q).packet.instruments.SBIN.context).toMatchObject({ reason: expect.stringContaining('reader build limit') });
+      expect(contextBuild).toHaveBeenCalledTimes(2);
+    });
+
+    it('an unavailable market pulse is refetched after ~10 s, not 60 s', async () => {
+      const getBreadth = jest.fn().mockRejectedValue(new Error('session expired'));
+      const { svc } = setup({ getBreadth });
+      await svc.build(input());
+      jest.setSystemTime(NOW.getTime() + 9_000);
+      await svc.build(input());
+      expect(getBreadth).toHaveBeenCalledTimes(1);
+      jest.setSystemTime(NOW.getTime() + 10_001);
+      await svc.build(input());
+      expect(getBreadth).toHaveBeenCalledTimes(2);
+    });
+
+    it('an unavailable instrument is rebuilt after ~10 s; a present one is kept 60 s', async () => {
+      const contextBuild = jest
+        .fn()
+        .mockResolvedValueOnce({ chain: { status: 'unavailable', reason: 'no snapshot' } })
+        .mockResolvedValue({ market: { status: 'present', source: 'x', value: 1 } });
+      const { svc } = setup({ contextBuild });
+      await svc.build(input(['NIFTY']));
+      jest.setSystemTime(NOW.getTime() + 10_001);
+      await svc.build(input(['NIFTY']));
+      expect(contextBuild).toHaveBeenCalledTimes(2);
+      jest.setSystemTime(NOW.getTime() + 50_000);
+      await svc.build(input(['NIFTY']));
+      expect(contextBuild).toHaveBeenCalledTimes(2);
+    });
   });
 });

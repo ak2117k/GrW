@@ -221,14 +221,29 @@ export class SignalContextService {
 
   /**
    * `expiry`: the traded contract's (YYYY-MM-DD), so an MCX chain reads that expiry's capture first.
-   * `deadlineMs` (optional; the message reader's packet time box, the judge's SIGNAL_CONTEXT_DEADLINE_MS): caps
-   * every block's own box at it, so a slow block turns `unavailable` without discarding the others. Absent = the blocks' own boxes.
+   * `deadlineMs` (optional; the message reader's packet time box, the judge's SIGNAL_CONTEXT_DEADLINE_MS — 6000 ms
+   * by default): caps every block's own box at it, so a slow block turns `unavailable` without discarding the others.
+   * Absent = the blocks' own boxes.
    * `onBlock` (optional, record only): told each block's key and how long it took (ms). A throwing callback
-   * is ignored; the returned blocks are the same with or without it.
+   * is ignored; the returned blocks are the same with or without it. A skipped block reports too.
+   * `skip` (optional; default none = the judge): blocks not to build at all — `'structure'` returns
+   * not_applicable without touching the level book / broker (the message reader in shadow mode).
    */
-  async build(i: { underlying: string; kind: string; exchange: string; ownerUserId: string | null; now: Date; ltp?: number | null; expiry?: string | null; deadlineMs?: number; onBlock?: (key: string, ms: number) => void }): Promise<Record<string, CtxBlock>> {
+  async build(i: {
+    underlying: string;
+    kind: string;
+    exchange: string;
+    ownerUserId: string | null;
+    now: Date;
+    ltp?: number | null;
+    expiry?: string | null;
+    deadlineMs?: number;
+    onBlock?: (key: string, ms: number) => void;
+    skip?: readonly string[];
+  }): Promise<Record<string, CtxBlock>> {
     const sym = levelSymbolFor(i.underlying, i.kind);
     const box = (ms: number) => (i.deadlineMs !== undefined ? Math.min(ms, i.deadlineMs) : ms);
+    const skipped = (name: string) => i.skip?.includes(name) ?? false;
     const t0 = i.onBlock ? clockMs() : null;
     const [chain, market, structure, news, mbm] = await timedBlocks(t0, i.onBlock, ['chain', 'market', 'structure', 'news', 'mbm'], [
       // The chain capture (mbm-chain-capture) snapshots NFO index / stock chains only; an MCX chain is read
@@ -250,6 +265,7 @@ export class SignalContextService {
       this.block(
         'signal-generator 15m level book + context factors (trend)',
         async () => {
+          if (skipped('structure')) throw new NotApplicable('skipped by the caller (reader build: no level book / broker work)');
           if (!this.levels) return null;
           // The nearest support / resistance need the UNDERLYING's price; this used to pass null,
           // so every packet said "price unavailable" even when the book was built.

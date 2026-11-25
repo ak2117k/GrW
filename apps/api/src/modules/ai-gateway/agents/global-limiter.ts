@@ -13,10 +13,25 @@ import { emitAgentEvent } from './agent-events';
  *   `AgentBusyError` — never silently dropped.
  * - On a Vertex 429 / quota error the non-trading share is halved for 60 s (`quota` event once per
  *   squeeze). Trading keeps its slots.
+ * - Low-tier jobs (`LOW_TIER_JOBS`: the message reader's `signal.read`) are admitted only while at
+ *   least `LOW_TIER_HEADROOM` non-trading slots stay free for other jobs (also during a squeeze), and
+ *   low-tier waiters never hold up other non-trading waiters — a burst of reads cannot starve live
+ *   parse / vision calls (reader spec §5.3).
  */
 export const DEFAULT_GLOBAL_CONCURRENCY = 16;
 export const DEFAULT_TRADING_RESERVE = 6;
 export const QUOTA_BACKOFF_MS = 60_000;
+/** Jobs that only ever use spare non-trading capacity. */
+export const LOW_TIER_JOBS: ReadonlySet<string> = new Set(['signal.read']);
+/** Non-trading slots a low-tier job must leave free for other jobs. */
+export const LOW_TIER_HEADROOM = 4;
+
+type Tier = 'trading' | 'normal' | 'low';
+
+function tierOf(job: string, trading: boolean): Tier {
+  if (trading) return 'trading';
+  return LOW_TIER_JOBS.has(job) ? 'low' : 'normal';
+}
 
 export interface GlobalLimiterOptions {
   total: number;
@@ -28,6 +43,7 @@ export interface GlobalLimiterOptions {
 interface Waiter {
   job: string;
   trading: boolean;
+  tier: Tier;
   startedAt: number;
   resolve: (release: () => void) => void;
   reject: (err: Error) => void;
@@ -66,9 +82,11 @@ export class GlobalLimiter {
     };
   }
 
-  private fits(trading: boolean): boolean {
+  private fits(tier: Tier): boolean {
     if (this.inFlight >= this.total) return false;
-    return trading || this.inFlightNonTrading < this.nonTradingLimit();
+    if (tier === 'trading') return true;
+    const limit = tier === 'low' ? this.nonTradingLimit() - LOW_TIER_HEADROOM : this.nonTradingLimit();
+    return this.inFlightNonTrading < limit;
   }
 
   private take(trading: boolean): () => void {
@@ -84,12 +102,12 @@ export class GlobalLimiter {
     };
   }
 
-  /** Admit waiters that now fit: trading first, then FIFO. */
+  /** Admit waiters that now fit: trading first, then other non-trading FIFO, then low-tier FIFO. */
   private drain(): void {
-    for (const trading of [true, false]) {
+    for (const tier of ['trading', 'normal', 'low'] as const) {
       for (let i = 0; i < this.waiters.length; ) {
         const w = this.waiters[i];
-        if (w.trading === trading && this.fits(w.trading)) {
+        if (w.tier === tier && this.fits(w.tier)) {
           this.waiters.splice(i, 1);
           if (w.timer) clearTimeout(w.timer);
           w.resolve(this.take(w.trading));
@@ -105,14 +123,18 @@ export class GlobalLimiter {
    * caller MUST call when the provider call settles.
    */
   acquire(job: string, trading: boolean, waitMs: number): Promise<() => void> {
-    // Trading jumps the queue; non-trading keeps FIFO behind earlier non-trading waiters.
-    if (this.fits(trading) && (trading || !this.waiters.some((w) => !w.trading))) {
+    // Trading jumps the queue; non-trading keeps FIFO behind earlier waiters of its own tier, and
+    // other non-trading jobs never queue behind low-tier waiters.
+    const tier = tierOf(job, trading);
+    const queuedAhead =
+      tier !== 'trading' && this.waiters.some((w) => w.tier === tier || (tier === 'low' && w.tier === 'normal'));
+    if (this.fits(tier) && !queuedAhead) {
       return Promise.resolve(this.take(trading));
     }
     const startedAt = this.now();
     if (!(waitMs > 0)) return Promise.reject(new AgentBusyError(job, 0));
     return new Promise((resolve, reject) => {
-      const w: Waiter = { job, trading, startedAt, resolve, reject, timer: null };
+      const w: Waiter = { job, trading, tier, startedAt, resolve, reject, timer: null };
       w.timer = setTimeout(() => {
         const i = this.waiters.indexOf(w);
         if (i >= 0) this.waiters.splice(i, 1);

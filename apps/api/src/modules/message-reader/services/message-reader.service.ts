@@ -88,7 +88,7 @@ function imageUnderlyings(reading: unknown): string[] {
  * result) is read by the AI against our live data and stored in message_readings.
  *
  * Runs beside signal-intake, never in its serial chain: the listeners only enqueue. An in-process FIFO keeps
- * at most 8 reads in flight, dedupes by messageId while queued or in flight, and reads an edit (same
+ * at most MESSAGE_READER_MAX_IN_FLIGHT (default 8) reads in flight, dedupes by messageId while queued or in flight, and reads an edit (same
  * messageId, new text) again into the same row. Per job: older than MESSAGE_READER_MAX_AGE_MIN → STALE;
  * the same text read in the last 15 min → CACHED (no AI call); else packet → AI → rule-parse comparison →
  * READ. A failure is stored FAILED and retried once while the post is under 5 min old.
@@ -189,7 +189,7 @@ export class MessageReaderService implements OnModuleDestroy {
   }
 
   private pump(): void {
-    while (this.running.size < READER_MAX_IN_FLIGHT && this.queue.length > 0) {
+    while (this.running.size < (this.cfg.maxInFlight || READER_MAX_IN_FLIGHT) && this.queue.length > 0) {
       const j = this.queue.shift() as QueuedJob;
       this.waiting.delete(j.messageId);
       this.running.set(j.messageId, j.hash);

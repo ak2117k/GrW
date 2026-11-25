@@ -300,3 +300,41 @@ describe('SignalContextService.build — onBlock reports each block\'s ms', () =
     expect(timed).toEqual(plain);
   });
 });
+
+/** 2026-11-25 final review #2: the reader may skip the structure / level-book block; the judge never passes skip. */
+describe('SignalContextService.build — skip', () => {
+  const levels = () => ({
+    structureFor: jest.fn().mockResolvedValue({ trend: 'up' }),
+    levelsFor: jest.fn().mockResolvedValue({ value: [] }),
+  });
+
+  it("skip ['structure'] returns not_applicable and never touches the level book", async () => {
+    const lv = levels();
+    const svc = new SignalContextService(undefined, undefined, lv as any);
+    const ctx = await svc.build({ underlying: 'NIFTY', kind: 'FUT', exchange: 'NFO', ownerUserId: 'owner', now: NOW, ltp: 100, skip: ['structure'] });
+    expect(ctx.structure).toEqual({ status: 'not_applicable', reason: expect.stringContaining('skipped by the caller') });
+    expect(lv.structureFor).not.toHaveBeenCalled();
+    expect(lv.levelsFor).not.toHaveBeenCalled();
+  });
+
+  it('without skip the structure block is built as before (judge path unchanged)', async () => {
+    const lv = levels();
+    const svc = new SignalContextService(undefined, undefined, lv as any);
+    const ctx = await svc.build({ underlying: 'NIFTY', kind: 'FUT', exchange: 'NFO', ownerUserId: 'owner', now: NOW, ltp: 100 });
+    expect(ctx.structure.status).toBe('present');
+    expect(lv.structureFor).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** Rebase onto the signal-speed fix: a skipped block still reports its ms to onBlock (the reader never loses a key). */
+describe('SignalContextService.build — skip + onBlock', () => {
+  it("skip ['structure'] still reports 'structure' to onBlock", async () => {
+    const lv = { structureFor: jest.fn(), levelsFor: jest.fn() };
+    const svc = new SignalContextService(undefined, undefined, lv as any);
+    const seen: Record<string, number> = {};
+    const ctx = await svc.build({ underlying: 'NIFTY', kind: 'FUT', exchange: 'NFO', ownerUserId: 'owner', now: NOW, ltp: 100, skip: ['structure'], onBlock: (k, ms) => { seen[k] = ms; } });
+    expect(ctx.structure.status).toBe('not_applicable');
+    expect(Object.keys(seen).sort()).toEqual(['chain', 'market', 'mbm', 'news', 'structure']);
+    expect(lv.structureFor).not.toHaveBeenCalled();
+  });
+});

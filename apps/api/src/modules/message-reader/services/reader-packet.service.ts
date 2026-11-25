@@ -23,6 +23,10 @@ type MarketPulse = ReaderPacket['marketPulse'];
 
 /** The market pulse (indices, breadth, sectors) is shared by every post read within this window. */
 const PULSE_CACHE_MS = 60_000;
+/** A pulse / instrument result with an unavailable block is kept only this long, so a blip heals fast. */
+const UNAVAILABLE_CACHE_MS = 10_000;
+/** Default reader instrument builds in flight at once (MESSAGE_READER_MAX_INSTRUMENT_BUILDS). */
+const DEFAULT_MAX_INSTRUMENT_BUILDS = 2;
 const MAX_INSTRUMENTS = 3;
 /** A named instrument's context is shared the same way (concurrent posts on one underlying build it once). */
 const INSTRUMENT_CACHE_MS = 60_000;
@@ -50,6 +54,12 @@ const SRC = {
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+type CacheEntry<T> = { at: number; ttl: number; promise: Promise<T> };
+
+const isUnavailable = (b: unknown) => !!b && typeof b === 'object' && (b as { status?: unknown }).status === 'unavailable';
+/** True when any top-level block of a pulse / instrument result is unavailable. */
+const hasUnavailable = (r: object) => Object.values(r).some(isUnavailable);
+
 /**
  * Builds the data packet the AI reader checks a post against: market pulse, the instruments the post
  * names, the channel's recent posts and today's settled market notes. Every source runs in parallel and
@@ -59,8 +69,11 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
  */
 @Injectable()
 export class ReaderPacketService {
-  private pulse: { at: number; promise: Promise<MarketPulse> } | null = null;
-  private readonly instruments = new Map<string, { at: number; promise: Promise<Record<string, unknown>> }>();
+  private pulse: CacheEntry<MarketPulse> | null = null;
+  private readonly instruments = new Map<string, CacheEntry<Record<string, unknown>>>();
+  /** Reader instrument builds in flight across all posts (the owner's broker session is shared with the live judge). */
+  private buildsInFlight = 0;
+  private readonly buildWaiters: Array<() => void> = [];
 
   constructor(
     private readonly breadth: BreadthSectorService,
@@ -77,7 +90,7 @@ export class ReaderPacketService {
     const owner = this.traderCfg.ownerUserId;
     const [marketPulse, instruments, channelRecent, todayNotes] = await Promise.all([
       this.marketPulse(owner),
-      Promise.all(names.map(async (u) => [u, await this.instrument(u, owner, i.now)] as const)),
+      Promise.all(names.map(async (u) => [u, await this.instrument(u, owner, i.now, started)] as const)),
       this.block(SRC.channel, async () => (await this.sources.recentChannelPosts(i.channelId, new Date(i.now.getTime() - CHANNEL_WINDOW_MS))).slice(0, MAX_ROWS)),
       this.block(SRC.notes, async () => (await this.sources.todayMarketNotes(istYmd(i.now))).slice(0, MAX_ROWS)),
     ]);
@@ -87,9 +100,13 @@ export class ReaderPacketService {
 
   private marketPulse(owner: string | null): Promise<MarketPulse> {
     const now = Date.now();
-    if (this.pulse && now - this.pulse.at < PULSE_CACHE_MS) return this.pulse.promise;
+    if (this.pulse && now - this.pulse.at < this.pulse.ttl) return this.pulse.promise;
     const promise = this.fetchPulse(owner);
-    this.pulse = { at: now, promise };
+    const entry: CacheEntry<MarketPulse> = { at: now, ttl: PULSE_CACHE_MS, promise };
+    this.pulse = entry;
+    void promise.then((r) => {
+      if (hasUnavailable(r)) entry.ttl = UNAVAILABLE_CACHE_MS;
+    });
     return promise;
   }
 
@@ -115,15 +132,60 @@ export class ReaderPacketService {
     return { indices, breadth, sectors };
   }
 
-  /** One instrument's context, cached 60 s per underlying and shared by concurrent builds (like the pulse). */
-  private instrument(underlying: string, owner: string | null, now: Date): Promise<Record<string, unknown>> {
+  /**
+   * One instrument's context, cached per underlying and shared by concurrent builds (like the pulse):
+   * 60 s when every block is present, ~10 s when one is unavailable.
+   */
+  private instrument(underlying: string, owner: string | null, now: Date, packetStartedAt: number): Promise<Record<string, unknown>> {
     const at = Date.now();
     const hit = this.instruments.get(underlying);
-    if (hit && at - hit.at < INSTRUMENT_CACHE_MS) return hit.promise;
-    for (const [k, v] of this.instruments) if (at - v.at >= INSTRUMENT_CACHE_MS) this.instruments.delete(k);
-    const promise = this.buildInstrument(underlying, owner, now);
-    this.instruments.set(underlying, { at, promise });
+    if (hit && at - hit.at < hit.ttl) return hit.promise;
+    for (const [k, v] of this.instruments) if (at - v.at >= v.ttl) this.instruments.delete(k);
+    const promise = this.buildInstrument(underlying, owner, now, packetStartedAt);
+    const entry: CacheEntry<Record<string, unknown>> = { at, ttl: INSTRUMENT_CACHE_MS, promise };
+    this.instruments.set(underlying, entry);
+    void promise.then((r) => {
+      if (hasUnavailable(r)) entry.ttl = UNAVAILABLE_CACHE_MS;
+    });
     return promise;
+  }
+
+  private maxBuilds(): number {
+    const n = this.cfg.maxInstrumentBuilds;
+    return Number.isFinite(n) && n >= 1 ? n : DEFAULT_MAX_INSTRUMENT_BUILDS;
+  }
+
+  /**
+   * A permit for one reader instrument build (MESSAGE_READER_MAX_INSTRUMENT_BUILDS in flight, process-wide),
+   * or null when none frees before `deadlineAt` (the packet deadline). Resolves to an idempotent release.
+   */
+  private acquireBuild(deadlineAt: number): Promise<(() => void) | null> {
+    const permit = () => {
+      this.buildsInFlight++;
+      let done = false;
+      return () => {
+        if (done) return;
+        done = true;
+        this.buildsInFlight--;
+        this.buildWaiters.shift()?.();
+      };
+    };
+    if (this.buildsInFlight < this.maxBuilds() && this.buildWaiters.length === 0) return Promise.resolve(permit());
+    const waitMs = deadlineAt - Date.now();
+    if (waitMs <= 0) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const admit = () => {
+        clearTimeout(timer);
+        resolve(permit());
+      };
+      const timer = setTimeout(() => {
+        const i = this.buildWaiters.indexOf(admit);
+        if (i >= 0) this.buildWaiters.splice(i, 1);
+        resolve(null);
+      }, waitMs);
+      timer.unref?.();
+      this.buildWaiters.push(admit);
+    });
   }
 
   /**
@@ -134,12 +196,21 @@ export class ReaderPacketService {
    * An MCX future is its own underlying, so its spot is the front-month future's LTP: looked up first
    * (half the box at most), then passed as `ltp`; a miss builds without it and says so in `frontFuture`.
    */
-  private async buildInstrument(underlying: string, owner: string | null, now: Date): Promise<Record<string, unknown>> {
+  private async buildInstrument(underlying: string, owner: string | null, now: Date, packetStartedAt: number): Promise<Record<string, unknown>> {
+    const release = await this.acquireBuild(packetStartedAt + this.cfg.packetMs);
+    if (!release) {
+      const reason = `reader build limit: ${this.maxBuilds()} instrument builds still in flight at the packet deadline (MESSAGE_READER_MAX_INSTRUMENT_BUILDS)`;
+      const context: PacketBlock = { status: 'unavailable', source: SRC.instrument, reason };
+      return { context };
+    }
     const started = Date.now();
     const exchange = segmentFor({ underlying, instrumentKind: 'FUT' });
+    // Shadow reads never build the structure / level book (owner's broker session); MESSAGE_READER_SKIP_STRUCTURE=false restores it.
+    const skip = this.cfg.skipStructure === false ? undefined : ['structure'];
     const r = await this.block(
       SRC.instrument,
-      async () => {
+      // The permit is held until the build itself settles (not the safety race), so abandoned work still counts.
+      () => this.holding(release, async () => {
         let ltp: number | undefined;
         let frontFuture: PacketBlock | undefined;
         if (exchange === 'MCX') {
@@ -155,13 +226,21 @@ export class ReaderPacketService {
           if (frontFuture.status === 'present') ltp = (frontFuture.value as { ltp: number }).ltp;
         }
         const deadlineMs = Math.max(1, this.cfg.packetMs - (Date.now() - started));
-        const ctx = await this.context.build({ underlying, kind: 'FUT', exchange, ownerUserId: owner, now, deadlineMs, ...(ltp !== undefined ? { ltp } : {}) });
+        const ctx = await this.context.build({ underlying, kind: 'FUT', exchange, ownerUserId: owner, now, deadlineMs, ...(skip ? { skip } : {}), ...(ltp !== undefined ? { ltp } : {}) });
         return frontFuture ? { ...ctx, frontFuture } : ctx;
-      },
+      }),
       // A safety net only: the judge's own blocks already end by the deadline.
       this.cfg.packetMs + SAFETY_MARGIN_MS,
     );
     return r.status === 'present' ? (r.value as Record<string, unknown>) : { context: r };
+  }
+
+  private async holding<T>(release: () => void, work: () => Promise<T>): Promise<T> {
+    try {
+      return await work();
+    } finally {
+      release();
+    }
   }
 
   /** Runs one source against the packet time box (or `ms`); never throws. */

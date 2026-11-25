@@ -5,7 +5,7 @@ import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-
 import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { agentsOn } from '../../ai-gateway/agents/agent-registry';
 import { deadReaderText, HEALTH_WINDOW_MS, readerUnhealthy, withinReaderWindow } from '../domain/reader-health';
-import { MESSAGE_READER_CONFIG, type MessageReaderConfig } from '../message-reader.config';
+import { MESSAGE_READER_CONFIG, readerConcurrencyWarning, type MessageReaderConfig } from '../message-reader.config';
 import { MessageReaderRepository } from '../repositories/message-reader.repository';
 import { ClaimScoringService } from './claim-scoring.service';
 import { MESSAGE_READER_AGENTS_ON, MESSAGE_READER_ALERT, MESSAGE_READER_NOW, type ReaderAlert } from './message-reader.service';
@@ -59,9 +59,11 @@ export class MessageReaderCron implements OnApplicationBootstrap {
     return `message-reader: MESSAGE_READER=${this.cfg.mode} but the AI agents are off, so no Telegram post is being read. Set AI_AGENTS=on and SENTINEL_JUDGE=vertex, or MESSAGE_READER=off.`;
   }
 
-  /** The one boot-time line for a reader that is switched on but cannot read. */
+  /** The boot-time lines for a reader that is switched on but cannot read, or has a thin AI cap. */
   onApplicationBootstrap(): void {
     if (this.cfg.mode !== 'off' && !this.agentsOn()) this.logger.warn(`[message-reader] ${this.agentsOffText()}`);
+    const thin = readerConcurrencyWarning(this.cfg);
+    if (thin) this.logger.warn(`[message-reader] ${thin}`);
   }
 
   @Cron(MESSAGE_READER_HEALTH_CRON, { name: 'message-reader-health', timeZone: 'Asia/Kolkata' })

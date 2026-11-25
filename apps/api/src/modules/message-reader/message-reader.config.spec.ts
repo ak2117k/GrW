@@ -1,4 +1,4 @@
-import { parseMessageReaderConfig } from './message-reader.config';
+import { parseMessageReaderConfig, readerConcurrencyWarning } from './message-reader.config';
 
 describe('parseMessageReaderConfig', () => {
   it('defaults to off', () => {
@@ -22,6 +22,10 @@ describe('parseMessageReaderConfig', () => {
       timeoutMs: 25000,
       maxAgeMin: 30,
       retryMaxAgeMin: 5,
+      maxInFlight: 8,
+      maxInstrumentBuilds: 2,
+      skipStructure: true,
+      agentsGlobalConcurrency: 16,
     });
   });
 
@@ -36,5 +40,22 @@ describe('parseMessageReaderConfig', () => {
     expect(c.packetMs).toBe(1500);
     expect(c.timeoutMs).toBe(25000);
     expect(c.maxAgeMin).toBe(30);
+  });
+
+  it('reads the in-flight, instrument-build and skip-structure knobs', () => {
+    const c = parseMessageReaderConfig({
+      MESSAGE_READER_MAX_IN_FLIGHT: '3',
+      MESSAGE_READER_MAX_INSTRUMENT_BUILDS: '4',
+      MESSAGE_READER_SKIP_STRUCTURE: 'false',
+      AGENTS_GLOBAL_CONCURRENCY: '30',
+    });
+    expect(c).toMatchObject({ maxInFlight: 3, maxInstrumentBuilds: 4, skipStructure: false, agentsGlobalConcurrency: 30 });
+    expect(parseMessageReaderConfig({ MESSAGE_READER_MAX_IN_FLIGHT: '0', MESSAGE_READER_SKIP_STRUCTURE: 'maybe' })).toMatchObject({ maxInFlight: 8, skipStructure: true });
+  });
+
+  it('warns when the reader is on with AGENTS_GLOBAL_CONCURRENCY < 24, never when off', () => {
+    expect(readerConcurrencyWarning(parseMessageReaderConfig({ MESSAGE_READER: 'shadow' }))).toContain('AGENTS_GLOBAL_CONCURRENCY=16');
+    expect(readerConcurrencyWarning(parseMessageReaderConfig({ MESSAGE_READER: 'on', AGENTS_GLOBAL_CONCURRENCY: '24' }))).toBeNull();
+    expect(readerConcurrencyWarning(parseMessageReaderConfig({}))).toBeNull();
   });
 });

@@ -75,6 +75,70 @@ describe('GlobalLimiter', () => {
     expect(quota).toHaveBeenCalledTimes(2);
   });
 
+  describe('low tier (signal.read)', () => {
+    it('with 10 non-trading slots and 8 reads waiting, signal.vision still gets a slot at once', async () => {
+      const l = new GlobalLimiter({ total: 16, tradingReserve: 6 });
+      expect(l.nonTradingLimit()).toBe(10);
+      const reads: Promise<unknown>[] = [];
+      for (let i = 0; i < 14; i++) reads.push(l.acquire('signal.read', false, 50).catch((e) => e));
+      // 6 admitted (10 − 4 headroom), 8 waiting.
+      expect(l.stats()).toMatchObject({ inFlightNonTrading: 6, waiting: 8 });
+      const vision = await l.acquire('signal.vision', false, 0);
+      expect(typeof vision).toBe('function');
+      expect(l.stats()).toMatchObject({ inFlightNonTrading: 7, waiting: 8 });
+      await Promise.all(reads);
+    });
+
+    it('reads never take the last 4 non-trading slots', async () => {
+      const l = new GlobalLimiter({ total: 16, tradingReserve: 6 });
+      for (let i = 0; i < 6; i++) await l.acquire('signal.read', false, 0);
+      await expect(l.acquire('signal.read', false, 0)).rejects.toBeInstanceOf(AgentBusyError);
+      for (let i = 0; i < 4; i++) await l.acquire('signal.parse', false, 0);
+      expect(l.stats().inFlightNonTrading).toBe(10);
+      // Other jobs holding slots shrink the reads' share too.
+      const l2 = new GlobalLimiter({ total: 16, tradingReserve: 6 });
+      const held: Array<() => void> = [];
+      for (let i = 0; i < 5; i++) held.push(await l2.acquire('signal.parse', false, 0));
+      await l2.acquire('signal.read', false, 0);
+      await expect(l2.acquire('signal.read', false, 0)).rejects.toBeInstanceOf(AgentBusyError);
+      // A waiting read is admitted only once a slot frees above the headroom.
+      const waiting = l2.acquire('signal.read', false, 1000);
+      expect(l2.stats().waiting).toBe(1);
+      held[0]();
+      expect(typeof (await waiting)).toBe('function');
+      expect(l2.stats().inFlightNonTrading).toBe(6);
+    });
+
+    it('a freed slot goes to a waiting normal job before a waiting read', async () => {
+      const l = new GlobalLimiter({ total: 16, tradingReserve: 6 });
+      const held: Array<() => void> = [];
+      for (let i = 0; i < 10; i++) held.push(await l.acquire('signal.parse', false, 0));
+      const order: string[] = [];
+      const read = l.acquire('signal.read', false, 1000).then((r) => (order.push('read'), r));
+      const vision = l.acquire('signal.vision', false, 1000).then((r) => (order.push('vision'), r));
+      held[0]();
+      await vision;
+      expect(order).toEqual(['vision']);
+      for (let i = 1; i < 6; i++) held[i]();
+      await read;
+      expect(order).toEqual(['vision', 'read']);
+    });
+
+    it('under a 429 squeeze reads still leave 4 slots for other jobs', async () => {
+      const l = new GlobalLimiter({ total: 24, tradingReserve: 6, now: () => 0 });
+      l.noteQuota('signal.parse');
+      expect(l.nonTradingLimit()).toBe(9);
+      for (let i = 0; i < 5; i++) await l.acquire('signal.read', false, 0);
+      const waitingReads: Promise<unknown>[] = [];
+      for (let i = 0; i < 8; i++) waitingReads.push(l.acquire('signal.read', false, 50).catch((e) => e));
+      expect(l.stats()).toMatchObject({ inFlightNonTrading: 5, waiting: 8 });
+      for (let i = 0; i < 4; i++) await l.acquire('signal.vision', false, 0);
+      expect(l.stats().inFlightNonTrading).toBe(9);
+      const errs = await Promise.all(waitingReads);
+      expect(errs.every((e) => e instanceof AgentBusyError)).toBe(true);
+    });
+  });
+
   it('env defaults 16 / 6, overrides honoured, reserve clamped below total', () => {
     const d = globalLimiterFrom({});
     expect([d.total, d.tradingReserve]).toEqual([16, 6]);

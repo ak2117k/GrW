@@ -34,6 +34,7 @@ type Fakes = {
   read?: (i: ReaderInput) => Promise<{ reply: ReaderReply; ms: number; model: string }>;
   rule?: RuleClass | null;
   alert?: (key: string, text: string) => Promise<boolean>;
+  env?: Record<string, string>;
 };
 
 function make(o: Fakes = {}) {
@@ -63,7 +64,7 @@ function make(o: Fakes = {}) {
   const packet = { build: jest.fn(async () => ({ packet: { at: NOW.toISOString() } as unknown as ReaderPacket, ms: 7 })) };
   const llm = { read: jest.fn(o.read ?? (async () => ({ reply: INFO, ms: 900, model: 'claude-sonnet-5' }))) };
   let now = NOW;
-  const cfg = parseMessageReaderConfig({ MESSAGE_READER: o.mode ?? 'shadow' });
+  const cfg = parseMessageReaderConfig({ MESSAGE_READER: o.mode ?? 'shadow', ...(o.env ?? {}) });
   const alert = jest.fn(o.alert ?? (async () => true));
   const svc = new MessageReaderService(repo, packet, llm, { get: async () => vocab }, cfg, () => now, () => o.agents ?? true, alert);
   const post = (id: string, text: string, agoMin = 1, extra: Record<string, unknown> = {}) => ({
@@ -101,6 +102,18 @@ describe('MessageReaderService', () => {
     expect(max).toBe(8);
     expect(m.llm.read).toHaveBeenCalledTimes(10);
     expect([...m.rows.values()].map((r) => r.status)).toEqual(Array(10).fill('READ'));
+  });
+
+  it('MESSAGE_READER_MAX_IN_FLIGHT caps the reads in flight', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const m = make({ env: { MESSAGE_READER_MAX_IN_FLIGHT: '3' }, read: async () => (await gate, { reply: INFO, ms: 900, model: 'claude-sonnet-5' }) });
+    for (let i = 0; i < 5; i++) m.svc.onTelegramMessage(m.post(`m${i}`, `post number ${i}`));
+    for (let i = 0; i < 10; i++) await tick();
+    expect(m.llm.read).toHaveBeenCalledTimes(3);
+    release();
+    await m.svc.whenIdle();
+    expect(m.llm.read).toHaveBeenCalledTimes(5);
   });
 
   it('the same messageId twice while queued is read once', async () => {

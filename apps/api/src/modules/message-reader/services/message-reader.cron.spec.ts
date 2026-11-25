@@ -14,6 +14,7 @@ type Opts = {
   lastFailure?: { at: Date; error: string | null } | null;
   lease?: { runExclusiveFailClosed: jest.Mock };
   noScoring?: boolean;
+  globalCap?: string;
 };
 
 function make(o: Opts = {}) {
@@ -23,7 +24,7 @@ function make(o: Opts = {}) {
   };
   const clock = { isTradingDay: jest.fn(() => o.tradingDay ?? true) };
   const alert = jest.fn(async () => true);
-  const cfg = parseMessageReaderConfig({ MESSAGE_READER: o.mode ?? 'shadow' });
+  const cfg = parseMessageReaderConfig({ MESSAGE_READER: o.mode ?? 'shadow', AGENTS_GLOBAL_CONCURRENCY: o.globalCap ?? '24' });
   const scoring = { storeCloseBreadth: jest.fn(async () => 0.8), scoreNight: jest.fn(async () => ({ filled: 1, pending: 0 })) };
   const cron = new MessageReaderCron(repo, cfg, clock, o.lease as never, () => o.now ?? OPEN, () => o.agents ?? true, alert, o.noScoring ? undefined : (scoring as never));
   return { cron, repo, clock, alert, scoring };
@@ -104,6 +105,14 @@ describe('MessageReaderCron (reader health)', () => {
       make({ mode: 'off', agents: false }).cron.onApplicationBootstrap();
       make({ mode: 'on', agents: true }).cron.onApplicationBootstrap();
       expect(Logger.prototype.warn).not.toHaveBeenCalled();
+    });
+
+    it('boot warns once when the reader is on and AGENTS_GLOBAL_CONCURRENCY < 24', () => {
+      make({ mode: 'shadow', agents: true, globalCap: '16' }).cron.onApplicationBootstrap();
+      expect(Logger.prototype.warn).toHaveBeenCalledTimes(1);
+      expect((Logger.prototype.warn as jest.Mock).mock.calls[0][0]).toContain('AGENTS_GLOBAL_CONCURRENCY=16');
+      make({ mode: 'off', agents: true, globalCap: '16' }).cron.onApplicationBootstrap();
+      expect(Logger.prototype.warn).toHaveBeenCalledTimes(1);
     });
 
     it('sends the agents-off alert in market hours, without the dead-reader check', async () => {

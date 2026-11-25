@@ -19,21 +19,24 @@
  *      through it exits AT THE OPEN (a gap costs the gap); touching it exits at the price where net P&L = −threshold.
  *   2. CLOSE — with the band on, hardLossReading at the 15m close (net at the close, the underlying's last 1-minute
  *      close in the bar, the noise unit from bars closed by then) decides BAND_UNDERLYING / HOLD_UNDER_N.
- *   3. TARGET — only when the walk continues past the real exit (below): the first signal target touched exits at
- *      the target. Checked AFTER the floor, so a bar touching both is the floor (conservative).
+ *   3. SIGNAL SL — only when the walk continues past the real exit (below): the signal's SL touched exits at the SL
+ *      (at the open when the bar opens through it). Checked AFTER the floor in the same bar (conservative).
+ *   4. TARGET — same walks: the first signal target touched exits at the target. Checked AFTER the floor and the SL,
+ *      so a bar touching both is the stop (conservative). An AI EXIT_NOW after the real exit cannot be replayed.
  * The noise unit is the code's: OLD uses N1 (ATR14 of the underlying's last 120 session minutes — computed ONLY to
  * reproduce what prod ran; with prod's trade-value stops the old rule is plain for every class, so N1 is unused
  * unless HARD_LOSS_BY_TRADE_VALUE=off), NEW uses N15 (n15FromBars on the underlying's 15-minute buckets).
  * The 20-second two-read confirmation (FLOOR_HARD_CONFIRM_SEC) is below the 15-minute resolution and is not modelled.
  *
- * WHERE A WALK ENDS. A trade whose real exit was the hard loss itself (executor reason `… MAX_LOSS …`) is walked past
- * that exit to the horizon (entry session close; entry day + 3 sessions, or to the exit session, for a carried
- * position): a rule that never fires ends at the first target or the horizon's last close (HORIZON, a mark). Any
+ * WHERE A WALK ENDS. A trade whose real exit was the hard loss itself (executor reason starting
+ * `FLOOR_HARD_EXIT (code rule, not a judgement) MAX_LOSS:`) is walked past that exit to the horizon (entry session
+ * close; entry day + 3 sessions, or to the exit session, for a carried position): a rule that never fires ends at the
+ * signal SL, the first target or the horizon's last close (HORIZON, a mark). Any
  * other real exit (AI exit, signal SL, manual close, reason unknown) ends the walk at the real exit: a rule that has
  * not fired by then exits with the real trade (ACTUAL).
  *
- * TAGS: CUT_THEN_RECOVERED (old exited at a loss; on a later bar, before the new floor's bar, the price reached entry
- * or the first target); NEW_LOSES_MORE (new ₹ < old ₹); NEW_LOSES_LESS (new ₹ > old ₹: the band exited sooner, or
+ * TAGS: CUT_THEN_RECOVERED_NEW_BETTER / _NEW_WORSE (old exited at a loss; on a later bar, before the new walk's floor
+ * or SL bar, the price reached entry or the first target; split by new ₹ ≥ / < old ₹); NEW_LOSES_MORE (new ₹ < old ₹); NEW_LOSES_LESS (new ₹ > old ₹: the band exited sooner, or
  * the mark is better without a recovery); SAME; NOT_REACHED (neither rule fired). ₹ = net after charges (charges.ts).
  * HOLD-list (--hold, prod AI_AUTO_EXIT_HOLD) and manual trades (no live signal order) are listed, never counted.
  */
@@ -82,7 +85,7 @@ export const FLOOR_REPLAY_OLD_ENV: Env = Object.freeze({ HARD_LOSS_EXIT_RUPEES: 
 /** Owner-decided 2026-11-25. */
 export const FLOOR_REPLAY_NEW_CEILINGS = 'INDEX_OPT:5000,STOCK_OPT:5000,GOLD:7500,SILVER:7500,MCX:5000';
 
-export type OutcomeKind = 'FLOOR' | 'TARGET' | 'ACTUAL' | 'HORIZON';
+export type OutcomeKind = 'FLOOR' | 'SIGNAL_SL' | 'TARGET' | 'ACTUAL' | 'HORIZON';
 export interface RuleOutcome {
   kind: OutcomeKind;
   /** Index of the 15m bar it happened in; null for ACTUAL. */
@@ -93,7 +96,7 @@ export interface RuleOutcome {
   /** FLOOR: the hard-loss band that fired (CAP / PLAIN / BAND_UNDERLYING / BAND_UNMEASURED). */
   band: string | null;
 }
-export type FloorTag = 'CUT_THEN_RECOVERED' | 'NEW_LOSES_MORE' | 'NEW_LOSES_LESS' | 'SAME' | 'NOT_REACHED';
+export type FloorTag = 'CUT_THEN_RECOVERED_NEW_BETTER' | 'CUT_THEN_RECOVERED_NEW_WORSE' | 'NEW_LOSES_MORE' | 'NEW_LOSES_LESS' | 'SAME' | 'NOT_REACHED';
 export interface RuleCfg { limit: number | null; cap: number | null; band: boolean }
 
 export interface CountedTrade {
@@ -153,7 +156,14 @@ const isHeld = (hold: readonly string[], r: FloorFixtureRow) => {
   return [r.symbol, r.trackerId].some((k) => h.includes(String(k ?? '').trim().toUpperCase()));
 };
 
-const isHardLossExit = (r: FloorFixtureRow) => /MAX_LOSS/.test(r.exitReason?.reason ?? '');
+/**
+ * The hard-loss exit's verdict reason starts `${FLOOR_HARD_EXIT_REASON_PREFIX} MAX_LOSS:` (trade-sentinel
+ * sentinel-cycle.service.ts, both the full path and the fast guard). Copied, not imported: that service pulls Nest.
+ * An AI reason that merely mentions e.g. HARD_MAX_LOSS is NOT a hard-loss exit.
+ */
+export const HARD_LOSS_EXIT_REASON_START = 'FLOOR_HARD_EXIT (code rule, not a judgement) MAX_LOSS:';
+export const isHardLossExit = (r: Pick<FloorFixtureRow, 'exitReason'>): boolean =>
+  String(r.exitReason?.reason ?? '').startsWith(HARD_LOSS_EXIT_REASON_START);
 
 function ruleCfgOf(env: Env, r: FloorFixtureRow, vf: number): HardLossConfig {
   return hardLossConfig(env, lossLimitForTrade(r.symbol, r.entryPrice * Math.abs(r.qty) * vf, r.exchange, env));
@@ -208,6 +218,9 @@ export function replayTrade(r: FloorFixtureRow, o: ReplayOptions): TradeResult {
   const exposure = exposureOf(r.symbol, side);
   const targets = orderedTargets(side === 'LONG' ? 'BUY' : 'SELL', r.entryPrice, r.signal.targets);
   const target = targets[0] ?? null;
+  // The signal's SL, when it is on the losing side of entry (a live exit trigger in prod).
+  const rawSl = Number(r.signal.sl);
+  const sl = Number.isFinite(rawSl) && rawSl > 0 && (r.entryPrice - rawSl) * dir > 0 ? rawSl : null;
 
   /** The contract price at which net P&L = −rupees (null when that loss is out of reach, e.g. a long below zero). */
   const priceAtLoss = (rupees: number): number | null => {
@@ -262,7 +275,13 @@ export function replayTrade(r: FloorFixtureRow, o: ReplayOptions): TradeResult {
         });
         if (reading.trip) return { out: floor(k, b.end, b.close, reading.band as string), cfg: ruleCfg };
       }
-      // 3. TARGET: only on a walk past the real exit; after the floor (a bar touching both is the floor).
+      // 3. SIGNAL SL: only on a walk past the real exit (before it, the real trade's own exit already includes it);
+      //    after the floor in the same bar (conservative). Opening through it fills at the open (a gap costs the gap).
+      if (pastExit && sl !== null) {
+        if ((b.open - sl) * dir <= 0) return { out: { kind: 'SIGNAL_SL', bar: k, at: new Date(b.ts).toISOString(), price: b.open, net: r2(net(b.open)), band: null }, cfg: ruleCfg };
+        if (((dir === 1 ? b.low : b.high) - sl) * dir <= 0) return { out: { kind: 'SIGNAL_SL', bar: k, at: new Date(b.ts).toISOString(), price: sl, net: r2(net(sl)), band: null }, cfg: ruleCfg };
+      }
+      // 4. TARGET: only on a walk past the real exit; after the floor and the SL (a bar touching both is the stop).
       if (pastExit && target !== null && ((dir === 1 ? b.high : b.low) - target) * dir >= 0) {
         return { out: { kind: 'TARGET', bar: k, at: new Date(b.ts).toISOString(), price: target, net: r2(net(target)), band: null }, cfg: ruleCfg };
       }
@@ -282,7 +301,8 @@ export function replayTrade(r: FloorFixtureRow, o: ReplayOptions): TradeResult {
   // CUT_THEN_RECOVERED: entry or the first target reached on a bar AFTER the old cut and BEFORE the new floor's bar.
   let recoveredBar: number | null = null;
   if (old.kind === 'FLOOR' && old.net < 0 && old.bar !== null) {
-    const stop = neu.kind === 'FLOOR' && neu.bar !== null ? neu.bar : bars.length;
+    // The new walk ends at its floor or SL bar: a recovery in or after that bar does not count.
+    const stop = (neu.kind === 'FLOOR' || neu.kind === 'SIGNAL_SL') && neu.bar !== null ? neu.bar : bars.length;
     for (let k = old.bar + 1; k < stop; k++) {
       const fav = dir === 1 ? bars[k].high : bars[k].low;
       if ((fav - r.entryPrice) * dir >= 0 || (target !== null && (fav - target) * dir >= 0)) {
@@ -294,7 +314,7 @@ export function replayTrade(r: FloorFixtureRow, o: ReplayOptions): TradeResult {
   const diff = neu.net - old.net;
   const tag: FloorTag =
     old.kind !== 'FLOOR' && neu.kind !== 'FLOOR' ? 'NOT_REACHED'
-      : recoveredBar !== null ? 'CUT_THEN_RECOVERED'
+      : recoveredBar !== null ? (diff <= -1 ? 'CUT_THEN_RECOVERED_NEW_WORSE' : 'CUT_THEN_RECOVERED_NEW_BETTER')
         : diff <= -1 ? 'NEW_LOSES_MORE'
           : diff >= 1 ? 'NEW_LOSES_LESS'
             : 'SAME';
@@ -305,7 +325,7 @@ export function replayTrade(r: FloorFixtureRow, o: ReplayOptions): TradeResult {
   };
 }
 
-export const FLOOR_TAGS: FloorTag[] = ['CUT_THEN_RECOVERED', 'NEW_LOSES_MORE', 'NEW_LOSES_LESS', 'SAME', 'NOT_REACHED'];
+export const FLOOR_TAGS: FloorTag[] = ['CUT_THEN_RECOVERED_NEW_BETTER', 'CUT_THEN_RECOVERED_NEW_WORSE', 'NEW_LOSES_MORE', 'NEW_LOSES_LESS', 'SAME', 'NOT_REACHED'];
 export interface GroupSummary {
   count: number;
   tags: Record<FloorTag, number>;
@@ -363,7 +383,9 @@ export function renderReport(res: FixtureReplay, o: ReplayOptions & { file: stri
   L.push('- Both rules are evaluated on **15-minute bars** of the contract (the 1-minute table is the raw store only). Decision points are the 15m closes; the bar\'s open and low/high are used for rupee touch checks. A bar that touches both the floor and a recovery counts as the floor. A decision at bar t uses bars ≤ t only.');
   L.push('- OLD = today\'s prod hard loss: `' + envText(o.oldEnv) + '` (everything else at its code default: cap ₹3,000, HARD_LOSS_NOISE_N 3, GOLD:7500, trade-value stops on). Its band (if any) uses **N1**, the 1-minute noise unit, computed only to reproduce what prod ran; with the trade-value stops on, the old rule is plain for every class.');
   L.push('- NEW = OLD + `HARD_LOSS_CEILING_BY_CLASS=' + (o.newEnv.HARD_LOSS_CEILING_BY_CLASS ?? '') + '`: ₹2,000 → class ceiling, with the 3 × **N15** band decided on 15m closes.');
-  L.push('- A trade whose real exit was the hard loss (`MAX_LOSS`) is walked on past that exit to the horizon (entry session; carried: entry day + 3 sessions); a rule that never fires ends at the first signal target or the last close (HORIZON, a mark). Any other real exit ends both walks there (ACTUAL).');
+  L.push('- A trade whose real exit was the hard loss (reason `FLOOR_HARD_EXIT … MAX_LOSS:`) is walked on past that exit to the horizon (entry session; carried: entry day + 3 sessions); a rule that never fires ends at the signal SL, the first signal target or the last close (HORIZON, a mark) — SL and target are checked after the floor in the same bar. **An AI EXIT_NOW after the real exit cannot be replayed**, so those walks show what the floor, SL and target alone would have done. Any other real exit ends both walks there (ACTUAL).');
+  L.push('- **Resolution is uneven:** the old plain rule (and every rupee cap) fires INTRABAR on the 15m low/high, while the new 3 × N15 band is decided only at 15m CLOSES. Prod evaluates both on every ~30 s read, so a band exit here can be later (or earlier) and at a different price than prod would have taken.');
+  L.push('- **The old rule is env-only.** Since 2026-11-23 prod HOLDS a MAX_LOSS exit while the loss-side chart check (act mode) says the chart is intact; that chart gate is not modelled — the replayed old rule always fires at its rupee figure. Trades after 2026-11-23 may therefore differ from what prod actually did (compare the actual-exit column).');
   L.push('- ₹ is net after charges (trade-sentinel charges model). The 20 s two-read confirmation is below 15m resolution and not modelled.');
   L.push('- Times: a touch exit shows its 15m bar\'s START (it happened inside that bar); a close decision shows the bar\'s END; "recovered bar n" is the 0-based 15m bar from entry.');
   L.push(`- HOLD list: ${o.hold.length ? o.hold.join(', ') : '(none given — pass --hold with prod AI_AUTO_EXIT_HOLD)'}.`);

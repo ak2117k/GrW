@@ -1,6 +1,7 @@
 import {
   FLOOR_REPLAY_NEW_CEILINGS,
   FLOOR_REPLAY_OLD_ENV,
+  isHardLossExit,
   replayFixture,
   replayTrade,
   type FloorFixtureRow,
@@ -57,7 +58,7 @@ function row(over: Partial<FloorFixtureRow> & { bars: Array<[number, number, num
     exitTime: new Date(T0 + 2 * M15 - 5 * MIN).toISOString(),
     exitPrice: 73.9,
     exitReason: { status: 'FILLED', reason: FLOOR_REASON, at: new Date(T0 + 2 * M15 - 5 * MIN).toISOString(), fillPrice: 73.9 },
-    signal: { decisionId: 'd1', side: 'BUY', targets: [130], sl: 80, source: 'signal' },
+    signal: { decisionId: 'd1', side: 'BUY', targets: [130], sl: null, source: 'signal' },
     underlyingRef: { exchange: 'NSE', token: '99926000' },
     contract1m: contract(bars),
     underlying1m: underlying1m(bars.length, 26000),
@@ -85,8 +86,65 @@ describe('floor replay — ₹2k rule (old) vs the catastrophe floor (new), on 1
     expect(r.old.net).toBeLessThan(-1990);
     expect(r.old.net).toBeGreaterThan(-2010);
     expect(r.new.kind).not.toBe('FLOOR');
-    expect(r.tag).toBe('CUT_THEN_RECOVERED');
+    expect(r.tag).toBe('CUT_THEN_RECOVERED_NEW_BETTER');
     expect(r.recoveredBar).toBe(3);
+  });
+
+  it('a recovery to entry after the old cut that then falls to the ceiling is CUT_THEN_RECOVERED_NEW_WORSE', () => {
+    const r = replayTrade(row({
+      bars: [
+        [100, 102, 95, 98],
+        [98, 99, 72, 74], // old cut
+        [74, 101, 73, 100], // back to entry
+        [100, 100, 30, 35], // then through the −₹5,000 ceiling
+      ],
+    }), opts);
+    if (r.status !== 'COUNTED') throw new Error('not counted');
+    expect(r.recoveredBar).toBe(2);
+    expect(r.new.kind).toBe('FLOOR');
+    expect(r.new.bar).toBe(3);
+    expect(r.new.net).toBeLessThan(r.old.net);
+    expect(r.tag).toBe('CUT_THEN_RECOVERED_NEW_WORSE');
+  });
+
+  it('the signal SL exits a walk past the real exit before a deeper new floor (checked after the floor in its bar)', () => {
+    const base = row({
+      bars: [
+        [100, 102, 95, 98],
+        [98, 99, 72, 74], // old cut at −₹2,000
+        [74, 75, 50, 55], // SL 60 touched; the ceiling (~33.9) is not
+        [55, 56, 20, 25], // would reach the ceiling
+      ],
+    });
+    const r = replayTrade({ ...base, signal: { ...base.signal!, sl: 60 } }, opts);
+    if (r.status !== 'COUNTED') throw new Error('not counted');
+    expect(r.old.kind).toBe('FLOOR');
+    expect(r.old.bar).toBe(1);
+    expect(r.new.kind).toBe('SIGNAL_SL');
+    expect(r.new.bar).toBe(2);
+    expect(r.new.price).toBe(60);
+    expect(r.new.net).toBeGreaterThan(-3100);
+    expect(r.tag).toBe('NEW_LOSES_MORE');
+
+    // Same bar touching the SL and the ceiling ⇒ the floor (conservative).
+    const both = replayTrade({ ...base, signal: { ...base.signal!, sl: 60 }, contract1m: contract([[100, 102, 95, 98], [98, 99, 72, 74], [74, 75, 30, 40]]) }, opts);
+    if (both.status !== 'COUNTED') throw new Error('not counted');
+    expect(both.new.kind).toBe('FLOOR');
+    expect(both.new.band).toBe('CAP');
+  });
+
+  it('only the hard loss\'s own reason prefix walks past the real exit; an AI reason mentioning HARD_MAX_LOSS does not', () => {
+    expect(isHardLossExit({ exitReason: { status: 'FILLED', reason: FLOOR_REASON, at: '' } })).toBe(true);
+    const ai = 'AI EXIT_NOW: gate HARD_MAX_LOSS clause near, thesis broken';
+    expect(isHardLossExit({ exitReason: { status: 'FILLED', reason: ai, at: '' } })).toBe(false);
+    expect(isHardLossExit({ exitReason: null })).toBe(false);
+    const r = replayTrade(row({
+      bars: [[100, 102, 95, 98], [98, 99, 70, 75], [75, 90, 72, 88], [88, 101, 87, 100]],
+      exitReason: { status: 'FILLED', reason: ai, at: new Date(T0 + 25 * MIN).toISOString() },
+    }), opts);
+    if (r.status !== 'COUNTED') throw new Error('not counted');
+    expect(r.pastExit).toBe(false);
+    expect(r.new.kind).toBe('ACTUAL');
   });
 
   it('a gap through the ceiling exits at the bar\'s open and is NEW_LOSES_MORE', () => {

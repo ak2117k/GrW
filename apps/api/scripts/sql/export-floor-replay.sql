@@ -14,7 +14,8 @@
 -- 1-minute bars are the raw store only: the replay rolls them into 15-minute bars and decides on those.
 -- Horizon end: the end of the entry's IST day when the trade closed that day; else the later of the exit and
 -- entry + 7 days (the replay keeps entry day + 3 sessions, or to the exit session if later).
--- trade_trackers times are timestamp WITHOUT time zone holding UTC; candles_1m.ts is timestamptz.
+-- trade_trackers and ai_exit_executions times are timestamp WITHOUT time zone holding UTC: each is read with
+-- AT TIME ZONE 'UTC' (→ timestamptz) and printed back AT TIME ZONE 'UTC', whatever the session TimeZone; candles_1m.ts is timestamptz.
 WITH t AS (
   SELECT t.id, t."userId" AS user_id, t.symbol, t.exchange, t.token, t.qty,
          t."entryPrice" AS entry_price, t."exitPrice" AS exit_price,
@@ -42,7 +43,7 @@ SELECT coalesce(json_agg(json_build_object(
   'entryTime', to_char(x.entry_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
   'exitTime', to_char(x.exit_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
   'exitReason', (SELECT json_build_object('status', e.status, 'reason', e."verdictReason",
-                                          'at', to_char(e."createdAt", 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'fillPrice', e."fillPrice")
+                                          'at', to_char((e."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'fillPrice', e."fillPrice")
                  FROM ai_exit_executions e WHERE e."trackerId" = x.id AND e.status IN ('PLACED', 'FILLED')
                  ORDER BY e."createdAt" DESC LIMIT 1),
   'signal', (SELECT json_build_object('decisionId', so.decision_id, 'side', so.side, 'targets', so.targets, 'sl', so.sl, 'source', so.source)

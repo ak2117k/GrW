@@ -1,4 +1,5 @@
 import { ReaderPacketService } from './reader-packet.service';
+import { SignalContextService } from '../../signal-trader/services/signal-context.service';
 import type { ReaderPacketSources } from './reader-packet.sources';
 import type { MessageReaderConfig } from '../message-reader.config';
 
@@ -6,7 +7,7 @@ const NOW = new Date('2026-11-25T05:00:00Z'); // 10:30 IST
 
 const quote = (token: string, ltp: number) => ({ token, symbol: token, exchange: 'NSE', ltp, open: ltp, high: ltp, low: ltp, close: ltp, volume: 0, change: 1, changePercent: 0.5, timestamp: NOW });
 
-function setup(over: { getBreadth?: jest.Mock; contextBuild?: jest.Mock } = {}) {
+function setup(over: { getBreadth?: jest.Mock; contextBuild?: jest.Mock; underlyingQuote?: jest.Mock; context?: unknown } = {}) {
   const breadth = {
     getBreadth: over.getBreadth ?? jest.fn().mockResolvedValue({ advances: 30, declines: 20, unchanged: 0, adRatio: 1.5, total: 50 }),
     getSectorPerformance: jest.fn().mockResolvedValue([{ sector: 'IT', symbol: 'NIFTY IT', token: '1', changePercent: 1.2, ltp: 100 }]),
@@ -14,13 +15,16 @@ function setup(over: { getBreadth?: jest.Mock; contextBuild?: jest.Mock } = {}) 
   const quotes = {
     resolveQuotes: jest.fn().mockImplementation(async (_u: string, refs: { token: string }[]) => new Map(refs.map((r) => [r.token, quote(r.token, 100)]))),
   };
-  const context = { build: over.contextBuild ?? jest.fn().mockResolvedValue({ market: { status: 'present', source: 'x', value: 1 } }) };
+  const context = {
+    build: over.contextBuild ?? jest.fn().mockResolvedValue({ market: { status: 'present', source: 'x', value: 1 } }),
+    underlyingQuote: over.underlyingQuote ?? jest.fn().mockResolvedValue(6_500),
+  };
   const sources: ReaderPacketSources = {
     recentChannelPosts: jest.fn().mockResolvedValue([{ at: NOW.toISOString(), text: 'nifty looks weak' }]),
     todayMarketNotes: jest.fn().mockResolvedValue([{ claim: 'market bearish', verdict: 'CONFIRMED' }]),
   };
   const readerCfg = { packetMs: 3_000 } as MessageReaderConfig;
-  const svc = new ReaderPacketService(breadth as never, quotes, context as never, sources, readerCfg, { ownerUserId: 'owner-1' } as never);
+  const svc = new ReaderPacketService(breadth as never, quotes, (over.context ?? context) as never, sources, readerCfg, { ownerUserId: 'owner-1' } as never);
   return { svc, breadth, quotes, context, sources };
 }
 
@@ -99,5 +103,58 @@ describe('ReaderPacketService', () => {
     expect(sources.recentChannelPosts).toHaveBeenCalledWith('ch-1', new Date(NOW.getTime() - 30 * 60_000));
     expect(sources.todayMarketNotes).toHaveBeenCalledWith('2026-11-25');
     expect(packet.channelRecent.status === 'present' && (packet.channelRecent.value as unknown[]).length).toBe(10);
+  });
+
+  it('passes the packet time box to the judge packet as deadlineMs', async () => {
+    const { svc, context } = setup();
+    await svc.build(input(['NIFTY']));
+    expect(context.build).toHaveBeenCalledWith(expect.objectContaining({ underlying: 'NIFTY', deadlineMs: 3_000 }));
+    expect(context.build.mock.calls[0][0]).not.toHaveProperty('ltp');
+  });
+
+  it('one hung sub-block of an instrument is unavailable; its other blocks are still present', async () => {
+    const chain = { latestChain: jest.fn(() => new Promise(() => undefined)) };
+    const mbm = { behaviour: jest.fn().mockResolvedValue({ status: 'ok', horizons: {} }) };
+    const real = new SignalContextService(chain as never, undefined, undefined, undefined, mbm as never, { instruments: ['NIFTY'], packet: 'on' } as never);
+    const { svc } = setup({ context: real });
+    const p = svc.build(input(['NIFTY']));
+    await jest.advanceTimersByTimeAsync(3_000);
+    const { packet } = await p;
+    expect(packet.instruments.NIFTY.chain).toEqual({ status: 'unavailable', reason: expect.stringContaining('timed out after 3000 ms') });
+    expect((packet.instruments.NIFTY.mbm as { status: string }).status).toBe('present');
+  });
+
+  it('two concurrent builds naming the same underlying build its context once', async () => {
+    const { svc, context } = setup();
+    await Promise.all([svc.build(input(['NIFTY'])), svc.build(input(['NIFTY', 'BANKNIFTY']))]);
+    expect(context.build).toHaveBeenCalledTimes(2); // NIFTY once, BANKNIFTY once
+    expect(context.build.mock.calls.filter(([a]: [{ underlying: string }]) => a.underlying === 'NIFTY')).toHaveLength(1);
+    jest.setSystemTime(NOW.getTime() + 60_001);
+    await svc.build(input(['NIFTY']));
+    expect(context.build).toHaveBeenCalledTimes(3);
+  });
+
+  it('an MCX underlying passes the front-month future LTP as ltp', async () => {
+    const { svc, context } = setup();
+    const { packet } = await svc.build(input(['CRUDEOIL']));
+    expect(context.underlyingQuote).toHaveBeenCalledWith('CRUDEOIL', 'MCX', 'owner-1', NOW);
+    expect(context.build).toHaveBeenCalledWith(expect.objectContaining({ underlying: 'CRUDEOIL', exchange: 'MCX', ltp: 6_500 }));
+    expect(packet.instruments.CRUDEOIL.frontFuture).toEqual({ status: 'present', source: expect.any(String), value: { ltp: 6_500 } });
+  });
+
+  it('an MCX front-future miss builds without ltp and says so', async () => {
+    const { svc, context } = setup({ underlyingQuote: jest.fn().mockResolvedValue(null) });
+    const { packet } = await svc.build(input(['CRUDEOIL']));
+    expect(context.build.mock.calls[0][0]).not.toHaveProperty('ltp');
+    expect(packet.instruments.CRUDEOIL.frontFuture).toEqual({ status: 'unavailable', source: expect.any(String), reason: expect.stringContaining('without a spot') });
+  });
+
+  it('a hung MCX front-future lookup gives up at half the box; the judge packet gets the rest', async () => {
+    const { svc, context } = setup({ underlyingQuote: jest.fn(() => new Promise(() => undefined)) });
+    const p = svc.build(input(['CRUDEOIL']));
+    await jest.advanceTimersByTimeAsync(1_500);
+    const { packet } = await p;
+    expect(context.build).toHaveBeenCalledWith(expect.objectContaining({ deadlineMs: 1_500 }));
+    expect((packet.instruments.CRUDEOIL.frontFuture as { status: string }).status).toBe('unavailable');
   });
 });

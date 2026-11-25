@@ -24,6 +24,10 @@ type MarketPulse = ReaderPacket['marketPulse'];
 /** The market pulse (indices, breadth, sectors) is shared by every post read within this window. */
 const PULSE_CACHE_MS = 60_000;
 const MAX_INSTRUMENTS = 3;
+/** A named instrument's context is shared the same way (concurrent posts on one underlying build it once). */
+const INSTRUMENT_CACHE_MS = 60_000;
+/** The whole-instrument race sits this far past the per-block deadline, as a safety net only. */
+const SAFETY_MARGIN_MS = 500;
 const CHANNEL_WINDOW_MS = 30 * 60_000;
 const MAX_ROWS = 10;
 
@@ -39,6 +43,7 @@ const SRC = {
   breadth: 'breadth-sector (advance / decline)',
   sectors: 'breadth-sector (sector performance)',
   instrument: 'signal-context (judge market packet)',
+  frontFuture: 'signal-context underlying quote (MCX front-month future)',
   channel: 'message_readings (this channel, last 30 min)',
   notes: 'message_readings (today, confirmed / contradicted market claims)',
 };
@@ -55,6 +60,7 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 @Injectable()
 export class ReaderPacketService {
   private pulse: { at: number; promise: Promise<MarketPulse> } | null = null;
+  private readonly instruments = new Map<string, { at: number; promise: Promise<Record<string, unknown>> }>();
 
   constructor(
     private readonly breadth: BreadthSectorService,
@@ -109,21 +115,57 @@ export class ReaderPacketService {
     return { indices, breadth, sectors };
   }
 
+  /** One instrument's context, cached 60 s per underlying and shared by concurrent builds (like the pulse). */
+  private instrument(underlying: string, owner: string | null, now: Date): Promise<Record<string, unknown>> {
+    const at = Date.now();
+    const hit = this.instruments.get(underlying);
+    if (hit && at - hit.at < INSTRUMENT_CACHE_MS) return hit.promise;
+    for (const [k, v] of this.instruments) if (at - v.at >= INSTRUMENT_CACHE_MS) this.instruments.delete(k);
+    const promise = this.buildInstrument(underlying, owner, now);
+    this.instruments.set(underlying, { at, promise });
+    return promise;
+  }
+
   /**
    * The judge's market packet for one named underlying. The post names an underlying, not a contract,
    * so it is read as a futures signal on it: exchange from signal-trader's own segment rule (NFO / BFO /
-   * MCX); a stock's spot then comes from its cash line, as for a stock-futures signal.
+   * MCX); a stock's spot then comes from its cash line, as for a stock-futures signal. The judge's blocks
+   * are each capped at the packet time box (deadlineMs), so one slow block never discards the others.
+   * An MCX future is its own underlying, so its spot is the front-month future's LTP: looked up first
+   * (half the box at most), then passed as `ltp`; a miss builds without it and says so in `frontFuture`.
    */
-  private async instrument(underlying: string, owner: string | null, now: Date): Promise<Record<string, unknown>> {
-    const r = await this.block(SRC.instrument, () =>
-      this.context.build({ underlying, kind: 'FUT', exchange: segmentFor({ underlying, instrumentKind: 'FUT' }), ownerUserId: owner, now }),
+  private async buildInstrument(underlying: string, owner: string | null, now: Date): Promise<Record<string, unknown>> {
+    const started = Date.now();
+    const exchange = segmentFor({ underlying, instrumentKind: 'FUT' });
+    const r = await this.block(
+      SRC.instrument,
+      async () => {
+        let ltp: number | undefined;
+        let frontFuture: PacketBlock | undefined;
+        if (exchange === 'MCX') {
+          frontFuture = await this.block(
+            SRC.frontFuture,
+            async () => {
+              const q = await this.context.underlyingQuote(underlying, 'MCX', owner, now);
+              if (q === null) throw new Error('no front-month future quote (instrument master or owner session); structure built without a spot');
+              return { ltp: q };
+            },
+            Math.floor(this.cfg.packetMs / 2),
+          );
+          if (frontFuture.status === 'present') ltp = (frontFuture.value as { ltp: number }).ltp;
+        }
+        const deadlineMs = Math.max(1, this.cfg.packetMs - (Date.now() - started));
+        const ctx = await this.context.build({ underlying, kind: 'FUT', exchange, ownerUserId: owner, now, deadlineMs, ...(ltp !== undefined ? { ltp } : {}) });
+        return frontFuture ? { ...ctx, frontFuture } : ctx;
+      },
+      // A safety net only: the judge's own blocks already end by the deadline.
+      this.cfg.packetMs + SAFETY_MARGIN_MS,
     );
     return r.status === 'present' ? (r.value as Record<string, unknown>) : { context: r };
   }
 
-  /** Runs one source against the packet time box; never throws. */
-  private async block(source: string, read: () => Promise<unknown>): Promise<PacketBlock> {
-    const ms = this.cfg.packetMs;
+  /** Runs one source against the packet time box (or `ms`); never throws. */
+  private async block(source: string, read: () => Promise<unknown>, ms = this.cfg.packetMs): Promise<PacketBlock> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms);

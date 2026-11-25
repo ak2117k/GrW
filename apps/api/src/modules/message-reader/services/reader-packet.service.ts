@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { BreadthSectorService } from '../../market-data/services/breadth-sector.service';
 import { MARKET_QUOTE_RESOLVER, type QuoteResolverLike } from '../../market-data/services/batch-quotes.service';
 import { SignalContextService } from '../../signal-trader/services/signal-context.service';
@@ -6,6 +6,11 @@ import { SIGNAL_TRADER_CONFIG } from '../../signal-trader/services/signal-trader
 import type { SignalTraderConfig } from '../../signal-trader/domain/signal-trader.config';
 import { segmentFor } from '../../signal-trader/domain/contract-resolver';
 import { istYmd } from '../../mbm/domain/chain-snapshot';
+import type { DailyBar } from '../../signal-intake/domain/info-outcome';
+import type { Vocabulary } from '../../signal-intake/domain/vocabulary';
+import { SignalVocabularyService } from '../../signal-intake/services/signal-vocabulary.service';
+import { infoRefOf, SIGNAL_INFO_BARS, SIGNAL_INFO_MASTER, type InfoBars } from '../../signal-intake/services/signal-outcome.service';
+import { readerQuote, type Bar15m, type QuoteLtp } from '../domain/reader-quote';
 import { MESSAGE_READER_CONFIG, type MessageReaderConfig } from '../message-reader.config';
 import { READER_PACKET_SOURCES, type ReaderPacketSources } from './reader-packet.sources';
 
@@ -33,6 +38,13 @@ const INSTRUMENT_CACHE_MS = 60_000;
 /** The whole-instrument race sits this far past the per-block deadline, as a safety net only. */
 const SAFETY_MARGIN_MS = 500;
 const CHANNEL_WINDOW_MS = 30 * 60_000;
+/** A named instrument's quote block is shared for this long (UNAVAILABLE_CACHE_MS when unavailable). */
+const QUOTE_CACHE_MS = 60_000;
+/** Daily bars fetched for the quote: 60 prior sessions + holidays. Kept per instrument for the IST session day. */
+const QUOTE_DAILY_DAYS = 100;
+/** 15m bars fetched for the quote: enough to reach the last 8 closed bars across a weekend / holiday. */
+const QUOTE_15M_DAYS = 5;
+const DAY_MS = 86_400_000;
 const MAX_ROWS = 10;
 
 /** Index quotes for the pulse (tokens as in market-context's UNDERLYING_TOKEN_MAP). */
@@ -50,6 +62,7 @@ const SRC = {
   frontFuture: 'signal-context underlying quote (MCX front-month future)',
   channel: 'message_readings (this channel, last 30 min)',
   notes: 'message_readings (today, confirmed / contradicted market claims)',
+  quote: 'market-quote-resolver + owner daily / 15m bars (index, NSE cash, MCX front future)',
 };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -74,6 +87,9 @@ export class ReaderPacketService {
   /** Reader instrument builds in flight across all posts (the owner's broker session is shared with the live judge). */
   private buildsInFlight = 0;
   private readonly buildWaiters: Array<() => void> = [];
+  private readonly quoteCache = new Map<string, CacheEntry<PacketBlock>>();
+  /** Daily bars per EXCHANGE:token for one IST session day (the previous-session stats do not move intraday). */
+  private readonly dailyCache = new Map<string, { day: string; promise: Promise<DailyBar[]> }>();
 
   constructor(
     private readonly breadth: BreadthSectorService,
@@ -82,6 +98,9 @@ export class ReaderPacketService {
     @Inject(READER_PACKET_SOURCES) private readonly sources: ReaderPacketSources,
     @Inject(MESSAGE_READER_CONFIG) private readonly cfg: MessageReaderConfig,
     @Inject(SIGNAL_TRADER_CONFIG) private readonly traderCfg: SignalTraderConfig,
+    @Optional() @Inject(SIGNAL_INFO_BARS) private readonly bars?: InfoBars,
+    @Optional() @Inject(SIGNAL_INFO_MASTER) private readonly master?: { rows(): Promise<readonly unknown[] | null> },
+    @Optional() @Inject(SignalVocabularyService) private readonly vocab?: { get(): Promise<Vocabulary> },
   ) {}
 
   async build(i: { text: string; channelId: string; underlyings: string[]; now: Date }): Promise<{ packet: ReaderPacket; ms: number }> {
@@ -90,7 +109,12 @@ export class ReaderPacketService {
     const owner = this.traderCfg.ownerUserId;
     const [marketPulse, instruments, channelRecent, todayNotes] = await Promise.all([
       this.marketPulse(owner),
-      Promise.all(names.map(async (u) => [u, await this.instrument(u, owner, i.now, started)] as const)),
+      Promise.all(
+        names.map(async (u) => {
+          const [ctx, quote] = await Promise.all([this.instrument(u, owner, i.now, started), this.quote(u, owner, i.now, started)]);
+          return [u, { ...ctx, quote }] as const;
+        }),
+      ),
       this.block(SRC.channel, async () => (await this.sources.recentChannelPosts(i.channelId, new Date(i.now.getTime() - CHANNEL_WINDOW_MS))).slice(0, MAX_ROWS)),
       this.block(SRC.notes, async () => (await this.sources.todayMarketNotes(istYmd(i.now))).slice(0, MAX_ROWS)),
     ]);
@@ -146,6 +170,105 @@ export class ReaderPacketService {
     this.instruments.set(underlying, entry);
     void promise.then((r) => {
       if (hasUnavailable(r)) entry.ttl = UNAVAILABLE_CACHE_MS;
+    });
+    return promise;
+  }
+
+  /**
+   * The named instrument's own price (index / NSE cash / MCX front-month future): the live quote plus
+   * previous-session, 20-session volume and 60-session range stats from daily bars, and the last closed
+   * 15m bars. Cached per underlying like the pulse (60 s; 10 s when unavailable), shared by concurrent
+   * posts; daily bars are fetched once per instrument per IST session day. Every broker read is raced
+   * against the packet deadline. Present only when the live quote arrived; missing bars leave nulls and
+   * a `missing` reason.
+   */
+  private quote(underlying: string, owner: string | null, now: Date, packetStartedAt: number): Promise<PacketBlock> {
+    const at = Date.now();
+    const hit = this.quoteCache.get(underlying);
+    if (hit && at - hit.at < hit.ttl) return hit.promise;
+    for (const [k, v] of this.quoteCache) if (at - v.at >= v.ttl) this.quoteCache.delete(k);
+    // A safety net only: fetchQuote's own broker reads end by the packet deadline.
+    const promise = this.block(SRC.quote, () => this.fetchQuote(underlying, owner, now, packetStartedAt), this.cfg.packetMs + SAFETY_MARGIN_MS);
+    const entry: CacheEntry<PacketBlock> = { at, ttl: QUOTE_CACHE_MS, promise };
+    this.quoteCache.set(underlying, entry);
+    void promise.then((r) => {
+      if (r.status === 'unavailable') entry.ttl = UNAVAILABLE_CACHE_MS;
+    });
+    return promise;
+  }
+
+  private async fetchQuote(underlying: string, owner: string | null, now: Date, packetStartedAt: number): Promise<unknown> {
+    if (!owner) throw new Error('no owner user id (HUB_OWNER_USER_ID) to quote with');
+    const ref = infoRefOf(underlying, null, null, now) ?? (await this.lookupRef(underlying, now));
+    if (!ref) throw new Error(`no instrument for ${underlying} in the instrument master (index / NSE cash / MCX front future)`);
+    const ms = Math.max(1, packetStartedAt + this.cfg.packetMs - Date.now());
+    const bars = this.bars;
+    const [ltp, daily, m15] = await Promise.all([
+      this.block(
+        SRC.quote,
+        async () => {
+          const q = (await this.quotes.resolveQuotes(owner, [{ token: ref.token, exchange: ref.exchange, symbol: underlying }])).get(ref.token);
+          if (!q || !(q.ltp > 0)) throw new Error(`no live quote for ${ref.exchange}:${ref.token}`);
+          return q;
+        },
+        ms,
+      ),
+      this.block(
+        'daily bars',
+        async () => {
+          if (!bars) throw new Error('no daily bar loader');
+          return this.dailyBars(bars, ref, now);
+        },
+        ms,
+      ),
+      this.block(
+        '15m bars',
+        async () => {
+          if (!bars?.intraday15m) throw new Error('no 15m bar loader');
+          return bars.intraday15m(ref.exchange, ref.token, new Date(now.getTime() - QUOTE_15M_DAYS * DAY_MS), now);
+        },
+        ms,
+      ),
+    ]);
+    if (ltp.status !== 'present') throw new Error(ltp.reason);
+    const missing: string[] = [];
+    if (daily.status !== 'present') missing.push(`daily bars: ${daily.reason}`);
+    if (m15.status !== 'present') missing.push(`15m bars: ${m15.reason}`);
+    return readerQuote({
+      exchange: ref.exchange,
+      q: ltp.value as QuoteLtp,
+      daily: daily.status === 'present' ? (daily.value as DailyBar[]) : null,
+      bars15m: m15.status === 'present' ? (m15.value as Bar15m[]) : null,
+      today: istYmd(now),
+      now,
+      missing,
+    });
+  }
+
+  /** Stock / commodity → its NSE cash line / MCX front-month future via the vocabulary + instrument master. */
+  private async lookupRef(underlying: string, now: Date): Promise<{ exchange: string; token: string } | null> {
+    const [vocab, master] = await Promise.all([
+      this.vocab ? this.vocab.get().catch(() => null) : Promise.resolve(null),
+      this.master ? this.master.rows().catch(() => null) : Promise.resolve(null),
+    ]);
+    return infoRefOf(underlying, vocab, master, now);
+  }
+
+  /** Daily bars for one instrument, fetched once per IST session day; a failed or empty fetch is not kept. */
+  private dailyBars(bars: InfoBars, ref: { exchange: string; token: string }, now: Date): Promise<DailyBar[]> {
+    const key = `${ref.exchange}:${ref.token}`;
+    const day = istYmd(now);
+    const hit = this.dailyCache.get(key);
+    if (hit && hit.day === day) return hit.promise;
+    for (const [k, v] of this.dailyCache) if (v.day !== day) this.dailyCache.delete(k);
+    const promise = bars.daily(ref.exchange, ref.token, new Date(now.getTime() - QUOTE_DAILY_DAYS * DAY_MS), now).then((rows) => {
+      if (!rows?.length) throw new Error('no daily bars returned');
+      return rows;
+    });
+    const entry = { day, promise };
+    this.dailyCache.set(key, entry);
+    promise.catch(() => {
+      if (this.dailyCache.get(key) === entry) this.dailyCache.delete(key);
     });
     return promise;
   }

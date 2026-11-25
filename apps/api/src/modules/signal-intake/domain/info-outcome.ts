@@ -20,6 +20,8 @@ export interface DailyBar {
   high: number;
   low: number;
   close: number;
+  /** Session volume when the loader has it (the message reader's quote block averages it). */
+  volume?: number;
 }
 
 export type InfoOutcomeStatus = 'RIGHT' | 'WRONG' | 'FLAT' | 'NOT_JUDGED_MONTHS' | 'NO_BIAS' | 'NO_DATA' | 'PENDING';

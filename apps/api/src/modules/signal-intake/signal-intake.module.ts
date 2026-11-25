@@ -94,6 +94,7 @@ import { parseSignalIntakeConfig, SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig 
             high: c.high,
             low: c.low,
             close: c.close,
+            volume: c.volume,
           }));
         },
         intraday15m: async (exchange, token, from, to) => {

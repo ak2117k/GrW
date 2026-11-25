@@ -84,7 +84,7 @@ describe('agent registry', () => {
   it('the shipped config/ai-agents.json matches design 4.2 / 4.4', () => {
     const r = loadAgentRegistry({});
     expect(r.jobsOf('trading').sort()).toEqual(['entry.judge', 'sentinel.judge', 'sentinel.thesis', 'signal.judge']);
-    expect(r.jobsOf('reading').sort()).toEqual(['news.impact', 'news.sentiment', 'signal.image-setup', 'signal.info', 'signal.parse', 'signal.read', 'signal.vision']);
+    expect(r.jobsOf('reading').sort()).toEqual(['news.impact', 'news.sentiment', 'setup.build', 'signal.image-setup', 'signal.info', 'signal.parse', 'signal.read', 'signal.vision']);
     expect(r.jobsOf('background').sort()).toEqual([
       'assist.advisor',
       'assist.news',
@@ -105,6 +105,8 @@ describe('agent registry', () => {
     expect(r.profile('news.brief').concurrency).toBe(1);
     // Message reader (2026-11-25): every Telegram post is read, 8 at once, 60 s bound.
     expect(r.profile('signal.read')).toMatchObject({ agent: 'reading', concurrency: 8, timeoutMs: 60000 });
+    // AI setups (2026-11-25): one Opus call per verified claim, 2 at once, 120 s bound.
+    expect(r.profile('setup.build')).toMatchObject({ agent: 'reading', concurrency: 2, timeoutMs: 120000 });
     const ownProfile = ['news.sentiment', 'news.brief', 'signal.read'];
     for (const job of [...r.jobsOf('reading'), ...r.jobsOf('background')].filter((j) => !ownProfile.includes(j))) expect(r.profile(job).concurrency).toBe(2);
     for (const g of AGENT_GROUPS) {

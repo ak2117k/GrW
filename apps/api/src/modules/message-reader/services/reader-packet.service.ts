@@ -83,7 +83,7 @@ const hasUnavailable = (r: object) => Object.values(r).some(isUnavailable);
  * At most `max` holders at once; a waiter gives up at its deadline (null). `acquire` resolves to an
  * idempotent release that admits the next waiter.
  */
-class DeadlinePermits {
+export class DeadlinePermits {
   private inFlight = 0;
   /** Each returns true when it took the freed permit, false when its deadline had already passed. */
   private readonly waiters: Array<() => boolean> = [];

@@ -100,7 +100,7 @@ import { parseSignalIntakeConfig, SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig 
         intraday15m: async (exchange, token, from, to) => {
           if (!cfg.ownerUserId) return [];
           const rows = await feeds.fetchCandles(cfg.ownerUserId, token, exchange, '15m', from, to);
-          return (rows ?? []).map((c) => ({ ts: c.timestamp.getTime(), open: c.open, high: c.high, low: c.low, close: c.close }));
+          return (rows ?? []).map((c) => ({ ts: c.timestamp.getTime(), open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume }));
         },
       }),
       inject: [UserFeedManager, SIGNAL_INTAKE_CONFIG],

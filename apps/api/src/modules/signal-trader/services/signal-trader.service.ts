@@ -1084,7 +1084,9 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
 
   private ensureTimer(): void {
     if (this.timer || this.pending.size === 0) return;
-    this.timer = setInterval(() => void this.checkTriggers(new Date()), Math.min(this.cfg.triggerPollSec, 5) * 1000);
+    // Outside any evaluation's stopwatch: a timer keeps the async context it was created in, so arming from
+    // inside an evaluation would otherwise hand that stopwatch to every later tick (and stamp expiries with it).
+    this.timer = decisionClock.exit(() => setInterval(() => void this.checkTriggers(new Date()), Math.min(this.cfg.triggerPollSec, 5) * 1000));
     (this.timer as { unref?: () => void }).unref?.();
   }
 
@@ -1195,7 +1197,12 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     }
   }
 
+  /** Expiry / give-up: never re-stamped from an ambient stopwatch — the record keeps the timings stored at arm time. */
   private expire(p: PendingTrigger): Promise<EvaluationResult> {
+    return decisionClock.exit(() => this.expireNow(p));
+  }
+
+  private expireNow(p: PendingTrigger): Promise<EvaluationResult> {
     const t = p.trigger;
     if (t.retry) return this.giveUpRetry(p, t.retry);
     const mins = Math.round((Date.parse(t.expiresAt) - Date.parse(t.armedAt)) / 60_000);

@@ -27,7 +27,7 @@ function makeRepo() {
   return {
     decisions,
     decisionsFor: jest.fn(async (id: string) => decisions.filter((d) => d.signalId === id)),
-    signal: jest.fn(async () => signal),
+    signal: jest.fn(async (id: string) => ({ ...signal, id })),
     cluster: jest.fn(async () => null),
     channelTitle: jest.fn(async () => 'Chan One'),
     channelStats: jest.fn(async () => null),
@@ -55,7 +55,7 @@ function makeRepo() {
   };
 }
 
-function build(over: { cfg?: Partial<SignalTraderConfig>; ltps?: Array<number | null> } = {}) {
+function build(over: { cfg?: Partial<SignalTraderConfig>; ltps?: Array<number | null>; ltpFn?: () => number | null } = {}) {
   const cfg = { ...parseSignalTraderConfig({ HUB_OWNER_USER_ID: 'owner' }), liveFromIstMin: 0, entryRetryMin: 0, ...over.cfg };
   const repo = makeRepo();
   const judge = { judge: jest.fn(async () => ({ ok: true, verdict: takeVerdict, latencyMs: 10 })) };
@@ -76,7 +76,7 @@ function build(over: { cfg?: Partial<SignalTraderConfig>; ltps?: Array<number | 
   const clock = { isOpen: () => true, minutesToClose: () => 200 };
   const master = { getInstrumentMaster: async () => masterRows };
   const ltps = [...(over.ltps ?? [])];
-  const quotes = { ltp: jest.fn(async () => (ltps.length ? (ltps.shift() as number | null) : 101)) };
+  const quotes = { ltp: jest.fn(async () => (over.ltpFn ? over.ltpFn() : ltps.length ? (ltps.shift() as number | null) : 101)) };
   const funds = { available: jest.fn(async () => 1_000_000) };
   const paper = { open: jest.fn(async () => ({ ok: true as const, tradeId: 'pt1', entryPrice: 101, duplicate: false })) };
   const svc = new SignalTraderService(cfg, LIVE_ENV, repo as never, judge as never, context as never, executor as never, risk as never, clock, master, quotes, funds, paper);
@@ -157,5 +157,46 @@ describe('SignalTraderService — per-step timings (judge.timings)', () => {
     await expect(sw.time('modelMs', async () => 7)).resolves.toBe(7);
     await expect(sw.time('noiseMs', async () => { throw new Error('work failed'); })).rejects.toThrow('work failed');
     expect(sw.snapshot()).toMatchObject({ modelMs: null, noiseMs: null, totalToSendMs: null });
+  });
+
+  /**
+   * The watch timer is a REAL interval here (poll 1 s): a timer created inside an evaluation must not carry that
+   * evaluation's stopwatch into later ticks, so an expiry SKIP keeps exactly the timings stored at arm time.
+   */
+  describe('expiry SKIPs keep the arm-time timings', () => {
+    const WAIT_MS = 30 * 60_000;
+    const armNow = (expiresInMs: number) => new Date(Date.now() - WAIT_MS + expiresInMs);
+    const settled = async (d: Record<string, any>, maxMs = 4_000) => {
+      const end = Date.now() + maxMs;
+      while (d.status !== 'DONE' && Date.now() < end) await new Promise((r) => setTimeout(r, 50));
+    };
+
+    it('arm a trigger, let it expire: the stored judge.timings equal the arm-time timings', async () => {
+      const t = build({ cfg: { mode: 'live', triggerWaitMin: 30, triggerPollSec: 1 } as never, ltpFn: () => 95 });
+      expect(await t.svc.evaluate(ev, armNow(200))).toMatchObject({ decision: 'PENDING' });
+      const armed = JSON.parse(JSON.stringify(t.repo.decisions[0].judge.timings));
+      expect(armed.modelMs).toEqual(expect.any(Number));
+      await new Promise((r) => setTimeout(r, 1_100)); // a stale stopwatch would now add > 1 s to totalToSendMs
+      await settled(t.repo.decisions[0]);
+      t.svc.onModuleDestroy();
+      expect(t.repo.decisions[0]).toMatchObject({ decision: 'SKIP', skipReason: 'trigger_expired' });
+      expect(t.repo.decisions[0].judge.timings).toEqual(armed);
+    }, 10_000);
+
+    it('two decisions armed by different evaluations: the one that expires keeps its own timings', async () => {
+      const t = build({ cfg: { mode: 'live', triggerWaitMin: 30, triggerPollSec: 1 } as never, ltpFn: () => 95 });
+      // B is armed first (its evaluation starts the watch timer) and waits 30 min; A expires almost at once.
+      expect(await t.svc.evaluate({ ...ev, signalId: 'sigB', clusterId: 'clB' }, new Date())).toMatchObject({ decision: 'PENDING' });
+      await new Promise((r) => setTimeout(r, 300));
+      expect(await t.svc.evaluate(ev, armNow(200))).toMatchObject({ decision: 'PENDING' });
+      const a = t.repo.decisions.find((d) => d.signalId === 'sig1')!;
+      const armedA = JSON.parse(JSON.stringify(a.judge.timings));
+      await new Promise((r) => setTimeout(r, 1_100));
+      await settled(a);
+      t.svc.onModuleDestroy();
+      expect(a).toMatchObject({ decision: 'SKIP', skipReason: 'trigger_expired' });
+      expect(a.judge.timings).toEqual(armedA);
+      expect(t.repo.decisions.find((d) => d.signalId === 'sigB')).toMatchObject({ decision: 'PENDING' });
+    }, 10_000);
   });
 });

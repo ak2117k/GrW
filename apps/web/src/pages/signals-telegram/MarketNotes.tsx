@@ -123,6 +123,16 @@ export function MarketNotesView({ health, notes, nowMs, setups = [] }: { health:
   );
 }
 
+/** The AI setups poll: every 30 s, stopped once the API says AI_SETUPS=off. */
+export function aiSetupsPollMs(data: { mode: string } | undefined): number | false {
+  return data?.mode === 'off' ? false : POLL_MS;
+}
+
+/** "Could not load AI setups." only when the last known mode is on — unknown (e.g. a 404 before the API deploys) or off stays quiet. */
+export function showAiSetupsError(isError: boolean, data: { mode: string } | undefined): boolean {
+  return isError && !!data && data.mode !== 'off';
+}
+
 /**
  * Owner-only "Market notes": the AI reader's verdicts on each Telegram post for one IST session, with the AI setup
  * cards under the reading they came from (hidden when AI_SETUPS=off). Polls every 30 s.
@@ -140,7 +150,7 @@ export function MarketNotes({ date }: { date: string }) {
   const setups = useQuery({
     queryKey: ['ai-setups', date],
     queryFn: () => fetchAiSetups(date),
-    refetchInterval: POLL_MS,
+    refetchInterval: (q) => aiSetupsPollMs(q.state.data),
     staleTime: 15_000,
     enabled: on,
   });
@@ -151,7 +161,7 @@ export function MarketNotes({ date }: { date: string }) {
     <>
       <MarketNotesView health={health.data} notes={notes.data?.notes ?? []} nowMs={Date.now()} setups={cards} />
       {notes.isError && <p className="mt-1 text-sm text-[var(--color-accent-red)]">Could not load market notes.</p>}
-      {setups.isError && <p className="mt-1 text-sm text-[var(--color-accent-red)]">Could not load AI setups.</p>}
+      {showAiSetupsError(setups.isError, setups.data) && <p className="mt-1 text-sm text-[var(--color-accent-red)]">Could not load AI setups.</p>}
     </>
   );
 }

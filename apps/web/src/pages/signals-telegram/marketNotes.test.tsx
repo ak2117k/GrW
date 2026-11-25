@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { MarketNotes, MarketNotesView } from './MarketNotes';
+import { aiSetupsPollMs, MarketNotes, MarketNotesView, showAiSetupsError } from './MarketNotes';
 import { istToday, readerNotReading, verdictChip, type MarketNote, type ReaderHealth } from './signalsTelegram';
 
 const NOW = Date.parse('2026-11-25T06:00:00Z'); // 11:30 IST
@@ -93,6 +93,23 @@ describe('market notes', () => {
     );
     expect(on).toContain('data-testid="market-notes"');
     expect(on).toContain('Alpha Trades');
+  });
+});
+
+describe('AI setups query (feature off / API not deployed)', () => {
+  const data = (mode: string) => ({ date: '2026-11-25', mode, setups: [] });
+
+  it('polls every 30 s until the API says mode off, then stops', () => {
+    expect(aiSetupsPollMs(undefined)).toBe(30_000);
+    expect(aiSetupsPollMs(data('paper'))).toBe(30_000);
+    expect(aiSetupsPollMs(data('off'))).toBe(false);
+  });
+
+  it('shows the error line only when the last known mode is on (unknown or off → hidden)', () => {
+    expect(showAiSetupsError(false, data('paper'))).toBe(false);
+    expect(showAiSetupsError(true, undefined)).toBe(false); // e.g. a 404 before the API deploys
+    expect(showAiSetupsError(true, data('off'))).toBe(false);
+    expect(showAiSetupsError(true, data('paper'))).toBe(true);
   });
 });
 

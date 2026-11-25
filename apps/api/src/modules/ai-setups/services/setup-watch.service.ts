@@ -334,7 +334,7 @@ export class SetupWatchService {
       return;
     }
     const optPx = trade.instrument ? (ltps.get(keyOf(trade.instrument)) ?? null) : null;
-    type Closed = { pnl?: number | null; exitReasonTag?: string | null; exitTime?: Date | null };
+    type Closed = { status?: string | null; pnl?: number | null; exitReasonTag?: string | null; exitTime?: Date | null };
     let closed: Closed | null = null;
     try {
       closed = (await this.exec.closeTrade(trade.id, {
@@ -346,6 +346,11 @@ export class SetupWatchService {
     } catch (err) {
       // Closed meanwhile (closeTrade refuses a non-OPEN trade): the next pass reads who closed it.
       this.logger.warn(`[ai-setup] ${row.underlying} setup ${row.id}: close ${step.tag} failed: ${errText(err)}`);
+      return;
+    }
+    // Lost to another closer's PARTIAL close: the trade is still open — the next pass judges it again.
+    if (closed?.status !== 'CLOSED') {
+      this.logger.warn(`[ai-setup] ${row.underlying} setup ${row.id}: ${step.tag} close lost to another close; trade ${trade.id} is ${closed?.status ?? 'unknown'} — rechecked next pass`);
       return;
     }
     // A close another closer claimed first returns the row as THEY closed it: their reason and P&L stand.

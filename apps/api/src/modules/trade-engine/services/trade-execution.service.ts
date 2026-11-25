@@ -439,230 +439,243 @@ export class TradeExecutionService {
         | 'CARRYFORWARD',
     };
 
-    let exitPrice = 0;
+    // Set once a PAPER close is claimed (below): a failure after that leaves the trade CLOSED with its stale
+    // unrealised pnl and no exitPrice, so it is logged as an ERROR naming the trade. Live: rethrown as before.
+    let paperClaimed = false;
+    try {
+      let exitPrice = 0;
 
-    if (trade.isPaperTrade) {
-      // Resolve a usable price BEFORE simulating, so the paper fill — and
-      // the cash credited back to the virtual balance — uses a real exit
-      // price even when the instrument has no cached LTP. Without a price
-      // on the close order the simulator fills at 0, credits no cash, and
-      // books a phantom catastrophic loss.
-      //
-      // Preference: caller-supplied `opts.exitPrice` (the actual stop/target
-      // trigger price) wins, then cached LTP, then entry price. The caller-
-      // supplied path matters: by the time the close order runs the cached
-      // LTP can have drifted several rupees from the trigger that decided
-      // the exit, silently under-/over-reporting the realised P&L on the
-      // Trade row.
-      const callerExitPrice =
-        typeof opts.exitPrice === 'number' && opts.exitPrice > 0
-          ? opts.exitPrice
+      if (trade.isPaperTrade) {
+        // Resolve a usable price BEFORE simulating, so the paper fill — and
+        // the cash credited back to the virtual balance — uses a real exit
+        // price even when the instrument has no cached LTP. Without a price
+        // on the close order the simulator fills at 0, credits no cash, and
+        // books a phantom catastrophic loss.
+        //
+        // Preference: caller-supplied `opts.exitPrice` (the actual stop/target
+        // trigger price) wins, then cached LTP, then entry price. The caller-
+        // supplied path matters: by the time the close order runs the cached
+        // LTP can have drifted several rupees from the trigger that decided
+        // the exit, silently under-/over-reporting the realised P&L on the
+        // Trade row.
+        const callerExitPrice =
+          typeof opts.exitPrice === 'number' && opts.exitPrice > 0
+            ? opts.exitPrice
+            : null;
+        const lastPrice = instrument
+          ? await this.getLastPrice(instrument.token, instrument.exchange)
           : null;
-      const lastPrice = instrument
-        ? await this.getLastPrice(instrument.token, instrument.exchange)
-        : null;
-      closeOrder.price =
-        callerExitPrice ??
-        (lastPrice && lastPrice > 0
-          ? lastPrice
-          : trade.entryPrice && trade.entryPrice > 0
-            ? trade.entryPrice
-            : undefined);
+        closeOrder.price =
+          callerExitPrice ??
+          (lastPrice && lastPrice > 0
+            ? lastPrice
+            : trade.entryPrice && trade.entryPrice > 0
+              ? trade.entryPrice
+              : undefined);
 
-      // CLAIM the paper close (2026-11-25) before any accounting — the simulated fill below already moves the
-      // virtual balance, and applyExitAccounting books the P&L. Two closers in the same instant (the paper
-      // watch, the AI setup watch, the paper sentinel) both passed the OPEN check above; only the one whose
-      // conditional update still finds the status and quantity it read goes on. The loser returns the row
-      // as it is now, with no accounting. Paper only: a live close keeps its broker-first order.
-      const claimed = await this.tradeRepository.claimClose(
+        // CLAIM the paper close (2026-11-25) before any accounting — the simulated fill below already moves the
+        // virtual balance, and applyExitAccounting books the P&L. Two closers in the same instant (the paper
+        // watch, the AI setup watch, the paper sentinel) both passed the OPEN check above; only the one whose
+        // conditional update still finds the status and quantity it read goes on. The loser returns the row
+        // as it is now, with no accounting. Paper only: a live close keeps its broker-first order.
+        const claimed = await this.tradeRepository.claimClose(
+          tradeId,
+          { status: trade.status, quantity: trade.quantity },
+          isFullClose
+            ? {
+                status: 'CLOSED',
+                exitTime: new Date(),
+                exitReasonTag: opts.exitReasonTag ?? null,
+                exitNotes: opts.exitNotes ?? opts.reason ?? null,
+              }
+            : { quantity: trade.quantity - closeQty },
+        );
+        if (!claimed) {
+          this.logger.warn(`[Paper] Close of trade ${tradeId} skipped: another close claimed it first (no accounting)`);
+          return (await this.tradeRepository.getTradeById(tradeId)) ?? trade;
+        }
+        paperClaimed = true;
+
+        const paperResponse =
+          await this.paperTradeService.simulateOrder(closeOrder);
+
+        // Pick the first STRICTLY-POSITIVE price. A 0 fill (no LTP) must never
+        // be accepted — find(>0) is used instead of the ?? chain, which would
+        // treat a literal 0 as a valid value and corrupt P&L. callerExitPrice
+        // is checked first so the trigger price wins over a stale cached fill.
+        exitPrice =
+          [callerExitPrice, paperResponse.fillPrice, lastPrice, trade.entryPrice].find(
+            (p): p is number => typeof p === 'number' && p > 0,
+          ) ?? 0;
+
+        if (!exitPrice || exitPrice <= 0) {
+          this.logger.error(
+            `Paper close ${paperResponse.orderId} resolved no exitPrice — ` +
+              `fillPrice=${paperResponse.fillPrice}, lastPrice=${lastPrice}, ` +
+              `trade.entryPrice=${trade.entryPrice}. This will corrupt P&L.`,
+          );
+        }
+
+        this.logger.log(
+          `[Paper] Close order ${paperResponse.orderId}: ${paperResponse.status}`,
+        );
+      } else {
+        if (!this.brokerAdapter) {
+          throw new HttpException(
+            'No broker adapter configured',
+            HttpStatus.SERVICE_UNAVAILABLE,
+          );
+        }
+
+        const response = await this.brokerAdapter.placeOrder(closeOrder);
+        this.logger.log(
+          `[Live] Close order ${response.orderId}: ${response.status}`,
+        );
+
+        // For live trades, fetch the actual LTP
+        if (instrument) {
+          try {
+            const quote = await this.brokerAdapter.getLiveQuote(
+              instrument.symbol,
+              instrument.exchange,
+            );
+            exitPrice = quote.ltp;
+          } catch {
+            exitPrice = trade.entryPrice ?? 0;
+          }
+        }
+      }
+
+      // Calculate P&L on the slice being closed, then accumulate it onto any
+      // P&L already realized by earlier partial closes of this same trade.
+      //
+      // `trades.pnl` is GROSS side × (exit − entry) × qty (charges are in
+      // `fees`), but what it holds before the close depends on status:
+      //  - PARTIALLY_FILLED: the REALISED P&L of the earlier partial exit(s).
+      //  - OPEN: an UNREALISED mark-to-market written by the open-paper-trade
+      //    refresher (paper options, every 30 s) and the signal paper watch
+      //    (every sweep). Adding that mark to the slice double-counted the move
+      //    — paper options closed near their last mark booked ~2× gross.
+      // Only the PARTIALLY_FILLED value is realised, so only it carries over.
+      const entryPrice = trade.entryPrice ?? 0;
+      const multiplier = trade.side === 'BUY' ? 1 : -1;
+      // MCX: x the contract value factor (GOLD: Rs 100 per point per master-lot unit); 1 elsewhere.
+      const valueFactor = contractValueFactor(instrument?.exchange, instrument?.symbol);
+      const slicePnl = multiplier * (exitPrice - entryPrice) * closeQty * valueFactor;
+      const priorRealisedPnl =
+        trade.status === 'PARTIALLY_FILLED' ? trade.pnl ?? 0 : 0;
+      const pnl = priorRealisedPnl + slicePnl;
+      // Price-return percentage — quantity-independent, so it stays correct
+      // after a partial exit. The old pnl / (entryPrice × trade.quantity) used
+      // the post-shrink remaining quantity as the denominator while pnl was the
+      // cumulative total → an inflated % on every partially-exited trade.
+      const pnlPercent =
+        entryPrice > 0
+          ? (multiplier * (exitPrice - entryPrice) / entryPrice) * 100
+          : 0;
+
+      // R6: real per-order charges on the SELL exit leg, applied to the paper
+      // account and accumulated onto the trade's `fees`.
+      const exitCharges = computeOrderCharges({
+        side: exitSide as 'BUY' | 'SELL',
+        price: exitPrice,
+        quantity: closeQty,
+        exchange: instrument?.exchange ?? 'NSE',
+        symbol: instrument?.symbol ?? null,
+      });
+      if (trade.isPaperTrade) {
+        this.paperTradeService.applyExitAccounting(slicePnl, exitCharges.total);
+      }
+      const brokerCharge = trade.isPaperTrade ? exitCharges.total : 0;
+      const totalFees = (trade.fees ?? 0) + brokerCharge;
+
+      // Pick the human-readable note: prefer structured exitNotes, fall back
+      // to the legacy `reason` string (kill-switch path), preserve original
+      // notes otherwise.
+      const exitNote =
+        opts.exitNotes ?? opts.reason ?? null;
+      const noteForLegacyField = opts.reason
+        ? `Closed: ${opts.reason}`
+        : trade.notes ?? undefined;
+
+      // Full close → CLOSED with exit price/time. Partial close → the trade
+      // stays open as PARTIALLY_FILLED with its quantity reduced to the
+      // remainder, so the trades table never accumulates orphan rows.
+      const updatedTrade = await this.tradeRepository.updateTrade(
         tradeId,
-        { status: trade.status, quantity: trade.quantity },
         isFullClose
           ? {
               status: 'CLOSED',
+              exitPrice,
               exitTime: new Date(),
+              pnl,
+              pnlPercent,
+              fees: totalFees,
+              notes: noteForLegacyField,
               exitReasonTag: opts.exitReasonTag ?? null,
-              exitNotes: opts.exitNotes ?? opts.reason ?? null,
+              exitNotes: exitNote,
             }
-          : { quantity: trade.quantity - closeQty },
+          : {
+              status: 'PARTIALLY_FILLED',
+              quantity: trade.quantity - closeQty,
+              pnl,
+              pnlPercent,
+              fees: totalFees,
+              notes: noteForLegacyField,
+            },
       );
-      if (!claimed) {
-        this.logger.warn(`[Paper] Close of trade ${tradeId} skipped: another close claimed it first (no accounting)`);
-        return (await this.tradeRepository.getTradeById(tradeId)) ?? trade;
+
+      // ---- Append to the per-trade event log (best-effort) ----
+      // A partial close logs PARTIAL_EXIT for the leg. A full close logs the
+      // SPECIFIC exit type so the audit log distinguishes a stop-out from a
+      // target hit from a plain square-off (the whole point of the log) — we
+      // map the exit reason/tag onto SL_HIT / TARGET_HIT, else generic CLOSED.
+      // price = the slice exit price, pnl = cumulative realized P&L,
+      // quantity = the units closed on this leg.
+      const exitTag = (opts.exitReasonTag as string) ?? '';
+      const reasonStr = `${exitTag} ${exitNote ?? ''}`.toLowerCase();
+      const fullCloseType =
+        exitTag === 'HIT_TARGET' || /target/.test(reasonStr)
+          ? TradeEventType.TARGET_HIT
+          : exitTag === 'STOPPED_OUT' || exitTag === 'MOVED_STOP' || /\bsl\b|stop|loss-cut/.test(reasonStr)
+            ? TradeEventType.SL_HIT
+            : TradeEventType.CLOSED;
+      await this.emitTradeEvent({
+        tradeId,
+        eventType: isFullClose ? fullCloseType : TradeEventType.PARTIAL_EXIT,
+        price: exitPrice,
+        quantity: closeQty,
+        pnl,
+        notes: exitTag || exitNote || null,
+      });
+
+      // Mirror the close into the in-memory position tracker: a full close
+      // removes the position, a partial close shrinks it. Both book only THIS
+      // slice's realized P&L (slicePnl) — a prior partial already booked its
+      // own slice, so passing the cumulative pnl would double-count it.
+      if (isFullClose) {
+        this.positionManagerService.removePosition(tradeId, slicePnl);
+      } else {
+        this.positionManagerService.reducePosition(tradeId, closeQty, slicePnl);
       }
 
-      const paperResponse =
-        await this.paperTradeService.simulateOrder(closeOrder);
+      // Emit updates
+      this.tradeGateway.emitTradeUpdate(updatedTrade);
 
-      // Pick the first STRICTLY-POSITIVE price. A 0 fill (no LTP) must never
-      // be accepted — find(>0) is used instead of the ?? chain, which would
-      // treat a literal 0 as a valid value and corrupt P&L. callerExitPrice
-      // is checked first so the trigger price wins over a stale cached fill.
-      exitPrice =
-        [callerExitPrice, paperResponse.fillPrice, lastPrice, trade.entryPrice].find(
-          (p): p is number => typeof p === 'number' && p > 0,
-        ) ?? 0;
+      this.logger.log(
+        `Trade ${tradeId} ${isFullClose ? 'closed' : 'partially closed'} ` +
+          `(${closeQty} @ ${exitPrice.toFixed(2)}). P&L: ${pnl.toFixed(2)} (${pnlPercent.toFixed(2)}%)`,
+      );
 
-      if (!exitPrice || exitPrice <= 0) {
+      return updatedTrade;
+    } catch (err) {
+      if (paperClaimed) {
         this.logger.error(
-          `Paper close ${paperResponse.orderId} resolved no exitPrice — ` +
-            `fillPrice=${paperResponse.fillPrice}, lastPrice=${lastPrice}, ` +
-            `trade.entryPrice=${trade.entryPrice}. This will corrupt P&L.`,
+          `[Paper] Trade ${tradeId}: paper close claimed but not completed — exitPrice/pnl may be stale (${err instanceof Error ? err.message : String(err)})`,
         );
       }
-
-      this.logger.log(
-        `[Paper] Close order ${paperResponse.orderId}: ${paperResponse.status}`,
-      );
-    } else {
-      if (!this.brokerAdapter) {
-        throw new HttpException(
-          'No broker adapter configured',
-          HttpStatus.SERVICE_UNAVAILABLE,
-        );
-      }
-
-      const response = await this.brokerAdapter.placeOrder(closeOrder);
-      this.logger.log(
-        `[Live] Close order ${response.orderId}: ${response.status}`,
-      );
-
-      // For live trades, fetch the actual LTP
-      if (instrument) {
-        try {
-          const quote = await this.brokerAdapter.getLiveQuote(
-            instrument.symbol,
-            instrument.exchange,
-          );
-          exitPrice = quote.ltp;
-        } catch {
-          exitPrice = trade.entryPrice ?? 0;
-        }
-      }
+      throw err;
     }
-
-    // Calculate P&L on the slice being closed, then accumulate it onto any
-    // P&L already realized by earlier partial closes of this same trade.
-    //
-    // `trades.pnl` is GROSS side × (exit − entry) × qty (charges are in
-    // `fees`), but what it holds before the close depends on status:
-    //  - PARTIALLY_FILLED: the REALISED P&L of the earlier partial exit(s).
-    //  - OPEN: an UNREALISED mark-to-market written by the open-paper-trade
-    //    refresher (paper options, every 30 s) and the signal paper watch
-    //    (every sweep). Adding that mark to the slice double-counted the move
-    //    — paper options closed near their last mark booked ~2× gross.
-    // Only the PARTIALLY_FILLED value is realised, so only it carries over.
-    const entryPrice = trade.entryPrice ?? 0;
-    const multiplier = trade.side === 'BUY' ? 1 : -1;
-    // MCX: x the contract value factor (GOLD: Rs 100 per point per master-lot unit); 1 elsewhere.
-    const valueFactor = contractValueFactor(instrument?.exchange, instrument?.symbol);
-    const slicePnl = multiplier * (exitPrice - entryPrice) * closeQty * valueFactor;
-    const priorRealisedPnl =
-      trade.status === 'PARTIALLY_FILLED' ? trade.pnl ?? 0 : 0;
-    const pnl = priorRealisedPnl + slicePnl;
-    // Price-return percentage — quantity-independent, so it stays correct
-    // after a partial exit. The old pnl / (entryPrice × trade.quantity) used
-    // the post-shrink remaining quantity as the denominator while pnl was the
-    // cumulative total → an inflated % on every partially-exited trade.
-    const pnlPercent =
-      entryPrice > 0
-        ? (multiplier * (exitPrice - entryPrice) / entryPrice) * 100
-        : 0;
-
-    // R6: real per-order charges on the SELL exit leg, applied to the paper
-    // account and accumulated onto the trade's `fees`.
-    const exitCharges = computeOrderCharges({
-      side: exitSide as 'BUY' | 'SELL',
-      price: exitPrice,
-      quantity: closeQty,
-      exchange: instrument?.exchange ?? 'NSE',
-      symbol: instrument?.symbol ?? null,
-    });
-    if (trade.isPaperTrade) {
-      this.paperTradeService.applyExitAccounting(slicePnl, exitCharges.total);
-    }
-    const brokerCharge = trade.isPaperTrade ? exitCharges.total : 0;
-    const totalFees = (trade.fees ?? 0) + brokerCharge;
-
-    // Pick the human-readable note: prefer structured exitNotes, fall back
-    // to the legacy `reason` string (kill-switch path), preserve original
-    // notes otherwise.
-    const exitNote =
-      opts.exitNotes ?? opts.reason ?? null;
-    const noteForLegacyField = opts.reason
-      ? `Closed: ${opts.reason}`
-      : trade.notes ?? undefined;
-
-    // Full close → CLOSED with exit price/time. Partial close → the trade
-    // stays open as PARTIALLY_FILLED with its quantity reduced to the
-    // remainder, so the trades table never accumulates orphan rows.
-    const updatedTrade = await this.tradeRepository.updateTrade(
-      tradeId,
-      isFullClose
-        ? {
-            status: 'CLOSED',
-            exitPrice,
-            exitTime: new Date(),
-            pnl,
-            pnlPercent,
-            fees: totalFees,
-            notes: noteForLegacyField,
-            exitReasonTag: opts.exitReasonTag ?? null,
-            exitNotes: exitNote,
-          }
-        : {
-            status: 'PARTIALLY_FILLED',
-            quantity: trade.quantity - closeQty,
-            pnl,
-            pnlPercent,
-            fees: totalFees,
-            notes: noteForLegacyField,
-          },
-    );
-
-    // ---- Append to the per-trade event log (best-effort) ----
-    // A partial close logs PARTIAL_EXIT for the leg. A full close logs the
-    // SPECIFIC exit type so the audit log distinguishes a stop-out from a
-    // target hit from a plain square-off (the whole point of the log) — we
-    // map the exit reason/tag onto SL_HIT / TARGET_HIT, else generic CLOSED.
-    // price = the slice exit price, pnl = cumulative realized P&L,
-    // quantity = the units closed on this leg.
-    const exitTag = (opts.exitReasonTag as string) ?? '';
-    const reasonStr = `${exitTag} ${exitNote ?? ''}`.toLowerCase();
-    const fullCloseType =
-      exitTag === 'HIT_TARGET' || /target/.test(reasonStr)
-        ? TradeEventType.TARGET_HIT
-        : exitTag === 'STOPPED_OUT' || exitTag === 'MOVED_STOP' || /\bsl\b|stop|loss-cut/.test(reasonStr)
-          ? TradeEventType.SL_HIT
-          : TradeEventType.CLOSED;
-    await this.emitTradeEvent({
-      tradeId,
-      eventType: isFullClose ? fullCloseType : TradeEventType.PARTIAL_EXIT,
-      price: exitPrice,
-      quantity: closeQty,
-      pnl,
-      notes: exitTag || exitNote || null,
-    });
-
-    // Mirror the close into the in-memory position tracker: a full close
-    // removes the position, a partial close shrinks it. Both book only THIS
-    // slice's realized P&L (slicePnl) — a prior partial already booked its
-    // own slice, so passing the cumulative pnl would double-count it.
-    if (isFullClose) {
-      this.positionManagerService.removePosition(tradeId, slicePnl);
-    } else {
-      this.positionManagerService.reducePosition(tradeId, closeQty, slicePnl);
-    }
-
-    // Emit updates
-    this.tradeGateway.emitTradeUpdate(updatedTrade);
-
-    this.logger.log(
-      `Trade ${tradeId} ${isFullClose ? 'closed' : 'partially closed'} ` +
-        `(${closeQty} @ ${exitPrice.toFixed(2)}). P&L: ${pnl.toFixed(2)} (${pnlPercent.toFixed(2)}%)`,
-    );
-
-    return updatedTrade;
   }
 
   /**

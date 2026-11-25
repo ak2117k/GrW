@@ -3,6 +3,7 @@ import type { ModuleRef } from '@nestjs/core';
 import type { QuoteResolverLike } from '../../market-data/services/batch-quotes.service';
 import { lookupHubPrices } from '../../market-hub/hub-prices';
 import { isHubExchange, type InstrumentRef } from '../../market-hub/hub.types';
+import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { istYmd } from '../../mbm/domain/chain-snapshot';
 import { quoteIsStale } from '../../message-reader/domain/reader-quote';
 import type { Vocabulary } from '../../signal-intake/domain/vocabulary';
@@ -27,6 +28,8 @@ const keyOf = (r: Pick<WatchRef, 'exchange' | 'token'>) => `${r.exchange.toUpper
  *   a quote older than 5 min during the session is not fresh.
  * - bars15m: SIGNAL_INFO_BARS.intraday15m (the loader the setup packet reads).
  * - underlyingRef: signal-intake infoRefOf (index / NSE cash / MCX front future), cached per underlying per IST day.
+ *   It THROWS when the master or the vocabulary is not loaded / failed (the watch waits); null only when both
+ *   loaded and nothing matched (the watch expires the setup NO_UNDERLYING_REF).
  */
 export class LiveSetupWatchMarket implements SetupWatchMarket {
   private readonly logger = new Logger('SetupWatchMarket');
@@ -49,14 +52,45 @@ export class LiveSetupWatchMarket implements SetupWatchMarket {
     const day = istYmd(now);
     const hit = this.refs.get(u);
     if (hit && hit.day === day && hit.ref) return hit.ref;
-    const [vocab, master] = await Promise.all([
-      this.d.vocab ? this.d.vocab.get().catch(() => null) : Promise.resolve(null),
-      this.d.master ? this.d.master.rows().catch(() => null) : Promise.resolve(null),
-    ]);
+    // An index needs neither the master nor the vocabulary.
+    const idx = INDEX_UNDERLYINGS[u];
+    if (idx) {
+      const ref = { exchange: idx.exchange, token: idx.token, symbol: u };
+      this.refs.set(u, { day, ref });
+      return ref;
+    }
+    // Anything else needs BOTH loaded: a missing / failed / empty one THROWS (the watch waits), never null — null
+    // means "both loaded and nothing matched" and expires the setup (NO_UNDERLYING_REF). Without the vocabulary an
+    // MCX name would fall through to an NSE equity lookup and look like "no line".
+    const [vocab, master] = await Promise.all([this.loadVocab(), this.loadMaster()]);
     const r = infoRefOf(u, vocab, master, now);
     const ref = r ? { exchange: r.exchange, token: r.token, symbol: u } : null;
     this.refs.set(u, { day, ref });
     return ref;
+  }
+
+  private async loadVocab(): Promise<Vocabulary> {
+    if (!this.d.vocab) throw new Error('underlying vocabulary not wired');
+    let v: Vocabulary | null = null;
+    try {
+      v = await this.d.vocab.get();
+    } catch (err) {
+      throw new Error(`underlying vocabulary unavailable: ${errText(err)}`);
+    }
+    if (!v || !v.classOf || v.classOf.size === 0) throw new Error('underlying vocabulary not loaded (empty)');
+    return v;
+  }
+
+  private async loadMaster(): Promise<readonly unknown[]> {
+    if (!this.d.master) throw new Error('instrument master not wired');
+    let m: readonly unknown[] | null = null;
+    try {
+      m = await this.d.master.rows();
+    } catch (err) {
+      throw new Error(`instrument master unavailable: ${errText(err)}`);
+    }
+    if (!m || m.length === 0) throw new Error('instrument master not loaded (empty)');
+    return m;
   }
 
   async ltps(refs: readonly WatchRef[], now: Date): Promise<Map<string, number>> {

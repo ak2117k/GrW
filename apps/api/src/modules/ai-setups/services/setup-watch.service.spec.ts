@@ -431,3 +431,17 @@ describe('SetupWatchService — fix round 1', () => {
     expect(h.store.rows.get('s1')).toMatchObject({ status: 'EXITED', exitReason: 'AI_EXIT', pnl: -300, exitAt: LATER(-1) });
   });
 });
+
+describe('SetupWatchService — fix round 2', () => {
+  it('a close lost to another closer\'s PARTIAL close leaves the row FILLED (the trade is still open)', async () => {
+    const h = harness();
+    filledRow(h);
+    h.setUnderlying(419);
+    h.exec.closeTrade.mockResolvedValueOnce({ status: 'PARTIALLY_FILLED', exitReasonTag: null, pnl: -100, exitTime: null } as never);
+    await h.svc.pass(NOW);
+    expect(h.store.rows.get('s1')).toMatchObject({ status: 'FILLED', tradeId: 'trade-9' });
+    // Next pass: the trade still open and the SL still crossed → closes it for real.
+    await h.svc.pass(LATER(1));
+    expect(h.store.rows.get('s1')).toMatchObject({ status: 'EXITED', exitReason: 'AI_SETUP_SL' });
+  });
+});

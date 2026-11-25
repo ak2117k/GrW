@@ -188,6 +188,15 @@ describe('TradeExecutionService.closeTrade — exit-reason persistence', () => {
     expect(repo.createTradeEvent).toHaveBeenCalledTimes(1);
   });
 
+  it('a paper close that fails after its claim logs an ERROR naming the trade and rethrows', async () => {
+    const paper = module.get(PaperTradeService) as unknown as { simulateOrder: jest.Mock; applyExitAccounting: jest.Mock };
+    paper.simulateOrder.mockRejectedValueOnce(new Error('sim down'));
+    const errSpy = jest.spyOn((service as unknown as { logger: { error: (m: string) => void } }).logger, 'error').mockImplementation(() => undefined);
+    await expect(service.closeTrade('trade_1', { exitReasonTag: 'AI_SETUP_SL', exitPrice: 90 })).rejects.toThrow('sim down');
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/trade_1: paper close claimed but not completed — exitPrice\/pnl may be stale \(sim down\)/));
+    expect(paper.applyExitAccounting).not.toHaveBeenCalled();
+  });
+
   it('a close of a trade another close already claimed books nothing', async () => {
     const paper = module.get(PaperTradeService) as unknown as { applyExitAccounting: jest.Mock };
     repo.claimClose.mockResolvedValueOnce(false);

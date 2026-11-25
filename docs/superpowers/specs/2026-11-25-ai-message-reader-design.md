@@ -182,6 +182,8 @@ Plan: deploy after 15:35 IST in `shadow`, check one session (latency, verdict qu
 `on` changes the live signal judge's packet (new judge prompt version), so before `on` the build includes
 a **judge replay**: that session's signal calls judged with and without `verifiedNotes`, graded the same
 way judge effort was tuned (memory: signal-judge-effort). `on` only if the with-notes run is not worse.
+(2026-11-25 final review: both arms are re-judged fresh with the same model / effort, 3 runs each, majority
+verdict; GO needs ≥ 20 graded decisions, pooled across shadow sessions if one is not enough.)
 
 ## 6. Decided by the owner
 

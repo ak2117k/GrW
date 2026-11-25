@@ -3,24 +3,28 @@
  * 2026-11-25-ai-message-reader-design §5.8). Offline: reads a JSON fixture dumped read-only from prod, never
  * touches a database or the broker; the only outside call is the judge on Vertex. Writes nothing but stdout.
  *
- *   npx tsx apps/api/scripts/notes-judge-replay.ts <notes-replay.fixture.json> --session YYYY-MM-DD \
- *     [--effort low|medium|high] [--model <id>] [--min-confidence N] [--concurrency N] > notes-replay.md
+ *   npx tsx apps/api/scripts/notes-judge-replay.ts <fixture.json> [<fixture.json> …] --session YYYY-MM-DD \
+ *     [--session YYYY-MM-DD …] [--runs N] [--effort low|medium|high] [--model <id>] [--min-confidence N] \
+ *     [--concurrency N] > notes-replay.md
  *
- * The fixture comes from apps/api/scripts/sql/export-notes-replay.sql (one session's judged signal_decisions with
- * their paper trade's price path, and that session's message_readings). Per decision:
- *   - WITHOUT notes = the STORED verdict (no re-call). The stored packet must be a pre-reader one
- *     (signal-judge-v6 / signal-judge-v8-take); a packet that already carried notes is excluded.
- *   - WITH notes = the stored packet re-judged with channelViews.verifiedNotes as the live judge builds it at
+ * Each fixture comes from apps/api/scripts/sql/export-notes-replay.sql (one session's judged signal_decisions with
+ * their paper trade's price path, and that session's message_readings). Several sessions are replayed together
+ * (repeat --session, one fixture per session) so the sample can reach the GO minimum. Per decision, BOTH arms are
+ * judged fresh with the same model and effort, N runs each (--runs, default 3):
+ *   - WITHOUT notes = the stored pre-reader packet (signal-judge-v6 / signal-judge-v8-take) and the pre-reader
+ *     prompt (signalJudgeSystem(mode, minConfidence, false)); a packet that already carried notes is excluded.
+ *   - WITH notes = the same packet with channelViews.verifiedNotes as the live judge builds it at
  *     MESSAGE_READER=on: selectVerifiedNotes over the readings stored at or before the decision time (posted ≤ it
  *     AND read ≤ it — what the live judge could have seen), sector null as the live call passes, the notes
- *     prompt (signalJudgeSystem(mode, minConfidence, true)) and promptVersion (v7 / v9-take). Same request shape
- *     as SignalJudgeService; model = the stored record's model (else SIGNAL_JUDGE_MODEL / the default), effort
- *     = --effort, else SIGNAL_JUDGE_EFFORT, else medium (prod since 2026-11-20).
- *   - Both verdicts go through judgeDecision (the same floor and cluster boost) → TAKE / SKIP, and each is
- *     graded by the FAIR re-score path (scripts/lib/judge-fixture → domain/fair-inputs → domain/fair-score): a
- *     TAKE earns the cap-sized 1-lot outcome on the stored path, a SKIP earns ₹0.
- * A row with no gradeable path is UNSCORABLE: listed, never counted. Verdict: GO only if at least one row was
- * compared, no with-notes call failed, and with-notes net ≥ without-notes net.
+ *     prompt (signalJudgeSystem(mode, minConfidence, true)) and promptVersion (v7 / v9-take).
+ *   Same request shape as SignalJudgeService; model = --model, else the stored record's model (else the
+ *   default), effort = --effort, else SIGNAL_JUDGE_EFFORT, else medium (prod since 2026-11-20).
+ *   - Every run goes through judgeDecision (the same floor and cluster boost) → TAKE / SKIP; an arm's decision is
+ *     the MAJORITY of its successful runs (a tie → SKIP). Each arm's decision is graded by the FAIR re-score
+ *     path (scripts/lib/judge-fixture → domain/fair-inputs → domain/fair-score): a TAKE earns the cap-sized
+ *     1-lot outcome on the stored path, a SKIP earns ₹0. The STORED live verdict is only a reported column.
+ * A row with no gradeable path is UNSCORABLE: listed, never counted. Verdict: GO only with ≥ 20 graded decisions
+ * (below that "LOW SAMPLE — NO-GO"), no arm with every run failed, and with-notes net ≥ without-notes net.
  *
  * Vertex env: VERTEX_AI_PROJECT_ID, VERTEX_AI_LOCATION (default global), GOOGLE_APPLICATION_CREDENTIALS.
  */
@@ -47,6 +51,10 @@ import { fairOfRow, type JudgeFixtureRow } from './lib/judge-fixture';
 const JUDGE_MAX_TOKENS = 4_000;
 /** = signal-trader.repository's VERIFIED_NOTES_SOURCE (the channelViews field the live judge sees). */
 const VERIFIED_NOTES_SOURCE = 'message_readings (AI present-state check), today';
+/** GO needs at least this many graded decisions (across sessions). */
+export const MIN_GRADED = 20;
+/** Default runs per arm (majority verdict). */
+export const DEFAULT_RUNS = 3;
 
 export interface ReplayReading {
   messageId: string;
@@ -76,8 +84,11 @@ export type Effort = 'low' | 'medium' | 'high';
 export type JudgeCall = (request: TransportRequest) => Promise<TransportMessage>;
 
 export interface ReplayOptions {
-  session: string;
+  /** The IST sessions to replay (decisions outside them are ignored). */
+  sessions: string[];
   call: JudgeCall;
+  /** Fresh runs per arm (majority verdict; ties → SKIP). Default 3. */
+  runs?: number;
   /** Overrides the stored record's model. */
   model?: string;
   effort: Effort;
@@ -89,7 +100,11 @@ export interface ReplayOptions {
 
 type Decision = 'TAKE' | 'SKIP';
 interface Side {
-  verdict: JudgeVerdict;
+  /** Each successful run's verdict and its judgeDecision. */
+  runs: Array<{ verdict: JudgeVerdict; decision: Decision }>;
+  /** Runs that failed (after one retry each). */
+  failedRuns: number;
+  /** Majority of the successful runs; a tie → SKIP. */
   decision: Decision;
   fair: FairCheck | null;
   /** The decision's graded 1-lot outcome: TAKE = the cap-sized outcome, SKIP = 0; null = unscorable. */
@@ -97,20 +112,24 @@ interface Side {
 }
 export interface ReplayRow {
   decisionId: string;
+  session: string;
   at: string;
   symbol: string;
   underlying: string;
   mode: 'take' | 'skip';
   notes: VerifiedNote[];
+  /** The live verdict stored at the time (reported only, never graded); null = the judge was unavailable then. */
+  stored: { verdict: JudgeVerdict; decision: Decision } | null;
   without: Side;
   with: Side;
   unscorable: string | null;
 }
 export interface ReplayReport {
-  session: string;
+  sessions: string[];
   model: string;
   effort: Effort;
   minConfidence: number;
+  runs: number;
   rows: ReplayRow[];
   /** Compared, graded rows only. */
   withNet: number;
@@ -119,8 +138,12 @@ export interface ReplayReport {
   flips: ReplayRow[];
   unscorable: ReplayRow[];
   excluded: Array<{ decisionId: string; reason: string }>;
+  /** Decisions where an arm had no successful run (blocks GO). */
   failed: Array<{ decisionId: string; error: string }>;
+  /** Individual failed runs across all arms (a partial failure still has a majority of the rest). */
+  failedRuns: number;
   otherSession: number;
+  lowSample: boolean;
   go: boolean;
   reason: string;
 }
@@ -155,7 +178,7 @@ export function notesAt(readings: readonly ReplayReading[], underlying: string, 
       claims: Array.isArray(r.claims) ? (r.claims as Claim[]) : [],
       summary: r.summary,
     }));
-  // sector null: the live call passes none (SECTOR notes reach the judge only via MARKET), as signal-trader.service does.
+  // sector null: the live call passes none (sector claims are not matched), as signal-trader.service does.
   return selectVerifiedNotes(rows, { underlying: underlying.trim().toUpperCase(), sector: null, now: at });
 }
 
@@ -165,6 +188,19 @@ export function packetWithNotes(packet: Record<string, unknown>, mode: 'take' | 
   copy.promptVersion = signalJudgePromptVersion(mode, true);
   copy.channelViews = { ...obj(copy.channelViews), verifiedNotes: notes, verifiedNotesSource: VERIFIED_NOTES_SOURCE };
   return copy;
+}
+
+/** The stored pre-reader packet as the live judge sends it with MESSAGE_READER off / shadow. Never mutates the input. */
+export function packetWithout(packet: Record<string, unknown>, mode: 'take' | 'skip'): Record<string, unknown> {
+  const copy = JSON.parse(JSON.stringify(packet)) as Record<string, unknown>;
+  copy.promptVersion = signalJudgePromptVersion(mode, false);
+  return copy;
+}
+
+/** Majority of the runs' decisions; a tie (or no run) → SKIP. */
+export function majority(decisions: readonly Decision[]): Decision {
+  const takes = decisions.filter((d) => d === 'TAKE').length;
+  return takes > decisions.length - takes ? 'TAKE' : 'SKIP';
 }
 
 /** The request SignalJudgeService.judge builds (same schema, max tokens, effort placement). */
@@ -196,12 +232,14 @@ function grade(row: NotesReplayRow, decision: Decision): { fair: FairCheck | nul
   return { fair, pnl: decision === 'TAKE' ? pnl : 0, why: null };
 }
 
-/** GO only with at least one compared row, no failed with-notes call, and with-notes net ≥ without-notes net. */
-export function goVerdict(i: { withNet: number; withoutNet: number; compared: number; failed: number }): { go: boolean; reason: string } {
-  if (i.compared === 0) return { go: false, reason: 'no scorable decision to compare' };
-  if (i.failed > 0) return { go: false, reason: `${i.failed} with-notes call(s) failed — re-run before deciding` };
-  if (i.withNet >= i.withoutNet) return { go: true, reason: 'with-notes net is not worse' };
-  return { go: false, reason: 'with-notes net is worse' };
+/** GO only with ≥ MIN_GRADED graded decisions, no arm with every run failed, and with-notes net ≥ without-notes net. */
+export function goVerdict(i: { withNet: number; withoutNet: number; compared: number; failed: number }): { go: boolean; lowSample: boolean; reason: string } {
+  if (i.failed > 0) return { go: false, lowSample: false, reason: `${i.failed} decision(s) with an arm whose every run failed — re-run before deciding` };
+  if (i.compared < MIN_GRADED) {
+    return { go: false, lowSample: true, reason: `LOW SAMPLE — NO-GO: ${i.compared} graded decision(s), at least ${MIN_GRADED} needed (add sessions)` };
+  }
+  if (i.withNet >= i.withoutNet) return { go: true, lowSample: false, reason: 'with-notes net is not worse' };
+  return { go: false, lowSample: false, reason: 'with-notes net is worse' };
 }
 
 async function pool<T>(items: readonly T[], n: number, fn: (x: T) => Promise<void>): Promise<void> {
@@ -212,20 +250,27 @@ async function pool<T>(items: readonly T[], n: number, fn: (x: T) => Promise<voi
   await Promise.all(Array.from({ length: Math.max(1, Math.min(n, items.length)) }, worker));
 }
 
-export async function replayNotes(fx: NotesReplayFixture, o: ReplayOptions): Promise<ReplayReport> {
+export async function replayNotes(input: NotesReplayFixture | readonly NotesReplayFixture[], o: ReplayOptions): Promise<ReplayReport> {
+  const fixtures = Array.isArray(input) ? (input as readonly NotesReplayFixture[]) : [input as NotesReplayFixture];
+  const sessions = new Set(o.sessions);
+  const runs = Math.max(1, Math.floor(o.runs ?? DEFAULT_RUNS));
   const cfg = { judgeMinConfidence: o.minConfidence, strongClusterBoost: o.strongClusterBoost, strongChannels: o.strongChannels };
   const excluded: ReplayReport['excluded'] = [];
   const failed: ReplayReport['failed'] = [];
   const rows: ReplayRow[] = [];
   let otherSession = 0;
+  let failedRuns = 0;
   const models = new Set<string>();
-  type Job = { r: NotesReplayRow; packet: Record<string, unknown>; at: Date; mode: 'take' | 'skip'; stored: JudgeVerdict };
+  // Notes only ever come from the decision's own IST day (selectVerifiedNotes), so the readings can be pooled.
+  const readings = fixtures.flatMap((f) => f.readings ?? []);
+  type Job = { r: NotesReplayRow; packet: Record<string, unknown>; at: Date; session: string; mode: 'take' | 'skip'; stored: JudgeVerdict | null };
   const jobs: Job[] = [];
-  for (const r of fx.decisions) {
+  for (const r of fixtures.flatMap((f) => f.decisions ?? [])) {
     const judge = obj(r.judge);
     const packet = obj(judge.packet);
     const at = new Date(typeof packet.at === 'string' ? packet.at : r.createdAt);
-    if (!Number.isFinite(at.getTime()) || istYmd(at) !== o.session) {
+    const session = Number.isFinite(at.getTime()) ? istYmd(at) : '';
+    if (!sessions.has(session)) {
       otherSession++;
       continue;
     }
@@ -238,12 +283,8 @@ export async function replayNotes(fx: NotesReplayFixture, o: ReplayOptions): Pro
       excluded.push({ decisionId: r.decisionId, reason: `stored packet ${String(packet.promptVersion)} is not a pre-reader prompt (v6 / v8-take) — nothing to compare against` });
       continue;
     }
-    const stored = storedVerdict(judge);
-    if (!stored) {
-      excluded.push({ decisionId: r.decisionId, reason: `no stored verdict (${String(judge.unavailable ?? judge.reason ?? 'judge unavailable')})` });
-      continue;
-    }
-    jobs.push({ r, packet, at, mode, stored });
+    // The stored verdict is only reported: a decision whose live judge was unavailable is still replayed.
+    jobs.push({ r, packet, at, session, mode, stored: storedVerdict(judge) });
   }
 
   const cluster = (p: Record<string, unknown>) => {
@@ -251,35 +292,60 @@ export async function replayNotes(fx: NotesReplayFixture, o: ReplayOptions): Pro
     return { agreeCount: Number(c.agreeCount) || 1, conflict: c.conflict === true };
   };
 
-  await pool(jobs, o.concurrency ?? 4, async ({ r, packet, at, mode, stored }) => {
+  await pool(jobs, o.concurrency ?? 4, async ({ r, packet, at, session, mode, stored }) => {
     const underlying = String(r.underlying ?? r.instrument?.name ?? '');
-    const notes = notesAt(fx.readings, underlying, at);
+    const notes = notesAt(readings, underlying, at);
     const model = o.model ?? (typeof obj(r.judge).model === 'string' ? (obj(r.judge).model as string) : SIGNAL_DEFAULTS.judgeModel);
     models.add(model);
-    const request = judgeRequest({ packet: packetWithNotes(packet, mode, notes), system: signalJudgeSystem(mode, o.minConfidence, true), model, effort: o.effort });
-    let fresh: JudgeVerdict | null = null;
-    let lastErr = '';
-    for (let attempt = 0; attempt < 2 && !fresh; attempt++) {
-      try {
-        fresh = parseJudgeVerdict(await o.call(request));
-      } catch (e) {
-        lastErr = errText(e);
+    const c = cluster(packet);
+    const decide = (v: JudgeVerdict): Decision => (judgeDecision(v, c, cfg).take ? 'TAKE' : 'SKIP');
+    // Both arms fresh, same model and effort; only the notes (and their prompt line) differ.
+    const requests = {
+      without: judgeRequest({ packet: packetWithout(packet, mode), system: signalJudgeSystem(mode, o.minConfidence, false), model, effort: o.effort }),
+      with: judgeRequest({ packet: packetWithNotes(packet, mode, notes), system: signalJudgeSystem(mode, o.minConfidence, true), model, effort: o.effort }),
+    };
+    const arms = { without: { runs: [] as Side['runs'], failedRuns: 0, lastErr: '' }, with: { runs: [] as Side['runs'], failedRuns: 0, lastErr: '' } };
+    for (let k = 0; k < runs; k++) {
+      for (const arm of ['without', 'with'] as const) {
+        let v: JudgeVerdict | null = null;
+        for (let attempt = 0; attempt < 2 && !v; attempt++) {
+          try {
+            v = parseJudgeVerdict(await o.call(requests[arm]));
+          } catch (e) {
+            arms[arm].lastErr = errText(e);
+          }
+        }
+        if (v) arms[arm].runs.push({ verdict: v, decision: decide(v) });
+        else arms[arm].failedRuns++;
       }
     }
-    if (!fresh) {
-      failed.push({ decisionId: r.decisionId, error: lastErr });
+    failedRuns += arms.without.failedRuns + arms.with.failedRuns;
+    const dead = (['without', 'with'] as const).filter((a) => arms[a].runs.length === 0);
+    if (dead.length) {
+      failed.push({ decisionId: r.decisionId, error: dead.map((a) => `${a}-notes: ${arms[a].lastErr}`).join('; ') });
       return;
     }
-    const c = cluster(packet);
-    const side = (v: JudgeVerdict): Side => {
-      const decision: Decision = judgeDecision(v, c, cfg).take ? 'TAKE' : 'SKIP';
+    const side = (a: (typeof arms)['with']): Side => {
+      const decision = majority(a.runs.map((x) => x.decision));
       const g = grade(r, decision);
-      return { verdict: v, decision, fair: g.fair, pnl: g.pnl };
+      return { runs: a.runs, failedRuns: a.failedRuns, decision, fair: g.fair, pnl: g.pnl };
     };
-    const without = side(stored);
-    const withN = side(fresh);
+    const without = side(arms.without);
+    const withN = side(arms.with);
     const unscorable = without.pnl === null || withN.pnl === null ? grade(r, without.decision).why ?? grade(r, withN.decision).why ?? 'unscorable' : null;
-    rows.push({ decisionId: r.decisionId, at: at.toISOString(), symbol: r.instrument?.symbol ?? String(obj(obj(packet.plan)).contract ?? '—'), underlying, mode, notes, without, with: withN, unscorable });
+    rows.push({
+      decisionId: r.decisionId,
+      session,
+      at: at.toISOString(),
+      symbol: r.instrument?.symbol ?? String(obj(obj(packet.plan)).contract ?? '—'),
+      underlying,
+      mode,
+      notes,
+      stored: stored ? { verdict: stored, decision: decide(stored) } : null,
+      without,
+      with: withN,
+      unscorable,
+    });
   });
 
   rows.sort((a, b) => a.at.localeCompare(b.at) || a.decisionId.localeCompare(b.decisionId));
@@ -288,10 +354,11 @@ export async function replayNotes(fx: NotesReplayFixture, o: ReplayOptions): Pro
   const withoutNet = r2(scored.reduce((s, x) => s + (x.without.pnl as number), 0));
   const v = goVerdict({ withNet, withoutNet, compared: scored.length, failed: failed.length });
   return {
-    session: o.session,
+    sessions: [...sessions].sort(),
     model: [...models].join(', ') || o.model || '—',
     effort: o.effort,
     minConfidence: o.minConfidence,
+    runs,
     rows,
     withNet,
     withoutNet,
@@ -300,7 +367,9 @@ export async function replayNotes(fx: NotesReplayFixture, o: ReplayOptions): Pro
     unscorable: rows.filter((x) => x.unscorable !== null),
     excluded,
     failed,
+    failedRuns,
     otherSession,
+    lowSample: v.lowSample,
     go: v.go,
     reason: v.reason,
   };
@@ -312,37 +381,38 @@ const cell = (s: string) => s.replace(/\|/g, '/').replace(/\s+/g, ' ').slice(0, 
 
 export function renderNotesReplay(r: ReplayReport): string {
   const L: string[] = [];
-  L.push(`**${r.go ? 'GO' : 'NO-GO'}** — ${r.reason}: with-notes net ${inr(r.withNet)} vs without-notes net ${inr(r.withoutNet)} over ${r.compared} graded decision(s).`);
+  L.push(`**${r.lowSample ? 'LOW SAMPLE — NO-GO' : r.go ? 'GO' : 'NO-GO'}** — ${r.reason}: with-notes net ${inr(r.withNet)} vs without-notes net ${inr(r.withoutNet)} over ${r.compared} graded decision(s) (GO needs ≥ ${MIN_GRADED}).`);
   L.push('');
-  L.push(`# Signal judge replay with and without verified notes — session ${r.session}`);
+  L.push(`# Signal judge replay with and without verified notes — session(s) ${r.sessions.join(', ')}`);
   L.push('');
-  L.push(`Model ${r.model}, effort ${r.effort}, min confidence ${r.minConfidence}. Without notes = the stored verdict; with notes = the stored packet re-judged with channelViews.verifiedNotes as of the decision time (notes prompt v7 / v9-take). Each TAKE graded by the FAIR cap-sized 1-lot outcome (domain/fair-score); a SKIP = ₹0. Script: apps/api/scripts/notes-judge-replay.ts.`);
+  L.push(`Model ${r.model}, effort ${r.effort}, min confidence ${r.minConfidence}, ${r.runs} run(s) per arm. Both arms re-judged fresh on the stored packet with the same model and effort: without notes = the pre-reader prompt (v6 / v8-take); with notes = channelViews.verifiedNotes as of the decision time (notes prompt v7 / v9-take). An arm's decision = the majority of its runs (tie → SKIP). Each TAKE graded by the FAIR cap-sized 1-lot outcome (domain/fair-score); a SKIP = ₹0. The stored live verdict is shown for reference only. Script: apps/api/scripts/notes-judge-replay.ts.`);
   L.push('');
   L.push('## Totals');
   L.push('');
   L.push('| | decisions | TAKEs | net (1 lot) |');
   L.push('|---|---|---|---|');
   const scored = r.rows.filter((x) => x.unscorable === null);
-  L.push(`| without notes (stored) | ${scored.length} | ${scored.filter((x) => x.without.decision === 'TAKE').length} | ${inr(r.withoutNet)} |`);
+  L.push(`| without notes (re-run) | ${scored.length} | ${scored.filter((x) => x.without.decision === 'TAKE').length} | ${inr(r.withoutNet)} |`);
   L.push(`| with notes (re-run) | ${scored.length} | ${scored.filter((x) => x.with.decision === 'TAKE').length} | ${inr(r.withNet)} |`);
   L.push('');
-  L.push(`Re-judged: ${r.rows.length}. Unscorable (listed, not counted): ${r.unscorable.length}. Excluded: ${r.excluded.length}. With-notes calls failed: ${r.failed.length}. Rows from other sessions ignored: ${r.otherSession}.`);
+  L.push(`Re-judged: ${r.rows.length}. Unscorable (listed, not counted): ${r.unscorable.length}. Excluded: ${r.excluded.length}. Decisions with a dead arm: ${r.failed.length}. Failed runs (all arms): ${r.failedRuns}. Rows from other sessions ignored: ${r.otherSession}.`);
   L.push('');
   L.push(`## Flips (${r.flips.length})`);
   L.push('');
   if (r.flips.length === 0) L.push('None.');
   for (const f of r.flips) {
     const delta = f.unscorable === null ? inr((f.with.pnl as number) - (f.without.pnl as number)) : `unscorable (${cell(f.unscorable)})`;
-    L.push(`- ${istHm(f.at)} ${f.symbol}: ${f.without.decision} → ${f.with.decision}, Δ ${delta}. Notes: ${f.notes.length}. With-notes first reason: ${cell(f.with.verdict.reasons[0] ?? '—')}`);
+    L.push(`- ${f.session} ${istHm(f.at)} ${f.symbol}: ${f.without.decision} → ${f.with.decision}, Δ ${delta}. Notes: ${f.notes.length}. With-notes first reason: ${cell(f.with.runs[0]?.verdict.reasons[0] ?? '—')}`);
   }
   L.push('');
   L.push('## Per decision');
   L.push('');
-  L.push('| IST | symbol | prompt | notes | without: verdict → decision | outcome | with: verdict → decision | outcome | why unscorable |');
-  L.push('|---|---|---|---|---|---|---|---|---|');
+  L.push('| session | IST | symbol | prompt | notes | stored (live) | without: runs → decision | outcome | with: runs → decision | outcome | why unscorable |');
+  L.push('|---|---|---|---|---|---|---|---|---|---|---|');
   for (const x of r.rows) {
-    const s = (d: Side) => `${d.verdict.verdict} ${d.verdict.confidence} → ${d.decision}`;
-    L.push(`| ${istHm(x.at)} | ${x.symbol} | ${x.mode} | ${x.notes.length} | ${s(x.without)} | ${inr(x.without.pnl)} | ${s(x.with)} | ${inr(x.with.pnl)} | ${x.unscorable ? cell(x.unscorable) : ''} |`);
+    const s = (d: Side) => `${d.runs.map((v) => `${v.verdict.verdict[0]}${v.verdict.confidence}`).join(' ')}${d.failedRuns ? ` (+${d.failedRuns} failed)` : ''} → ${d.decision}`;
+    const st = x.stored ? `${x.stored.verdict.verdict} ${x.stored.verdict.confidence} → ${x.stored.decision}` : '—';
+    L.push(`| ${x.session} | ${istHm(x.at)} | ${x.symbol} | ${x.mode} | ${x.notes.length} | ${st} | ${s(x.without)} | ${inr(x.without.pnl)} | ${s(x.with)} | ${inr(x.with.pnl)} | ${x.unscorable ? cell(x.unscorable) : ''} |`);
   }
   if (r.excluded.length) {
     L.push('');
@@ -352,7 +422,7 @@ export function renderNotesReplay(r: ReplayReport): string {
   }
   if (r.failed.length) {
     L.push('');
-    L.push('## Failed with-notes calls');
+    L.push('## Decisions with an arm whose every run failed');
     L.push('');
     for (const e of r.failed) L.push(`- ${e.decisionId}: ${cell(e.error)}`);
   }
@@ -364,12 +434,27 @@ function flag(argv: string[], name: string): string | null {
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : null;
 }
 
+/** Every value of a repeatable flag. */
+function flags(argv: string[], name: string): string[] {
+  return argv.flatMap((a, i) => (a === name && i + 1 < argv.length ? [argv[i + 1]] : []));
+}
+
+const VALUED = new Set(['--session', '--effort', '--model', '--min-confidence', '--concurrency', '--runs']);
+
+/** CLI → fixture files and sessions (exported for the tests). */
+export function parseReplayArgs(argv: string[]): { files: string[]; sessions: string[] } | null {
+  const files = argv.filter((a, i) => !a.startsWith('--') && !(i > 0 && VALUED.has(argv[i - 1])));
+  const sessions = [...new Set(flags(argv, '--session'))];
+  if (files.length === 0 || sessions.length === 0 || !sessions.every((s) => /^\d{4}-\d{2}-\d{2}$/.test(s))) return null;
+  return { files, sessions };
+}
+
 async function main(argv: string[]): Promise<number> {
-  const valued = new Set(['--session', '--effort', '--model', '--min-confidence', '--concurrency']);
-  const file = argv.find((a, i) => !a.startsWith('--') && !(i > 0 && valued.has(argv[i - 1])));
-  const session = flag(argv, '--session');
-  if (!file || !session || !/^\d{4}-\d{2}-\d{2}$/.test(session)) {
-    console.error('Usage: npx tsx apps/api/scripts/notes-judge-replay.ts <notes-replay.fixture.json> --session YYYY-MM-DD [--effort low|medium|high] [--model id] [--min-confidence N] [--concurrency N]');
+  const args = parseReplayArgs(argv);
+  if (!args) {
+    console.error(
+      'Usage: npx tsx apps/api/scripts/notes-judge-replay.ts <fixture.json> [<fixture.json> …] --session YYYY-MM-DD [--session YYYY-MM-DD …] [--runs N] [--effort low|medium|high] [--model id] [--min-confidence N] [--concurrency N]',
+    );
     return 1;
   }
   const effortArg = flag(argv, '--effort');
@@ -380,26 +465,32 @@ async function main(argv: string[]): Promise<number> {
   const effort = effortOf(effortArg) ?? effortOf(process.env.SIGNAL_JUDGE_EFFORT) ?? 'medium';
   const minConfidence = Number(flag(argv, '--min-confidence') ?? process.env.SIGNAL_JUDGE_MIN_CONFIDENCE ?? SIGNAL_DEFAULTS.judgeMinConfidence);
   const concurrency = Number(flag(argv, '--concurrency') ?? 4);
-  if (!Number.isFinite(minConfidence) || !Number.isInteger(concurrency) || concurrency < 1) {
-    console.error('bad --min-confidence / --concurrency');
+  const runs = Number(flag(argv, '--runs') ?? DEFAULT_RUNS);
+  if (!Number.isFinite(minConfidence) || !Number.isInteger(concurrency) || concurrency < 1 || !Number.isInteger(runs) || runs < 1) {
+    console.error('bad --min-confidence / --concurrency / --runs');
     return 1;
   }
-  let fx: NotesReplayFixture;
-  try {
-    fx = JSON.parse(readFileSync(file, 'utf8')) as NotesReplayFixture;
-  } catch (e) {
-    console.error(`${file}: ${errText(e)}`);
-    return 1;
-  }
-  if (fx.session && fx.session !== session) {
-    console.error(`${file} was exported for session ${fx.session}, not ${session}`);
-    return 1;
+  const fixtures: NotesReplayFixture[] = [];
+  for (const file of args.files) {
+    let fx: NotesReplayFixture;
+    try {
+      fx = JSON.parse(readFileSync(file, 'utf8')) as NotesReplayFixture;
+    } catch (e) {
+      console.error(`${file}: ${errText(e)}`);
+      return 1;
+    }
+    if (fx.session && !args.sessions.includes(fx.session)) {
+      console.error(`${file} was exported for session ${fx.session}, not one of ${args.sessions.join(', ')}`);
+      return 1;
+    }
+    fixtures.push(fx);
   }
   // Loaded here so the tests (fake transport) never load the Vertex SDK.
   const { AnthropicVertexProvider, createVertexClient, vertexSettingsFrom } = await import('../src/modules/ai-gateway/providers/anthropic-vertex.provider');
   const vertex = new AnthropicVertexProvider(createVertexClient(vertexSettingsFrom(process.env)));
-  const report = await replayNotes(fx, {
-    session,
+  const report = await replayNotes(fixtures, {
+    sessions: args.sessions,
+    runs,
     call: async (req) => (await vertex.send(req)).message,
     model: flag(argv, '--model') ?? undefined,
     effort,

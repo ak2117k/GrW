@@ -65,7 +65,7 @@ import {
 } from '../../exit-discipline/exec-price-confirm';
 import { EMPTY_SPIKE, solveCycleSpike, type SpikeMemory } from './cycle-spike';
 import { exposureOf } from '../../exit-discipline/exposure';
-import { ceilingTableOn, classCeilingFor, hardLossNoiseUnit, lossLimitForTrade } from '../../../common/utils/loss-limit';
+import { classCeilingFor, hardLossNoiseUnit, lossLimitForTrade, usesN15Band } from '../../../common/utils/loss-limit';
 import { defaultLadderStop, ladderReading, ladderTargets, parseProfitLockConfig, profitLockMinMove, type LadderReading, type PacketLadder } from '../../exit-discipline/target-ladder';
 import { LADDER_PLANS, type LadderPlan, type LadderPlanReader } from '../ports/ladder-plans.port';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
@@ -1354,7 +1354,7 @@ export class SentinelCycleService {
     const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side, valueFactor: valueFactorOf(entry) });
     const hold = this.gateCfg?.hold ?? this.futileCfg?.hold;
     // The band's unit: N1 today; N15 with the table on (a missing N15 ⇒ BAND_UNMEASURED, never N1).
-    const nUnit = ceilingTableOn(process.env) ? 'N15' : 'N';
+    const nUnit = usesN15Band(entry.symbol, entry.exchange, process.env) ? 'N15' : 'N';
     const loss = hardLossReading({
       netPnl: green.netPnl,
       cfg,
@@ -1362,7 +1362,7 @@ export class SentinelCycleService {
       underlying: tick.underlyingLtp,
       entryUnderlying: tick.entryUnderlying ?? null,
       bestUnderlying: tick.anchors?.best?.underlying ?? null,
-      nUnderlying: hardLossNoiseUnit(process.env, tick.noise?.underlying1m?.n, tick.underlyingN15),
+      nUnderlying: hardLossNoiseUnit(process.env, entry.symbol, entry.exchange, tick.noise?.underlying1m?.n, tick.underlyingN15),
       // The classifier plug (NoiseOpinion): nothing supplies one yet ⇒ the N test.
       noise: null,
     });
@@ -1539,7 +1539,7 @@ export class SentinelCycleService {
         : Promise.resolve(null);
     const from = tick.anchors?.best;
     const loss = r.loss;
-    const nUnit = ceilingTableOn(process.env) ? 'N15' : 'N';
+    const nUnit = usesN15Band(entry.symbol, entry.exchange, process.env) ? 'N15' : 'N';
     const detail =
       r.rule === 'MAX_LOSS'
         ? loss?.band === 'CAP'

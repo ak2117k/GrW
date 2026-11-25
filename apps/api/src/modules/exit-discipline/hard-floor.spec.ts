@@ -262,7 +262,7 @@ describe('catastrophe floor: the 3×N15 band up to the class ceiling (HARD_LOSS_
     underlying: Math.round((23812.25 + nAgainst * N15) * 100) / 100,
     entryUnderlying: 23812.25,
     bestUnderlying: 23812.25,
-    nUnderlying: hardLossNoiseUnit(ON, N1, n15),
+    nUnderlying: hardLossNoiseUnit(ON, 'NIFTY09NOV2623750PE', 'NFO', N1, n15),
   });
 
   it('loss −2,500, underlying 2.9×N15 against → HOLD_UNDER_N (it is 8.1 N1 — the 1-minute unit would have sold)', () => {

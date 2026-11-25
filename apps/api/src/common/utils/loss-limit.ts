@@ -143,12 +143,19 @@ export function classCeilingFor(symbol: string | null | undefined, exchange: str
 }
 
 /**
- * The noise unit the hard-loss band measures the underlying's move in. Table off ⇒ `n1` (the 1-minute unit,
- * exactly as before 2026-11-25). Table on ⇒ `n15` (ATR14 of the underlying's 15-minute session bars) — and a
- * missing N15 stays missing (null ⇒ hardLossReading's BAND_UNMEASURED: exit at the limit), never N1.
+ * The noise unit the hard-loss band measures the underlying's move in, decided PER POSITION. The position's
+ * class is listed in HARD_LOSS_CEILING_BY_CLASS ⇒ `n15` (ATR14 of the underlying's 15-minute session bars) — and
+ * a missing N15 stays missing (null ⇒ hardLossReading's BAND_UNMEASURED: exit at the limit), never N1. Table off,
+ * or the class not listed (a partial table, OTHER) ⇒ `n1`, the 1-minute unit, exactly as before 2026-11-25.
  */
-export function hardLossNoiseUnit(env: Env, n1: number | null | undefined, n15: number | null | undefined): number | null {
-  return ceilingTableOn(env) ? (n15 ?? null) : (n1 ?? null);
+export function usesN15Band(symbol: string | null | undefined, exchange: string | null | undefined, env: Env = process.env): boolean {
+  return classCeilingFor(symbol, exchange, env) !== null;
+}
+
+export function hardLossNoiseUnit(
+  env: Env, symbol: string | null | undefined, exchange: string | null | undefined, n1: number | null | undefined, n15: number | null | undefined,
+): number | null {
+  return usesN15Band(symbol, exchange, env) ? (n15 ?? null) : (n1 ?? null);
 }
 
 /**
@@ -165,11 +172,20 @@ export function lossLimitFor(underlying: string | null, env?: Env): LossLimit;
 export function lossLimitFor(underlying: string | null, exchange: string | null | undefined, env?: Env): LossLimit;
 export function lossLimitFor(underlying: string | null, a?: Env | string | null, b?: Env): LossLimit {
   const [exchange, env] = typeof a === 'object' && a !== null ? [null, a] : [a ?? null, b ?? process.env];
-  // The defaults are hard-floor.ts's own parse (one source of truth for HARD_LOSS_EXIT_RUPEES / _CAP_RUPEES).
-  const { limit, cap } = hardLossConfig(env);
   // Catastrophe floor (2026-11-25): a listed class keeps the ₹limit and gets its ceiling as the cap (band on).
   const ceiling = classCeilingFor(underlying, exchange, env);
-  if (ceiling !== null) return { limit, cap: ceiling };
+  if (ceiling !== null) return { limit: hardLossConfig(env).limit, cap: ceiling };
+  return lossLimitBeforeCeilings(underlying, env);
+}
+
+/**
+ * TODAY'S per-trade figures, blind to HARD_LOSS_CEILING_BY_CLASS: HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING, else
+ * HARD_LOSS_EXIT_RUPEES / HARD_LOSS_CAP_RUPEES. The exit gate's HARD_MAX_LOSS reads this — the table moves the
+ * sentinel's hard-loss exit only; moving the gate's hard-risk clause is a separate owner decision.
+ */
+export function lossLimitBeforeCeilings(underlying: string | null, env: Env = process.env): LossLimit {
+  // The defaults are hard-floor.ts's own parse (one source of truth for HARD_LOSS_EXIT_RUPEES / _CAP_RUPEES).
+  const { limit, cap } = hardLossConfig(env);
   const key = underlyingKey(underlying);
   const listed = key !== null ? parseLossLimitsByUnderlying(env.HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING)[key] : undefined;
   if (listed !== undefined) return { limit: limit === null ? null : listed, cap: listed };

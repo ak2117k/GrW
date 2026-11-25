@@ -15,7 +15,7 @@ import type { SessionClock } from '../../market-hub/session-clock';
 import type { PendingVerdict } from '../repositories/ai-exit-execution.repository';
 import { ExitGateRepository } from '../repositories/exit-gate.repository';
 import { AI_EXIT_SESSION_CLOCK } from './executor.tokens';
-import { chartAbsLossRupees, lossLimitFor } from '../../../common/utils/loss-limit';
+import { chartAbsLossRupees, lossLimitBeforeCeilings } from '../../../common/utils/loss-limit';
 import { parseCarryConfig } from '../../intraday-carry/domain/carry-config';
 import { chartConfirmMode, profitChartConfirmMode, readChart } from '../../exit-discipline/chart-read';
 import { cutLossK15 } from '../../exit-discipline/cut-loss-yardstick';
@@ -137,10 +137,9 @@ export class ExitGateService {
     ]);
     // HARD_LOSS_EXIT_RUPEES (live signal trades, 2026-11-03) is a tighter per-trade max loss than the core limit.
     // Per underlying (owner 2026-11-04, "GOLD loss limit ₹7.5k"): HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING via lossLimitFor.
-    // Catastrophe floor (HARD_LOSS_CEILING_BY_CLASS on): a listed class reads the band's ₹limit (GOLD ₹2,000, not
-    // ₹7,500) — the class is inferred from the name here (the verdict row carries no exchange; MCX and index names
-    // are unambiguous, and a stock option's limit is the same ₹limit either way).
-    const hardLoss = lossLimitFor(v.symbol).limit;
+    // Blind to HARD_LOSS_CEILING_BY_CLASS (2026-11-25): HARD_MAX_LOSS is a hard-risk clause that justifies an AI exit
+    // on its own, so it keeps today's figures whatever the table says (moving it is a separate owner decision).
+    const hardLoss = lossLimitBeforeCeilings(v.symbol).limit;
     const maxLossPerTrade = coreMaxLoss !== null && hardLoss !== null ? Math.min(coreMaxLoss, hardLoss) : coreMaxLoss ?? hardLoss;
     // The stored thesis's source rides in the packet (2026-11-04): INFERRED theses are record-only in the gate.
     const thesisSource = thesisSourceOf(packet);

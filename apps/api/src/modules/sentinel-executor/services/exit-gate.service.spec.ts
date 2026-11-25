@@ -104,16 +104,19 @@ describe('ExitGateService', () => {
     });
     const TABLE = 'INDEX_OPT:5000,STOCK_OPT:5000,GOLD:7500,SILVER:7500,MCX:5000';
 
-    it("the gate's per-trade limit for GOLD is the band's ₹2,000 limit with the table on (₹7,500 off)", async () => {
+    it("HARD_MAX_LOSS keeps today's figures whatever the table says: GOLD ₹7,500, an index option ₹2,000", async () => {
       process.env.HARD_LOSS_EXIT_RUPEES = '2000';
-      const gold = () => {
+      const limitFor = (symbol: string) => {
         const t = make();
         t.repo.maxRiskPerTrade.mockResolvedValue(null as never);
-        return t.svc.load({ ...V, symbol: 'GOLD27NOV26125000PE' } as never, NOW);
+        return t.svc.load({ ...V, symbol } as never, NOW);
       };
-      expect(await gold()).toMatchObject({ maxLossPerTrade: 7500 });
-      process.env.HARD_LOSS_CEILING_BY_CLASS = TABLE;
-      expect(await gold()).toMatchObject({ maxLossPerTrade: 2000 });
+      for (const table of [undefined, TABLE]) {
+        if (table === undefined) delete process.env.HARD_LOSS_CEILING_BY_CLASS;
+        else process.env.HARD_LOSS_CEILING_BY_CLASS = table;
+        expect(await limitFor('GOLD27NOV26125000PE')).toMatchObject({ kind: 'ready', maxLossPerTrade: 7500 });
+        expect(await limitFor('NIFTY09NOV2623750PE')).toMatchObject({ kind: 'ready', maxLossPerTrade: 2000 });
+      }
     });
 
     it('the loss-side chart check may hold only up to the class ceiling with the table on (HARD_LOSS_ABS_RUPEES off)', async () => {

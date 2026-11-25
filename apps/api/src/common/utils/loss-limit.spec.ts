@@ -1,5 +1,6 @@
 import {
-  ceilingTableOn, chartAbsLossRupees, hardLossNoiseUnit, instrumentClass, lossLimitFor, lossLimitForTrade, parseCeilingByClass, parseLossLimitsByUnderlying,
+  ceilingTableOn, chartAbsLossRupees, hardLossNoiseUnit, instrumentClass, lossLimitBeforeCeilings, lossLimitFor, lossLimitForTrade, parseCeilingByClass,
+  parseLossLimitsByUnderlying, usesN15Band,
 } from './loss-limit';
 import { hardLossBandOn, hardLossConfig, hardLossReading, hardLossTrip } from '../../modules/exit-discipline/hard-floor';
 import { riskCapFor } from '../../modules/signal-trader/domain/gate';
@@ -225,11 +226,27 @@ describe('per-class catastrophe ceilings (HARD_LOSS_CEILING_BY_CLASS, owner 2026
     expect(hardLossReading({ ...base, netPnl: -4999 })).toMatchObject({ trip: false, band: 'HOLD_UNDER_N' });
   });
 
-  it("the band's noise unit: N15 with the table on (null stays null — never N1), N1 with it off", () => {
-    expect(hardLossNoiseUnit(ENV, 10.73, 31.5)).toBe(10.73);
-    expect(hardLossNoiseUnit(ON, 10.73, 31.5)).toBe(31.5);
-    expect(hardLossNoiseUnit(ON, 10.73, null)).toBeNull();
-    expect(hardLossNoiseUnit(ON, 10.73, undefined)).toBeNull();
+  it("the band's noise unit, per position: N15 for a listed class (null stays null — never N1), N1 with the table off", () => {
+    const NIFTY = ['NIFTY25NOV2623750CE', 'NFO'] as const;
+    expect(hardLossNoiseUnit(ENV, ...NIFTY, 10.73, 31.5)).toBe(10.73);
+    expect(hardLossNoiseUnit(ON, ...NIFTY, 10.73, 31.5)).toBe(31.5);
+    expect(hardLossNoiseUnit(ON, ...NIFTY, 10.73, null)).toBeNull();
+    expect(hardLossNoiseUnit(ON, ...NIFTY, 10.73, undefined)).toBeNull();
+  });
+
+  it('a class NOT in the table (partial table, OTHER) keeps N1 exactly as today', () => {
+    const partial = { ...ENV, HARD_LOSS_CEILING_BY_CLASS: 'INDEX_OPT:5000' };
+    expect(usesN15Band('SBIN23NOV261020CE', 'NFO', partial)).toBe(false);
+    expect(hardLossNoiseUnit(partial, 'SBIN23NOV261020CE', 'NFO', 10.73, 31.5)).toBe(10.73);
+    expect(hardLossNoiseUnit(partial, 'GOLD27NOV26125000PE', 'MCX', 10.73, null)).toBe(10.73);
+    expect(hardLossNoiseUnit(ON, 'SBIN-EQ', 'NSE', 10.73, 31.5)).toBe(10.73);
+    expect(usesN15Band('NIFTY25NOV2623750CE', 'NFO', partial)).toBe(true);
+  });
+
+  it("lossLimitBeforeCeilings is table-blind: today's figures with the table on", () => {
+    expect(lossLimitBeforeCeilings('GOLD27NOV26125000PE', ON)).toEqual({ limit: 7500, cap: 7500 });
+    expect(lossLimitBeforeCeilings('NIFTY25NOV2623750CE', ON)).toEqual({ limit: 2000, cap: 3000 });
+    expect(lossLimitBeforeCeilings('NIFTY25NOV2623750CE', ON)).toEqual(lossLimitFor('NIFTY25NOV2623750CE', ENV));
   });
 
   it('entry gate riskCapFor is unchanged with the table on', () => {

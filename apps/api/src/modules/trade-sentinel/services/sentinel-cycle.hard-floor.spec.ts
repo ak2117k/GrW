@@ -298,6 +298,18 @@ describe('SentinelCycleService — noise-aware HARD_LOSS_EXIT (prod 2026-11-04 N
       expect(rows[0].reason).toMatch(/MAX_LOSS: net ₹-5\d{3} reached the absolute hard loss cap of ₹5000 \(HARD_LOSS_CEILING_BY_CLASS\)/);
     });
 
+    it("partial table (GOLD only): an unlisted index option's band still reads N1 with today's cap and label", async () => {
+      const partial = { HARD_LOSS_CEILING_BY_CLASS: 'GOLD:7500' };
+      // 3.05 N1 (1.09 N15) against: today's N1 band exits.
+      const rows = await run(partial, twice(['11:20:00', '11:20:30'], nifty(140, 23845, { underlyingN15: 30 })));
+      expect(rows).toHaveLength(1);
+      expect(rows[0].reason).toMatch(/\(3.05 N\) against the position from entry \(≥ 3 N, HARD_LOSS_NOISE_N\)/);
+      // Today's ₹3,000 cap and its label, not a ceiling.
+      const cap = await run(partial, twice(['11:21:00', '11:21:30'], nifty(135.5, 23830, { underlyingN15: 30 })));
+      expect(cap).toHaveLength(1);
+      expect(cap[0].reason).toMatch(/reached the absolute hard loss cap of ₹3000 \(HARD_LOSS_CAP_RUPEES\)/);
+    });
+
     it('table off: a tick carrying underlyingN15 is read exactly as today (N1)', async () => {
       const rows = await run({}, twice(['11:20:00', '11:20:30'], nifty(140, 23845, { underlyingN15: 30 })));
       expect(rows).toHaveLength(1);

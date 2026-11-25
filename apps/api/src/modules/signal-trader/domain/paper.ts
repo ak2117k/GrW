@@ -22,7 +22,10 @@ export const paperSource = (causeKey?: string): string => (causeKey ? `telegram-
  * module does not import entry-engine). The decision / judge / OI records stay Telegram-only.
  */
 // 'REENTRY_WATCH' (2026-11-05): the re-entry watch's paper trades (reentry-watch REENTRY_STRATEGY).
-export const PAPER_WATCH_STRATEGIES: readonly string[] = [SIGNAL_PAPER_STRATEGY, 'ENGINE_ENTRY', 'REENTRY_WATCH'];
+// 'AI_SETUP' (2026-11-25): the AI setups' paper trades (ai-setups AI_SETUP_STRATEGY). Their own watch closes them on the
+// underlying's SL / targets / time; this watch adds the catastrophe-floor premium SL, the square-off and the paper
+// sentinel's AI exits, exactly as live (their premium target is none, so it never fights the setup's levels).
+export const PAPER_WATCH_STRATEGIES: readonly string[] = [SIGNAL_PAPER_STRATEGY, 'ENGINE_ENTRY', 'REENTRY_WATCH', 'AI_SETUP'];
 export const SIGNAL_PAPER_SKIP_REASON = 'insufficient_funds';
 const DECISION_TAG = 'decision:';
 

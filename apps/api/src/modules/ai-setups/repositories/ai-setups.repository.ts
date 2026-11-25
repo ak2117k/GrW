@@ -21,6 +21,38 @@ export interface AiSetupWrite {
   validUntil?: Date | null;
 }
 
+/** The paper trades' Trade.strategy (also in signal-trader PAPER_WATCH_STRATEGIES: the paper watch + paper sentinel manage them too). */
+export const AI_SETUP_STRATEGY = 'AI_SETUP';
+export const AI_SETUP_SOURCE = 'ai-setup';
+export const AI_SETUP_TAG = 'ai-setup';
+/** The paper trade's tag naming its ai_setups row. */
+export const setupTag = (setupId: string) => `setup:${setupId}`;
+
+/** One PENDING / FILLED row as the setup watch reads it. */
+export interface ActiveSetupRow {
+  id: string;
+  underlying: string;
+  status: string;
+  setup: unknown;
+  tradeId: string | null;
+  validUntil: Date | null;
+  createdAt: Date;
+  entryAt: Date | null;
+}
+
+/** The setup's paper trade. */
+export interface SetupTradeRow {
+  id: string;
+  status: string;
+  strategy: string | null;
+  isPaperTrade: boolean;
+  exitReasonTag: string | null;
+  pnl: number | null;
+  exitTime: Date | null;
+  entryPrice: number | null;
+  instrument: { token: string; exchange: string; symbol: string } | null;
+}
+
 /** Row statuses that count as an AI setup made (the daily cap); a NO_TRADE or a SKIPPED never counts. */
 export const COUNTED_SETUP_STATUSES: readonly string[] = ['PENDING', 'FILLED', 'EXITED', 'EXPIRED'];
 /** Setups still in play on their underlying (block another setup on it). */
@@ -126,6 +158,84 @@ export class AiSetupsRepository implements SetupPacketSources {
     if (pos) return `open live position on ${u}: ${pos.symbol}`;
     if (armed) return `a signal trigger is armed on ${u} (decision ${armed.id})`;
     return null;
+  }
+
+  // ---- The setup watch (services/setup-watch.service.ts): state lives here only; every transition is a
+  // ---- conditional updateMany on the row's status, so a double pass or a restart never opens / closes twice.
+
+  /** PENDING / FILLED setups, oldest first (≤ 3 a day). */
+  activeSetups(): Promise<ActiveSetupRow[]> {
+    return this.prisma.aiSetup.findMany({
+      where: { status: { in: [...LIVE_SETUP_STATUSES] } },
+      select: { id: true, underlying: true, status: true, setup: true, tradeId: true, validUntil: true, createdAt: true, entryAt: true },
+      orderBy: { createdAt: 'asc' },
+      take: 20,
+    }) as Promise<ActiveSetupRow[]>;
+  }
+
+  /** PENDING → FILLED (the claim, before the paper open). False = another pass already moved it. */
+  async claimFill(id: string, at: Date): Promise<boolean> {
+    const r = await this.prisma.aiSetup.updateMany({ where: { id, status: 'PENDING' }, data: { status: 'FILLED', entryAt: at } });
+    return r.count === 1;
+  }
+
+  /** The claimed FILLED row gets its paper trade (only while it has none) and its watch state. */
+  async attachTrade(id: string, tradeId: string, setup: unknown): Promise<boolean> {
+    const r = await this.prisma.aiSetup.updateMany({ where: { id, status: 'FILLED', tradeId: null }, data: { tradeId, setup: json(setup) } });
+    return r.count === 1;
+  }
+
+  /**
+   * A claimed FILLED row whose paper open failed (no trade) → EXPIRED with the reason ("OPEN_FAILED: …"), visible and
+   * never stuck. EXPIRED, not SKIPPED: the AI did make this setup, so it still counts toward the daily cap.
+   */
+  async failOpen(id: string, reason: string, at: Date): Promise<boolean> {
+    const r = await this.prisma.aiSetup.updateMany({
+      where: { id, status: 'FILLED', tradeId: null },
+      data: { status: 'EXPIRED', exitReason: reason.slice(0, 500), exitAt: at },
+    });
+    return r.count === 1;
+  }
+
+  /** PENDING → EXPIRED with the reason (validUntil passed, SL crossed before the entry, unreadable setup). */
+  async expire(id: string, reason: string, at: Date): Promise<boolean> {
+    const r = await this.prisma.aiSetup.updateMany({ where: { id, status: 'PENDING' }, data: { status: 'EXPIRED', exitReason: reason.slice(0, 500), exitAt: at } });
+    return r.count === 1;
+  }
+
+  /** A FILLED row's watch state (the trailed SL) — written into setup.watch. */
+  async saveWatch(id: string, setup: unknown): Promise<boolean> {
+    const r = await this.prisma.aiSetup.updateMany({ where: { id, status: 'FILLED' }, data: { setup: json(setup) } });
+    return r.count === 1;
+  }
+
+  /** FILLED → EXITED with the exit reason and the Trade row's P&L. */
+  async markExited(id: string, e: { exitReason: string; exitAt: Date; pnl: number | null }): Promise<boolean> {
+    const r = await this.prisma.aiSetup.updateMany({
+      where: { id, status: 'FILLED' },
+      data: { status: 'EXITED', exitReason: e.exitReason.slice(0, 500), exitAt: e.exitAt, pnl: e.pnl },
+    });
+    return r.count === 1;
+  }
+
+  /** The setup's paper trade as the watch needs it (status, who closed it, P&L, the contract). */
+  setupTrade(tradeId: string): Promise<SetupTradeRow | null> {
+    return this.prisma.trade.findUnique({
+      where: { id: tradeId },
+      select: {
+        id: true, status: true, strategy: true, isPaperTrade: true, exitReasonTag: true, pnl: true, exitTime: true, entryPrice: true,
+        instrument: { select: { token: true, exchange: true, symbol: true } },
+      },
+    }) as Promise<SetupTradeRow | null>;
+  }
+
+  /** A paper trade already tagged for this setup (restart between the claim and the attach). */
+  tradeForSetup(setupId: string): Promise<{ id: string; status: string; entryPrice: number | null } | null> {
+    return this.prisma.trade.findFirst({
+      where: { strategy: AI_SETUP_STRATEGY, isPaperTrade: true, entryTags: { has: setupTag(setupId) } },
+      select: { id: true, status: true, entryPrice: true },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   async channelTitle(channelId: string): Promise<string | null> {

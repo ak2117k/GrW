@@ -149,8 +149,21 @@ export class SignalIntakeService {
     return run;
   }
 
+  /** Classifies one message; an image post whose image will not be read is then announced to the AI reader. */
   private async classify(evt: TelegramMessageEvent & { edited?: boolean }): Promise<void> {
-    if (!this.config.enabled || !evt?.messageId || !evt.channelId) return;
+    const imageSkipped = await this.classifyPost(evt);
+    if (imageSkipped && evt.media) this.visionSkipped(evt, new Date(evt.postedAt), imageSkipped);
+  }
+
+  /** `signal.vision.done` with no reading: the image was not / could not be read (after the class row is saved). */
+  private visionSkipped(evt: TelegramMessageEvent, postedAt: Date, reason: string): void {
+    const payload: VisionDoneEvent = { messageId: evt.messageId, channelId: evt.channelId, postedAt, text: String(evt.text ?? ''), reading: null, skipped: reason };
+    this.emit(SIGNAL_VISION_DONE_EVENT, payload);
+  }
+
+  /** Returns why an image post's image is not sent to vision here (null: vision runs, or not applicable). */
+  private async classifyPost(evt: TelegramMessageEvent & { edited?: boolean }): Promise<string | null> {
+    if (!this.config.enabled || !evt?.messageId || !evt.channelId) return null;
     const text = String(evt.text ?? '');
     const postedAt = new Date(evt.postedAt);
     // An image post's identity is its caption AND its image (an image swap is a different post).
@@ -160,63 +173,67 @@ export class SignalIntakeService {
     const prior = await this.repo.classOf(evt.messageId);
     // A missed image re-downloaded by R (backfill): read the image for a post filed NOISE / not read.
     if (evt.backfill && evt.media) {
-      if (prior && prior.status !== 'NOISE' && prior.status !== 'LLM_SKIPPED') return;
-      if (this.visionBlocked()) return;
+      if (prior && prior.status !== 'NOISE' && prior.status !== 'LLM_SKIPPED') return null;
+      if (this.visionBlocked()) return null;
       await this.startVision(evt, postedAt, evt.media, base, { backfill: true });
-      return;
+      return null;
     }
-    if (prior && prior.textHash === hash) return; // the same event again
+    if (prior && prior.textHash === hash) return null; // the same event again
     const vocab = await this.vocab.get();
     const pf = prefilter(text, vocab);
     const parsed = pf.pass ? parseSignal(text, vocab, pf.norm) : null;
 
     if (prior) {
       await this.reclassifyEdit(evt, prior, parsed, base);
-      return;
+      return null;
     }
     if (parsed) {
       await this.createFromParsed(evt, postedAt, parsed, 'rule', base, null);
-      return;
+      return 'the caption is a call; the image was not sent';
     }
     // The channel's own results of past calls: kept to score its claims later, never a signal or an update.
     const recap = recapReason(text, pf.norm, vocab);
     if (recap) {
       await this.repo.saveClass({ ...base, status: 'RECAP', reason: recap });
-      return;
+      return 'the caption is a recap; the image was not sent';
     }
     const upd = detectUpdate(text, vocab, pf.norm);
     if (upd) {
       await this.linkUpdate(evt, postedAt, upd, base);
-      return;
+      return 'the caption is an update; the image was not sent';
     }
     const info = await this.commentary(text, pf, vocab, postedAt);
     // An image post whose caption alone is not a call: the image may be the call (MCX / tip channels).
     // A caption that already carries a directional view is the post's information: no image read.
+    let imageSkipped: string | null = null;
     if (evt.media && !(info?.kind === 'INFO' && info.items.some(hasBias))) {
       const blocked = this.visionBlocked();
       if (!blocked) {
         await this.startVision(evt, postedAt, evt.media, base);
-        return;
+        return null;
       }
       if (info?.kind !== 'INFO') {
         await this.repo.saveClass({ ...base, status: 'LLM_SKIPPED', parser: 'vision', reason: `image not read: ${blocked}` });
-        return;
+        return `image not read: ${blocked}`;
       }
+      imageSkipped = `image not read: ${blocked}`;
     }
     if (info?.kind === 'INFO') {
       await this.saveInfo(evt, postedAt, base, info);
-      return;
+      return imageSkipped ?? 'the caption carries the view; the image was not sent';
     }
+    // Only text posts reach below (an image post has started vision or returned above).
     if (info) {
       await this.repo.saveClass({ ...base, status: info.kind, reason: info.reason });
       if (info.unsure) await this.startInfoLlm(evt, postedAt, base, info);
-      return;
+      return null;
     }
     if (!pf.pass) {
       await this.repo.saveClass({ ...base, status: 'NOISE', reason: pf.reason });
-      return;
+      return null;
     }
     await this.startLlm(evt, postedAt, base);
+    return null;
   }
 
   // ─── Vision (image posts) ──────────────────────────────────────────────────
@@ -255,12 +272,14 @@ export class SignalIntakeService {
     // A backfilled image is read whatever its age (R paces it: 6 per 5 min); its reads are not the live cap's.
     if (!opts.backfill && this.now().getTime() - postedAt.getTime() > this.config.visionMaxAgeMs) {
       await this.repo.saveClass({ ...base, status: 'LLM_SKIPPED', parser: 'vision', reason: 'image too old for the model (history)' });
+      this.visionSkipped(evt, postedAt, 'image too old for the model');
       return;
     }
     if (this.inflight.has(evt.messageId)) return;
     const used = opts.backfill ? 0 : await this.visionUsedToday();
     if (used >= this.config.visionDailyCap) {
       await this.repo.saveClass({ ...base, status: 'LLM_SKIPPED', parser: 'vision', reason: `daily vision cap ${this.config.visionDailyCap} reached` });
+      this.visionSkipped(evt, postedAt, `daily vision cap ${this.config.visionDailyCap} reached`);
       return;
     }
     if (!opts.backfill) {
@@ -278,6 +297,7 @@ export class SignalIntakeService {
           this.serial(async () => {
             if (e instanceof AssistBusyError && !opts.backfill) this.visionUsed = Math.max(0, this.visionUsed - 1); // never started: no spend
             await this.repo.saveClass({ ...base, status: 'LLM_FAILED', parser: 'vision', attempts: 1, reason: `vision: ${errText(e)}`.slice(0, 500) });
+            this.visionSkipped(evt, postedAt, `vision failed: ${errText(e)}`.slice(0, 300));
           }),
       )
       .catch((e) => this.logger.warn(`[signal-intake] vision read of ${evt.messageId} failed: ${errText(e)}`))
@@ -302,7 +322,10 @@ export class SignalIntakeService {
   ): Promise<void> {
     // The chart-setup reader (image-setup) may already have made this post a call: never overwrite that class row.
     const prior = await this.repo.classOf(evt.messageId);
-    if (prior?.status === 'SIGNAL' && prior.signalId) return;
+    if (prior?.status === 'SIGNAL' && prior.signalId) {
+      this.visionSkipped(evt, postedAt, 'the chart-setup reader already made this post a call; the generic image read was not applied');
+      return;
+    }
     const shown = clockOrNull(reply.shownTime);
     const stored = { kind: reply.kind, isSignal: reply.isSignal, signals: reply.signals, ...(reply.items ? { items: reply.items } : {}), ...(shown ? { shownTime: shown } : {}), imageSha256: media.sha256 };
     // The AI message reader reads image posts from this stored result: emitted after every exit that saves one.

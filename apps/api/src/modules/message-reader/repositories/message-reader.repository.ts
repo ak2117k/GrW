@@ -22,6 +22,8 @@ export interface ReadingWrite {
   call?: ReaderCall | null;
   parseAgrees?: boolean | null;
   missedByRules?: boolean;
+  /** The rule class the CALL/UPDATE comparison saw; PENDING = the rules had not decided yet; null = not compared. */
+  ruleStatus?: string | null;
   summary?: string | null;
   model?: string | null;
   packet?: unknown;
@@ -99,6 +101,7 @@ export class MessageReaderRepository implements ReaderPacketSources {
       call: json(r.call),
       parseAgrees: r.parseAgrees ?? null,
       missedByRules: r.missedByRules ?? false,
+      ruleStatus: r.ruleStatus ?? null,
       summary: r.summary ?? null,
       model: r.model ?? null,
       packet: json(r.packet),
@@ -114,6 +117,18 @@ export class MessageReaderRepository implements ReaderPacketSources {
       create: { messageId: r.messageId, ...data },
       update: { ...data, outcomes: Prisma.DbNull, outcomeFilledAt: null },
     });
+  }
+
+  /**
+   * A later rule re-check: updates only the comparison fields, and only while the row still holds the
+   * reading of the same text (an edit re-read in between wins).
+   */
+  async updateRuleComparison(
+    messageId: string,
+    textHash: string,
+    c: { parseAgrees: boolean | null; missedByRules: boolean; ruleStatus: string | null },
+  ): Promise<void> {
+    await this.prisma.messageReading.updateMany({ where: { messageId, textHash }, data: c });
   }
 
   async readingOf(messageId: string): Promise<{ status: string; textHash: string } | null> {

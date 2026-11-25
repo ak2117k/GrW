@@ -80,8 +80,10 @@ export interface VisionDoneEvent {
   postedAt: Date;
   /** The post's caption. */
   text: string;
-  /** The vision reply as stored in signal_message_classes.llm_result. */
+  /** The vision reply as stored in signal_message_classes.llm_result; null when the image was not / could not be read. */
   reading: unknown;
+  /** Set with `reading: null`: why vision did not run or did not finish (the reader then reads the caption alone). */
+  skipped?: string;
 }
 
 export interface TelegramMessageEvent {

@@ -3591,6 +3591,7 @@ model MessageReading {
   call            Json? // ReaderCall when kind = CALL / UPDATE
   parseAgrees     Boolean?  @map("parse_agrees") // rule parser's call matches the reader's (null = n/a)
   missedByRules   Boolean   @default(false) @map("missed_by_rules")
+  ruleStatus      String?   @map("rule_status") // the rule class the comparison saw; PENDING = not final yet (re-checked at +60 s, +5 min)
   summary         String?
   model           String?
   packet          Json? // the market packet the AI saw

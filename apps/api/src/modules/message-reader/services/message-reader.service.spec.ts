@@ -35,6 +35,7 @@ type Fakes = {
 };
 
 function make(o: Fakes = {}) {
+  const rule = { current: o.rule ?? null };
   const rows = new Map<string, ReadingWrite>();
   const upserts: ReadingWrite[] = [];
   const repo = {
@@ -50,7 +51,11 @@ function make(o: Fakes = {}) {
       const hit = [...rows.values()].reverse().find((r) => r.textHash === hash && r.status === 'READ' && r.readAt >= since && r.messageId !== exclude);
       return hit ? { messageId: hit.messageId, kind: hit.kind!, scope: hit.scope!, claims: hit.claims, call: hit.call ?? null, summary: hit.summary ?? null, model: hit.model ?? null } : null;
     }),
-    ruleClassOf: jest.fn(async () => o.rule ?? null),
+    ruleClassOf: jest.fn(async () => rule.current),
+    updateRuleComparison: jest.fn(async (id: string, hash: string, c: { parseAgrees: boolean | null; missedByRules: boolean; ruleStatus: string | null }) => {
+      const r = rows.get(id);
+      if (r && r.textHash === hash) rows.set(id, { ...r, ...c });
+    }),
     channelTitle: jest.fn(async () => 'Stock Gainers (SEBI Registered)'),
   };
   const packet = { build: jest.fn(async () => ({ packet: { at: NOW.toISOString() } as unknown as ReaderPacket, ms: 7 })) };
@@ -61,7 +66,7 @@ function make(o: Fakes = {}) {
   const post = (id: string, text: string, agoMin = 1, extra: Record<string, unknown> = {}) => ({
     messageId: id, channelId: 'ch1', text, postedAt: new Date(NOW.getTime() - agoMin * 60_000), hasMedia: false, ...extra,
   });
-  return { svc, repo, packet, llm, rows, upserts, post, setNow: (d: Date) => (now = d) };
+  return { svc, repo, packet, llm, rows, upserts, post, rule, setNow: (d: Date) => (now = d) };
 }
 
 const tick = () => new Promise((r) => setImmediate(r));
@@ -248,5 +253,112 @@ describe('MessageReaderService', () => {
     expect(m.rows.get('m1')).toMatchObject({ kind: 'CALL' });
     expect(seen).toEqual([TELEGRAM_MESSAGE_EVENT]);
     expect(seen).not.toContain(SIGNAL_READY_EVENT);
+  });
+
+  describe('rule comparison while the rules have not decided (ruleStatus PENDING + re-checks)', () => {
+    const SIGNAL_RULE: RuleClass = {
+      status: 'SIGNAL',
+      signal: { underlying: 'NIFTY', side: 'BUY', optionType: 'CE', strike: 24000, entryLow: 120, entryHigh: 120, stopLoss: 100, targets: [140, 160] },
+    };
+    const callRead = async () => ({ reply: CALL, ms: 900, model: 'claude-sonnet-5' });
+
+    beforeEach(() => jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] }));
+    afterEach(() => jest.useRealTimers());
+
+    it('class absent at read time, SIGNAL at +60 s → the row gets parseAgrees and the rule status', async () => {
+      const m = make({ read: callRead, rule: null });
+      m.svc.onTelegramMessage(m.post('m1', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140/160'));
+      await m.svc.whenIdle();
+      expect(m.rows.get('m1')).toMatchObject({ status: 'READ', ruleStatus: 'PENDING', parseAgrees: null, missedByRules: false });
+      m.rule.current = SIGNAL_RULE;
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(m.repo.updateRuleComparison).toHaveBeenCalledTimes(1);
+      expect(m.rows.get('m1')).toMatchObject({ ruleStatus: 'SIGNAL', parseAgrees: true, missedByRules: false });
+      await jest.advanceTimersByTimeAsync(5 * 60_000);
+      expect(m.repo.ruleClassOf).toHaveBeenCalledTimes(2); // the +5 min check was cancelled
+    });
+
+    it('LLM_PENDING at both re-checks → ruleStatus stays PENDING (visible), nothing more scheduled', async () => {
+      const m = make({ read: callRead, rule: { status: 'LLM_PENDING', signal: null } });
+      m.svc.onTelegramMessage(m.post('m1', 'nifty 24000 ce buy now 120 sl 100'));
+      await m.svc.whenIdle();
+      await jest.advanceTimersByTimeAsync(5 * 60_000);
+      expect(m.repo.ruleClassOf).toHaveBeenCalledTimes(3);
+      expect(m.repo.updateRuleComparison).not.toHaveBeenCalled();
+      expect(m.rows.get('m1')).toMatchObject({ ruleStatus: 'PENDING', parseAgrees: null, missedByRules: false });
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('LLM_PENDING then NOISE at +5 min → missedByRules', async () => {
+      const m = make({ read: callRead, rule: { status: 'LLM_PENDING', signal: null } });
+      m.svc.onTelegramMessage(m.post('m1', 'nifty 24000 ce buy now 120 sl 100'));
+      await m.svc.whenIdle();
+      await jest.advanceTimersByTimeAsync(60_000);
+      m.rule.current = { status: 'NOISE', signal: null };
+      await jest.advanceTimersByTimeAsync(4 * 60_000);
+      expect(m.rows.get('m1')).toMatchObject({ ruleStatus: 'NOISE', missedByRules: true });
+    });
+
+    it('a final class at read time → stored with its status, no re-check scheduled', async () => {
+      const m = make({ read: callRead, rule: SIGNAL_RULE });
+      m.svc.onTelegramMessage(m.post('m1', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140/160'));
+      await m.svc.whenIdle();
+      expect(m.rows.get('m1')).toMatchObject({ ruleStatus: 'SIGNAL', parseAgrees: true });
+      expect(jest.getTimerCount()).toBe(0);
+      await jest.advanceTimersByTimeAsync(5 * 60_000);
+      expect(m.repo.ruleClassOf).toHaveBeenCalledTimes(1);
+    });
+
+    it('a non-call reading is not compared (ruleStatus null, no re-check)', async () => {
+      const m = make({ rule: null });
+      m.svc.onTelegramMessage(m.post('m1', 'Stay cautious'));
+      await m.svc.whenIdle();
+      expect(m.rows.get('m1')).toMatchObject({ ruleStatus: null });
+      expect(m.repo.ruleClassOf).not.toHaveBeenCalled();
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('module destroy clears pending re-checks', async () => {
+      const m = make({ read: callRead, rule: null });
+      m.svc.onTelegramMessage(m.post('m1', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140/160'));
+      await m.svc.whenIdle();
+      expect(jest.getTimerCount()).toBe(2);
+      m.svc.onModuleDestroy();
+      expect(jest.getTimerCount()).toBe(0);
+    });
+  });
+
+  describe('image posts whose image was not read (vision.done with reading null)', () => {
+    it.each([
+      ['the caption is a call; the image was not sent'],
+      ['daily vision cap 120 reached'],
+    ])('reads the caption with the reason (%s)', async (reason) => {
+      const m = make();
+      m.svc.onVisionDone({ messageId: 'm1', channelId: 'ch1', postedAt: new Date(NOW.getTime() - 60_000), text: 'Crude looks weak below 5600', reading: null, skipped: reason });
+      await m.svc.whenIdle();
+      expect(m.llm.read).toHaveBeenCalledTimes(1);
+      const input = m.llm.read.mock.calls[0][0];
+      expect(input).toMatchObject({ text: 'Crude looks weak below 5600', imageSkipped: reason });
+      expect(input).not.toHaveProperty('imageReading');
+      expect(m.rows.get('m1')).toMatchObject({ status: 'READ' });
+    });
+
+    it('empty caption + skipped → no AI call, no row', async () => {
+      const m = make();
+      m.svc.onVisionDone({ messageId: 'm1', channelId: 'ch1', postedAt: NOW, text: '   ', reading: null, skipped: 'image not read: SIGNAL_VISION=off' });
+      await m.svc.whenIdle();
+      expect(m.llm.read).not.toHaveBeenCalled();
+      expect(m.repo.upsertReading).not.toHaveBeenCalled();
+    });
+
+    it('a caption read without its image is not served from a text post’s cache', async () => {
+      const m = make();
+      m.svc.onTelegramMessage(m.post('m1', 'Crude looks weak below 5600'));
+      await m.svc.whenIdle();
+      m.svc.onVisionDone({ messageId: 'm2', channelId: 'ch1', postedAt: new Date(NOW.getTime() - 60_000), text: 'Crude looks weak below 5600', reading: null, skipped: 'daily vision cap 120 reached' });
+      await m.svc.whenIdle();
+      expect(m.llm.read).toHaveBeenCalledTimes(2);
+      expect(m.rows.get('m2')).toMatchObject({ status: 'READ' });
+    });
   });
 });

@@ -470,6 +470,59 @@ describe('SignalIntakeService — image posts (vision)', () => {
     expect(m.emitted.map(([e]) => e)).toEqual(['signal.ready', 'signal.vision.done']);
   });
 
+  describe('signal.vision.done with no reading (the image is not / could not be read)', () => {
+    const skipped = (m: ReturnType<typeof make>) => m.emitted.filter(([e]) => e === 'signal.vision.done').map(([, p]) => p);
+
+    it('a caption that is a call: the call as before, then vision.done(skipped) with the caption', async () => {
+      const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] });
+      const m = make({ vision: v });
+      await m.svc.handle(img(m, 'm1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+      expect(classify).not.toHaveBeenCalled();
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', parser: 'rule' });
+      expect(m.emitted.map(([e]) => e)).toEqual(['signal.ready', 'signal.vision.done']);
+      expect(skipped(m)).toEqual([
+        { messageId: 'm1', channelId: 'A', postedAt: T0, text: 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', reading: null, skipped: expect.stringContaining('caption is a call') },
+      ]);
+    });
+
+    it('daily vision cap reached → LLM_SKIPPED as before, then vision.done(skipped)', async () => {
+      const { v } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] }, { used: 120 });
+      const m = make({ vision: v });
+      await m.svc.handle(img(m, 'm1', 'A', 'Crude chart'));
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'LLM_SKIPPED', reason: 'daily vision cap 120 reached' });
+      expect(skipped(m)).toEqual([expect.objectContaining({ reading: null, text: 'Crude chart', skipped: 'daily vision cap 120 reached' })]);
+    });
+
+    it('vision off, too old, and a failed read each emit vision.done(skipped)', async () => {
+      const off = make({ env: { SIGNAL_VISION: 'off' } });
+      await off.svc.handle(img(off, 'm1', 'A'));
+      expect(skipped(off)).toEqual([expect.objectContaining({ reading: null, skipped: 'image not read: SIGNAL_VISION=off' })]);
+
+      const old = make({ vision: fakeVision({ kind: 'NOISE', isSignal: false, signals: [] }).v, now: new Date(T0.getTime() + 5 * 3_600_000) });
+      await old.svc.handle(img(old, 'm1', 'A'));
+      expect(old.mem.classes.get('m1')).toMatchObject({ status: 'LLM_SKIPPED' });
+      expect(skipped(old)).toEqual([expect.objectContaining({ reading: null, skipped: 'image too old for the model' })]);
+
+      const failed = make({
+        vision: fakeVision(async () => {
+          throw new Error('claude CLI: timed out');
+        }).v,
+      });
+      await failed.svc.handle(img(failed, 'm1', 'A'));
+      await flush();
+      await failed.svc.handle(failed.msg('z', 'A', 'Good night', 1));
+      expect(failed.mem.classes.get('m1')).toMatchObject({ status: 'LLM_FAILED' });
+      expect(skipped(failed)).toEqual([expect.objectContaining({ reading: null, skipped: expect.stringContaining('vision failed: claude CLI: timed out') })]);
+    });
+
+    it('a text post never emits vision.done', async () => {
+      const m = make();
+      await m.svc.handle(m.msg('m1', 'A', 'Good morning traders'));
+      await m.svc.handle(m.msg('m2', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+      expect(skipped(m)).toEqual([]);
+    });
+  });
+
   describe('ingestImageSetup (chart-screenshot setups, IMAGE_SETUPS=signal)', () => {
     const setup = {
       underlying: 'NIFTY', instrumentKind: 'PE' as const, strike: 23200, expiryHint: { day: 3, month: 11, year: 2026 }, side: 'SELL' as const,
@@ -503,6 +556,21 @@ describe('SignalIntakeService — image posts (vision)', () => {
       expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', signalId: 'sig1' });
       expect(await m.svc.ingestImageSetup(evt, setup, TEXT)).toBeNull();
       expect(m.mem.signals).toHaveLength(1);
+    });
+
+    it('the image-setup early exit emits vision.done(skipped) so the AI reader still reads the post', async () => {
+      let release!: (r: VisionReply) => void;
+      const { v } = fakeVision(() => new Promise<VisionReply>((r) => (release = r)));
+      const m = make({ vision: v });
+      const evt = img(m, 'm1', 'A', 'Sell this');
+      await m.svc.handle(evt);
+      await m.svc.ingestImageSetup(evt, setup, TEXT);
+      release({ kind: 'NOISE', isSignal: false, signals: [] });
+      await flush();
+      await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
+      expect(m.emitted.filter(([e]) => e === 'signal.vision.done')).toEqual([
+        ['signal.vision.done', expect.objectContaining({ messageId: 'm1', text: 'Sell this', reading: null, skipped: expect.stringContaining('chart-setup reader') })],
+      ]);
     });
   });
 });

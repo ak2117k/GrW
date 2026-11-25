@@ -65,6 +65,12 @@ describe('MessageReaderLlm.read', () => {
     expect(msg).toContain('chart of NIFTY');
   });
 
+  it('an unread image is named with its reason (caption only)', async () => {
+    const { svc, req } = make();
+    await svc.read({ ...input, imageSkipped: 'daily vision cap 120 reached' });
+    expect(req().messages[0].content).toContain('the post has a picture that was not read (daily vision cap 120 reached)');
+  });
+
   it('malformed reply becomes an error', async () => {
     const { svc } = make({ text: 'not json' });
     await expect(svc.read(input)).rejects.toThrow(/schema/);

@@ -24,6 +24,8 @@ export interface ReaderInput {
   postedAtIst: string;
   packet: ReaderPacket;
   imageReading?: unknown;
+  /** The post has a picture that was not read: why (the caption is all there is). */
+  imageSkipped?: string;
 }
 
 /** The user message: the post, where and when it was posted, the packet (unavailable blocks included) and any image reading. */
@@ -34,6 +36,7 @@ export function readerUserMessage(i: ReaderInput): string {
     `Telegram post:\n"""\n${i.text.slice(0, MAX_POST_CHARS)}\n"""`,
   ];
   if (i.imageReading !== undefined && i.imageReading !== null) parts.push(`Image reading (the post's picture, already read):\n${JSON.stringify(i.imageReading)}`);
+  else if (i.imageSkipped) parts.push(`Image: the post has a picture that was not read (${i.imageSkipped}); judge the caption only.`);
   parts.push(`Packet (our live data at read time):\n${JSON.stringify(i.packet)}`);
   return parts.join('\n\n');
 }

@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { agentsOn } from '../../ai-gateway/agents/agent-registry';
 import { prefilter } from '../../signal-intake/domain/prefilter';
@@ -15,7 +15,7 @@ import { ReaderPacketService } from './reader-packet.service';
 export const MESSAGE_READER_NOW = Symbol('MESSAGE_READER_NOW');
 export const MESSAGE_READER_AGENTS_ON = Symbol('MESSAGE_READER_AGENTS_ON');
 
-export type ReaderStore = Pick<MessageReaderRepository, 'upsertReading' | 'readingOf' | 'cachedByHash' | 'ruleClassOf' | 'channelTitle'>;
+export type ReaderStore = Pick<MessageReaderRepository, 'upsertReading' | 'readingOf' | 'cachedByHash' | 'ruleClassOf' | 'channelTitle' | 'updateRuleComparison'>;
 export type ReaderPacketPort = Pick<ReaderPacketService, 'build'>;
 export type ReaderLlmPort = Pick<MessageReaderLlm, 'read'>;
 
@@ -27,6 +27,8 @@ export interface ReadJob {
   receivedAt: Date;
   text: string;
   imageReading?: unknown;
+  /** The post has an image that was not read (vision off / capped / failed / caption was the call): why. */
+  imageSkipped?: string;
 }
 
 interface QueuedJob extends ReadJob {
@@ -40,15 +42,25 @@ export const READER_MAX_IN_FLIGHT = 8;
 const CACHE_WINDOW_MS = 15 * 60_000;
 const IST_OFFSET_MS = 330 * 60_000;
 const MAX_UNDERLYINGS = 3;
+/** When the rules had not decided at read time, the comparison is re-checked after these delays. */
+export const RULE_RECHECK_MS: readonly number[] = [60_000, 5 * 60_000];
+/** ruleStatus when the rule class was absent / not final at read time (and still not at the last re-check). */
+export const RULE_PENDING = 'PENDING';
+/** Rule classes that may still change (the LLM fallback or vision read is running). Absent = not final too. */
+const NOT_FINAL_RULE = new Set(['LLM_PENDING']);
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const istClock = (d: Date) => `${new Date(d.getTime() + IST_OFFSET_MS).toISOString().slice(0, 16).replace('T', ' ')} IST`;
 const isCallKind = (k: ReadKind) => k === 'CALL' || k === 'UPDATE';
 const settledStatus = (s: string) => s === 'READ' || s === 'CACHED';
 
-/** The cache / dedupe key: the trimmed text, plus the vision result for an image post (captions are often empty). */
+type RuleComparison = { parseAgrees: boolean | null; missedByRules: boolean; ruleStatus: string | null };
+
+/** The cache / dedupe key: the trimmed text, plus the vision result (or the unread-image mark) for an image post. */
 function hashOf(j: ReadJob): string {
-  return j.imageReading === undefined ? textHash(j.text) : textHash(`${j.text}\n#vision:${JSON.stringify(j.imageReading)}`);
+  if (j.imageReading !== undefined && j.imageReading !== null) return textHash(`${j.text}\n#vision:${JSON.stringify(j.imageReading)}`);
+  if (j.imageSkipped !== undefined) return textHash(`${j.text}\n#image-unread`);
+  return textHash(j.text);
 }
 
 /** Underlyings a vision result names (its calls and info items), so the packet carries their data too. */
@@ -78,7 +90,7 @@ function imageUnderlyings(reading: unknown): string[] {
  * Shadow only: it creates no signal and emits nothing. Off with MESSAGE_READER=off or AI agents off.
  */
 @Injectable()
-export class MessageReaderService {
+export class MessageReaderService implements OnModuleDestroy {
   private readonly logger = new Logger(MessageReaderService.name);
   private readonly queue: QueuedJob[] = [];
   /** Jobs waiting in `queue`, by messageId (an edit replaces the waiting job in place). */
@@ -88,6 +100,8 @@ export class MessageReaderService {
   /** An edit that arrived while its post was being read: queued when that read ends. */
   private readonly next = new Map<string, QueuedJob>();
   private idleWaiters: Array<() => void> = [];
+  /** Pending rule re-checks per messageId (cleared on a new read of the post and on shutdown). */
+  private readonly rechecks = new Map<string, NodeJS.Timeout[]>();
 
   constructor(
     @Inject(MessageReaderRepository) private readonly repo: ReaderStore,
@@ -117,17 +131,27 @@ export class MessageReaderService {
     this.enqueue({ messageId: evt.messageId, channelId: evt.channelId, postedAt: new Date(evt.postedAt), receivedAt: this.now(), text });
   }
 
+  /**
+   * Image posts: with the vision reading, or — when the image was not / could not be read (`reading: null`,
+   * `skipped` = why) — the caption alone, with that reason. No caption and no reading: nothing to read, no row.
+   */
   @OnEvent(SIGNAL_VISION_DONE_EVENT, { async: true })
   onVisionDone(evt: VisionDoneEvent): void {
     if (!this.enabled() || !evt?.messageId || !evt.channelId) return;
-    this.enqueue({
-      messageId: evt.messageId,
-      channelId: evt.channelId,
-      postedAt: new Date(evt.postedAt),
-      receivedAt: this.now(),
-      text: String(evt.text ?? ''),
-      imageReading: evt.reading ?? null,
-    });
+    const text = String(evt.text ?? '');
+    const reading = evt.reading ?? null;
+    const base = { messageId: evt.messageId, channelId: evt.channelId, postedAt: new Date(evt.postedAt), receivedAt: this.now(), text };
+    if (reading !== null) {
+      this.enqueue({ ...base, imageReading: reading });
+      return;
+    }
+    if (!text.trim()) return;
+    this.enqueue({ ...base, imageSkipped: evt.skipped?.trim() || 'image not read' });
+  }
+
+  onModuleDestroy(): void {
+    for (const timers of this.rechecks.values()) for (const t of timers) clearTimeout(t);
+    this.rechecks.clear();
   }
 
   /** Queue one post for reading. Never awaited by callers; never throws. */
@@ -195,6 +219,7 @@ export class MessageReaderService {
     const existing = await this.repo.readingOf(j.messageId);
     const alreadyRead = !!existing && settledStatus(existing.status);
     if (alreadyRead && existing.textHash === j.hash) return false; // the same post again (event replay)
+    this.cancelRechecks(j.messageId); // a new read of the post supersedes the old one's pending rule re-checks
 
     if (dequeuedAt.getTime() - j.postedAt.getTime() > this.cfg.maxAgeMin * 60_000) {
       // Too old to matter now; an old post's late edit never replaces the reading it already has.
@@ -217,7 +242,7 @@ export class MessageReaderService {
         ...(await this.compareWithRules(j.messageId, hit.kind, hit.call)),
       };
       await this.repo.upsertReading(row);
-      this.afterRead(row);
+      this.afterStore(row);
       return false;
     }
 
@@ -233,6 +258,7 @@ export class MessageReaderService {
         postedAtIst: istClock(j.postedAt),
         packet: built.packet,
         ...(j.imageReading !== undefined ? { imageReading: j.imageReading } : {}),
+        ...(j.imageSkipped !== undefined ? { imageSkipped: j.imageSkipped } : {}),
       });
       const call = reply.call ? { ...reply.call, underlying: reply.call.underlying.trim().toUpperCase() } : null;
       const row: ReadingWrite = {
@@ -251,7 +277,7 @@ export class MessageReaderService {
         ...(await this.compareWithRules(j.messageId, reply.kind, call)),
       };
       await this.repo.upsertReading(row);
-      this.afterRead(row);
+      this.afterStore(row);
       return false;
     } catch (e) {
       const failedAt = this.now();
@@ -266,20 +292,55 @@ export class MessageReaderService {
 
   /**
    * Shadow comparison with the rule classifier (CALL / UPDATE only): the AI's call against the rule parser's,
-   * or `missedByRules` when the rules filed the post as NOISE / INFO. A lookup failure leaves both unset.
+   * or `missedByRules` when the rules filed the post as NOISE / INFO. `ruleStatus` records the class it saw;
+   * PENDING when the class row is absent or not final (or the lookup failed) — the caller then re-checks.
    */
-  private async compareWithRules(messageId: string, kind: ReadKind, call: ReaderCall | null): Promise<{ parseAgrees: boolean | null; missedByRules: boolean }> {
-    const none = { parseAgrees: null, missedByRules: false };
-    if (!isCallKind(kind)) return none;
+  private async compareWithRules(messageId: string, kind: ReadKind, call: ReaderCall | null): Promise<RuleComparison> {
+    const pending: RuleComparison = { parseAgrees: null, missedByRules: false, ruleStatus: RULE_PENDING };
+    if (!isCallKind(kind)) return { parseAgrees: null, missedByRules: false, ruleStatus: null };
     try {
       const rule = await this.repo.ruleClassOf(messageId);
-      if (!rule) return none;
-      if (rule.status === 'NOISE' || rule.status === 'INFO') return { parseAgrees: null, missedByRules: true };
-      if (call && rule.signal) return { parseAgrees: parseAgrees(call, rule.signal).agrees, missedByRules: false };
-      return none;
+      if (!rule || NOT_FINAL_RULE.has(rule.status)) return pending;
+      if (rule.status === 'NOISE' || rule.status === 'INFO') return { parseAgrees: null, missedByRules: true, ruleStatus: rule.status };
+      if (call && rule.signal) return { parseAgrees: parseAgrees(call, rule.signal).agrees, missedByRules: false, ruleStatus: rule.status };
+      return { parseAgrees: null, missedByRules: false, ruleStatus: rule.status };
     } catch (e) {
       this.logger.warn(`[message-reader] rule class of ${messageId} unavailable: ${errText(e)}`);
-      return none;
+      return pending;
+    }
+  }
+
+  /** A stored READ / CACHED row whose rule class was not final: re-check at +60 s and +5 min (unref'd). */
+  private afterStore(row: ReadingWrite): void {
+    if (row.ruleStatus === RULE_PENDING) this.scheduleRechecks(row.messageId, row.textHash, row.kind as ReadKind, row.call ?? null);
+    this.afterRead(row);
+  }
+
+  private scheduleRechecks(messageId: string, hash: string, kind: ReadKind, call: ReaderCall | null): void {
+    this.cancelRechecks(messageId);
+    const timers = RULE_RECHECK_MS.map((ms, i) => {
+      const t = setTimeout(() => void this.recheck(messageId, hash, kind, call, i === RULE_RECHECK_MS.length - 1), ms);
+      t.unref?.();
+      return t;
+    });
+    this.rechecks.set(messageId, timers);
+  }
+
+  private cancelRechecks(messageId: string): void {
+    for (const t of this.rechecks.get(messageId) ?? []) clearTimeout(t);
+    this.rechecks.delete(messageId);
+  }
+
+  /** Updates only the comparison fields once the rules have decided; still undecided at the last check → stays PENDING. */
+  private async recheck(messageId: string, hash: string, kind: ReadKind, call: ReaderCall | null, last: boolean): Promise<void> {
+    if (last) this.rechecks.delete(messageId);
+    const c = await this.compareWithRules(messageId, kind, call);
+    if (c.ruleStatus === RULE_PENDING) return;
+    this.cancelRechecks(messageId);
+    try {
+      await this.repo.updateRuleComparison(messageId, hash, c);
+    } catch (e) {
+      this.logger.warn(`[message-reader] rule re-check of ${messageId} not stored: ${errText(e)}`);
     }
   }
 

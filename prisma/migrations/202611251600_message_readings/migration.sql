@@ -16,6 +16,7 @@ CREATE TABLE "message_readings" (
     "call" JSONB,
     "parse_agrees" BOOLEAN,
     "missed_by_rules" BOOLEAN NOT NULL DEFAULT false,
+    "rule_status" TEXT,
     "summary" TEXT,
     "model" TEXT,
     "packet" JSONB,

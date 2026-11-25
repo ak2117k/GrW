@@ -136,5 +136,7 @@ import { MarketEventsRepository } from '../news-events/events/market-events.repo
       inject: [UserFeedManager],
     },
   ],
+  // The AI message reader reuses the judge's market packet and the owner user id.
+  exports: [SignalContextService, SIGNAL_TRADER_CONFIG],
 })
 export class SignalTraderModule {}

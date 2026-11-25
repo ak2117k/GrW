@@ -224,6 +224,9 @@ import type { UserFeedSessionFactory } from './services/user-feed.types';
     // before seeding. Unexported, its @Optional() dependency was always
     // undefined and level books seeded before the backfill landed.
     DailyBackfillWorker,
+    // The AI message reader's market pulse (breadth + sector performance over the owner's session).
+    BreadthSectorService,
+    MARKET_QUOTE_RESOLVER,
   ],
 })
 export class MarketDataModule {}

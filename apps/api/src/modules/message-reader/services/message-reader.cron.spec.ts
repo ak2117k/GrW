@@ -79,12 +79,47 @@ describe('MessageReaderCron (reader health)', () => {
     expect(m.alert).not.toHaveBeenCalled();
   });
 
-  it('does nothing when the reader is off or the AI agents are off', async () => {
-    for (const m of [make({ mode: 'off' }), make({ agents: false })]) {
+  it('does nothing when the reader is off (agents on or off)', async () => {
+    for (const m of [make({ mode: 'off' }), make({ mode: 'off', agents: false })]) {
       await m.cron.onHealth();
       expect(m.repo.countsSince).not.toHaveBeenCalled();
       expect(m.alert).not.toHaveBeenCalled();
     }
+  });
+
+  describe('reader switched on but AI agents off', () => {
+    it('boot warns once, naming the mode and what to set', () => {
+      const m = make({ mode: 'shadow', agents: false });
+      m.cron.onApplicationBootstrap();
+      expect(Logger.prototype.warn).toHaveBeenCalledTimes(1);
+      const line = (Logger.prototype.warn as jest.Mock).mock.calls[0][0] as string;
+      expect(line).toContain('MESSAGE_READER=shadow');
+      expect(line).toContain('AI agents are off');
+      expect(line).toContain('AI_AGENTS=on and SENTINEL_JUDGE=vertex');
+    });
+
+    it('boot is quiet when the reader is off or the agents are on', () => {
+      make({ mode: 'off', agents: false }).cron.onApplicationBootstrap();
+      make({ mode: 'on', agents: true }).cron.onApplicationBootstrap();
+      expect(Logger.prototype.warn).not.toHaveBeenCalled();
+    });
+
+    it('sends the agents-off alert in market hours, without the dead-reader check', async () => {
+      const m = make({ mode: 'on', agents: false });
+      await m.cron.onHealth();
+      expect(m.alert).toHaveBeenCalledTimes(1);
+      const [key, text] = m.alert.mock.calls[0] as unknown as [string, string];
+      expect(key).toBe('message-reader-agents-off');
+      expect(text).toContain('MESSAGE_READER=on but the AI agents are off, so no Telegram post is being read');
+      expect(m.repo.countsSince).not.toHaveBeenCalled();
+    });
+
+    it('no agents-off alert outside market hours or on a holiday', async () => {
+      for (const m of [make({ agents: false, now: new Date('2026-11-25T10:05:00Z') }), make({ agents: false, tradingDay: false })]) {
+        await m.cron.onHealth();
+        expect(m.alert).not.toHaveBeenCalled();
+      }
+    });
   });
 
   it('does nothing with BOOT_JOBS=false', async () => {

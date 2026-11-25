@@ -39,7 +39,7 @@ function readClaim(raw: unknown, i: number): Result<Claim> {
   if (!ev.ok) return { ok: false, reason: `claim ${i} ${ev.reason}` };
   const claim: Claim = {
     text: raw.text,
-    subject: raw.subject,
+    subject: raw.subject.trim().toUpperCase(),
     bias: raw.bias,
     horizon: raw.horizon,
     claimType: raw.claimType,

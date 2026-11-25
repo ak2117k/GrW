@@ -7,6 +7,7 @@
   "signal.vision":        { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
   "signal.parse":         { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
   "signal.info":          { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
+  "signal.read":          { "agent": "reading",    "concurrency": 8, "timeoutMs": 60000,  "model": null, "effort": null, "maxTokens": null },
   "signal.image-setup":   { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
   "news.impact":          { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
   "news.sentiment":       { "agent": "reading",    "concurrency": 3, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },

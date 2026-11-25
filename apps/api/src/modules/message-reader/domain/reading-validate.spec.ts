@@ -42,6 +42,11 @@ describe('validateReading', () => {
     expect(r.reply.claims[0]).not.toHaveProperty('evidenceMissing');
   });
 
+  it('normalises subject to trimmed uppercase (downstream matching is exact)', () => {
+    const r = validateReading(reply([claim({ subject: '  Nifty ' }), claim({ subject: 'metal' })]));
+    expect(r.ok && r.reply.claims.map((c) => c.subject)).toEqual(['NIFTY', 'METAL']);
+  });
+
   it('rejects an unknown kind', () => {
     const r = validateReading(reply([], { kind: 'GOSSIP' }));
     expect(r).toEqual({ ok: false, reason: expect.stringMatching(/kind/) });

@@ -17,7 +17,7 @@ export interface Evidence {
 export interface Claim {
   /** The claim in plain words ("stocks weak, index strong"). */
   text: string;
-  /** MARKET | a sector name | an underlying. */
+  /** MARKET | an uppercase sector name | the canonical uppercase underlying (validation trims + uppercases). */
   subject: string;
   bias: ClaimBias;
   horizon: ClaimHorizon;
@@ -55,7 +55,7 @@ export const CLAIM_VERDICTS: readonly ClaimVerdict[] = ['CONFIRMED', 'CONTRADICT
 export const CLAIM_HORIZONS: readonly ClaimHorizon[] = ['INTRADAY', 'DAYS', 'WEEKS'];
 export const CLAIM_TYPES: readonly ClaimType[] = ['DIRECTION', 'CAUTION', 'RELATIVE_BREADTH', 'SECTOR', 'FLOW', 'GAP', 'OTHER'];
 
-const nullableNumber = { type: ['number', 'null'] } as const;
+const nullableNumber = { anyOf: [{ type: 'number' }, { type: 'null' }] } as const;
 
 /** Strict JSON schema for the reader's reply (output_config.format). Mirrors ReaderReply. */
 export const READER_REPLY_SCHEMA = {
@@ -104,7 +104,7 @@ export const READER_REPLY_SCHEMA = {
           properties: {
             underlying: { type: 'string' },
             side: { type: 'string', enum: ['BUY', 'SELL'] },
-            optionType: { type: ['string', 'null'], enum: ['CE', 'PE', null] },
+            optionType: { anyOf: [{ type: 'string', enum: ['CE', 'PE'] }, { type: 'null' }] },
             strike: nullableNumber,
             entryLow: nullableNumber,
             entryHigh: nullableNumber,

@@ -1,0 +1,95 @@
+import { parseMessageReaderConfig } from '../message-reader.config';
+import { READER_REPLY_SCHEMA } from '../domain/reading.types';
+import type { ReaderPacket } from './reader-packet.service';
+import { MessageReaderLlm, READER_JOB } from './message-reader-llm.service';
+
+const packet: ReaderPacket = {
+  at: '2026-11-25T04:00:00.000Z',
+  marketPulse: {
+    indices: { status: 'present', source: 'quotes', value: { NIFTY: { ltp: 24100, changePct: 0.4 } } },
+    breadth: { status: 'unavailable', source: 'breadth', reason: 'timed out after 3000 ms' },
+    sectors: { status: 'present', source: 'sectors', value: [] },
+  },
+  instruments: {},
+  channelRecent: { status: 'present', source: 'channel', value: [] },
+  todayNotes: { status: 'present', source: 'notes', value: [] },
+};
+
+const GOOD = JSON.stringify({ kind: 'NOISE', scope: 'MARKET', claims: [], call: null, summary: 'good morning post' });
+const input = { text: 'Good morning traders', channelTitle: 'Stock Gainers', postedAtIst: '2026-11-25 09:30 IST', packet };
+
+type Req = { model: string; output_config: { effort: string; format: { schema: unknown } }; messages: Array<{ content: string }> };
+
+function make(reply: { text?: string; stop_reason?: string } = {}, cfgOver: { timeoutMs?: number } = {}) {
+  const cli = {
+    createWithMeta: jest.fn(async () => ({
+      message: { stop_reason: reply.stop_reason ?? 'end_turn', content: [{ type: 'text', text: reply.text ?? GOOD }] },
+      meta: { inputTokens: 10, outputTokens: 20, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, billed: false },
+    })),
+  };
+  const audit = { insert: jest.fn(async () => undefined) };
+  const cycle = { runShared: jest.fn((_id: string, work: () => Promise<unknown>, _o?: unknown) => work()) };
+  const env: Record<string, string | undefined> = { SENTINEL_JUDGE: 'cli' };
+  const config = { get: (k: string) => env[k] };
+  const cfg = { ...parseMessageReaderConfig({ MESSAGE_READER_MODEL: 'claude-test-model' }), ...cfgOver };
+  const svc = new MessageReaderLlm(config as never, cli as never, audit as never, cycle as never, cfg);
+  const req = () => (cli.createWithMeta.mock.calls[0] as unknown as [Req])[0];
+  return { svc, cli, audit, cycle, req };
+}
+
+describe('MessageReaderLlm.read', () => {
+  it('sends job signal.read with the reader schema and effort low', async () => {
+    const { svc, req, cycle, audit } = make();
+    const out = await svc.read(input);
+    expect(out.reply.kind).toBe('NOISE');
+    expect(out.model).toBe('claude-test-model');
+    expect(typeof out.ms).toBe('number');
+    expect(req().output_config.format.schema).toBe(READER_REPLY_SCHEMA);
+    expect(req().output_config.effort).toBe('low');
+    expect(req().model).toBe('claude-test-model');
+    expect(cycle.runShared).toHaveBeenCalledTimes(1);
+    expect(cycle.runShared.mock.calls[0][2]).toMatchObject({ lane: 'signals' });
+    await new Promise((r) => setImmediate(r));
+    expect((audit.insert.mock.calls[0] as unknown as [Record<string, unknown>])[0]).toMatchObject({ job: READER_JOB });
+    expect(READER_JOB).toBe('signal.read');
+  });
+
+  it('the user message carries the post, channel, IST time and image reading', async () => {
+    const { svc, req } = make();
+    await svc.read({ ...input, text: 'x'.repeat(5000), imageReading: { kind: 'SIGNAL', note: 'chart of NIFTY' } });
+    const msg = req().messages[0].content;
+    expect(msg).toContain('Stock Gainers');
+    expect(msg).toContain('2026-11-25 09:30 IST');
+    expect(msg).toContain('x'.repeat(4000));
+    expect(msg).not.toContain('x'.repeat(4001));
+    expect(msg).toContain('chart of NIFTY');
+  });
+
+  it('malformed reply becomes an error', async () => {
+    const { svc } = make({ text: 'not json' });
+    await expect(svc.read(input)).rejects.toThrow(/schema/);
+  });
+
+  it('a JSON reply off the contract is an error too', async () => {
+    const { svc } = make({ text: JSON.stringify({ kind: 'GOSSIP', scope: 'MARKET', claims: [], call: null, summary: '' }) });
+    await expect(svc.read(input)).rejects.toThrow(/schema/);
+  });
+
+  it('a refusal is an error', async () => {
+    const { svc } = make({ stop_reason: 'refusal' });
+    await expect(svc.read(input)).rejects.toThrow(/declined/);
+  });
+
+  it('packet unavailable blocks are passed through, not dropped', async () => {
+    const { svc, req } = make();
+    await svc.read(input);
+    expect(req().messages[0].content).toContain('"status":"unavailable"');
+    expect(req().messages[0].content).toContain('timed out after 3000 ms');
+  });
+
+  it('a call slower than MESSAGE_READER_TIMEOUT_MS rejects with a timeout', async () => {
+    const { svc, cli } = make({}, { timeoutMs: 20 });
+    cli.createWithMeta.mockImplementationOnce(() => new Promise(() => undefined));
+    await expect(svc.read(input)).rejects.toThrow(/timed out/);
+  });
+});

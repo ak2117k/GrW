@@ -642,7 +642,10 @@ describe('SentinelExitExecutor — cancel the protective stop-loss, then exit (A
 
   it('flag off: a resting SL-M → SKIPPED: OPEN_ORDER_EXISTS, nothing cancelled (unchanged)', async () => {
     const h = harness({ books: [env([sl()])] });
-    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+    const off = parseAutoExitConfig({
+      AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_QTY_UNITS: 'MCX:units', EXIT_CANCEL_OWNER_ORDERS: 'off',
+    });
+    await expect(h.ex.process(V, off, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
     expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
     expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
   });
@@ -718,9 +721,12 @@ describe('SentinelExitExecutor — cancel the protective stop-loss, then exit (A
     expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
   });
 
-  it('an SL for MORE than the position is not protective → OPEN_ORDER_EXISTS, nothing cancelled', async () => {
+  it('an SL for MORE than the position is not protective → OPEN_ORDER_EXISTS, nothing cancelled (EXIT_CANCEL_OWNER_ORDERS=off)', async () => {
     const h = harness({ books: [env([sl({ quantity: '150' })])] });
-    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+    const off = parseAutoExitConfig({
+      AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_QTY_UNITS: 'MCX:units', ...CP, EXIT_CANCEL_OWNER_ORDERS: 'off',
+    });
+    await expect(h.ex.process(V, off, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
     expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
   });
 
@@ -792,6 +798,153 @@ describe('SentinelExitExecutor — cancel the protective stop-loss, then exit (A
     await expect(h.ex.execute('row1', MV, cfg, NOW, 'MANUAL')).resolves.toEqual({ status: 'FILLED' });
     expect(h.session.cancelOrderClassified).toHaveBeenCalledTimes(1);
     expect(h.session.placeOrderClassified.mock.calls[0][1]).toBe(aiExitOrderTag(MV.id, 'M', 'MANUAL'));
+  });
+});
+
+describe('SentinelExitExecutor — an owner order resting on the contract must not block a needed exit (EXIT_CANCEL_OWNER_ORDERS)', () => {
+  // Prod 2026-11-25: SENSEX26NOV83600PE ×40 long; six AI exits 13:24:59–13:30:07 SKIPPED OPEN_ORDER_EXISTS
+  // behind the owner's manual order resting at Angel; closed at 360, −₹3,646.
+  const SV: PendingVerdict = { ...V, symbol: 'SENSEX26NOV83600PE', reason: 'thesis broken (EXIT_NOW)' };
+  const TRK = { id: 't1', userId: 'owner', status: 'OPEN', kind: 'POSITION', exchange: 'BFO', token: '1171', symbol: 'SENSEX26NOV83600PE', qty: 40 };
+  const pos = (netqty: string) => env([{ tradingsymbol: 'SENSEX26NOV83600PE', symboltoken: '1171', exchange: 'BFO', producttype: 'CARRYFORWARD', netqty, ltp: '453.2' }]);
+  const own = (x: Record<string, unknown> = {}) => ({
+    orderid: 'OWN1', variety: 'NORMAL', ordertype: 'LIMIT', transactiontype: 'SELL', producttype: 'CARRYFORWARD',
+    quantity: '80', price: '520', triggerprice: '0', status: 'open', symboltoken: '1171', exchange: 'BFO', ordertag: '', ...x,
+  });
+  const base = { AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner' };
+  // Prod: cancel-protective ON. The owner's order is not "protective" (80 > 40), so today it blocks every exit.
+  const PROD = parseAutoExitConfig({ ...base, AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'true' });
+  const OFF = parseAutoExitConfig({ ...base, AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'true', EXIT_CANCEL_OWNER_ORDERS: 'off' });
+  const cancelled = env([own({ status: 'cancelled' })]);
+  const filled = env([own({ status: 'cancelled' }), { orderid: 'O1', status: 'complete', symboltoken: '1171', exchange: 'BFO' }]);
+  let alert: jest.SpyInstance;
+  beforeEach(() => { alert = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true); });
+  afterEach(() => alert.mockRestore());
+
+  it('SENSEX case: the owner SELL LIMIT is cancelled, the cancel CONFIRMED from the book, then one SELL MARKET of 40 — recorded', async () => {
+    const h = harness({ tracker: TRK, positions: [pos('40'), pos('40'), pos('0')], books: [env([own()]), cancelled, cancelled, filled] });
+    const warn = jest.spyOn((h.ex as any).logger, 'warn');
+    await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('NORMAL', 'OWN1');
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.session.placeOrderClassified.mock.calls[0][0]).toEqual(expect.objectContaining({ side: 'SELL', quantity: 40, orderType: 'MARKET', exchange: 'BFO', token: '1171' }));
+    // intent → cancel → book re-read (confirmation) → positions re-check → the exit.
+    const intent = h.calls.indexOf('update:CANCELLING_OWNER_ORDERS');
+    const cancel = h.calls.indexOf('cancel:NORMAL:OWN1');
+    const place = h.calls.findIndex((c) => c.startsWith('place'));
+    expect(intent).toBeGreaterThan(-1);
+    expect(intent).toBeLessThan(cancel);
+    expect(h.calls.slice(cancel, place)).toEqual(expect.arrayContaining(['book', 'positions']));
+    expect(h.calls[cancel + 1]).toBe('book');
+    // Recorded: the row (intent + the PLACED row's brokerMessage), the log line, the ops alert.
+    expect(h.patches()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: 'CANCELLING_OWNER_ORDERS:OWN1', brokerMessage: expect.stringContaining('OWN1 (LIMIT SELL 80 @ 520)') }),
+      expect.objectContaining({ status: 'PLACED', brokerMessage: expect.stringContaining('cancelled owner order OWN1') }),
+    ]));
+    const line = warn.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith('[exit] cancelled owner order'));
+    expect(line).toContain('OWN1 (LIMIT SELL 80 @ 520)');
+    expect(line).toContain('SENSEX26NOV83600PE');
+    expect(line).toContain('to exit');
+    expect(line).toContain('thesis broken');
+    expect(alert).toHaveBeenCalledWith('owner-order-cancelled:t1', expect.stringContaining('OWN1'));
+  });
+
+  it('a cancel that is not confirmed within 5 s → SKIPPED: OWNER_ORDER_CANCEL_FAILED with the id and broker message, NO exit sent', async () => {
+    const h = harness({
+      tracker: TRK, positions: [pos('40')], books: [env([own()])],
+      cancel: [{ status: 'REJECTED', message: 'Order cannot be cancelled' }],
+    });
+    await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OWNER_ORDER_CANCEL_FAILED' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(h.lastPatch()).toEqual(expect.objectContaining({
+      status: 'SKIPPED', reason: 'OWNER_ORDER_CANCEL_FAILED',
+      brokerMessage: expect.stringMatching(/OWN1[\s\S]*Order cannot be cancelled/),
+    }));
+    const waited = h.sleep.mock.calls.reduce((a, c) => a + Number((c as unknown[])[0]), 0);
+    expect(waited).toBeLessThanOrEqual(5_000);
+    expect(alert).toHaveBeenCalledWith(expect.stringContaining('t1'), expect.stringContaining('OWN1'));
+  });
+
+  it('a failed cancel does not block the next pass: it is retried (SKIPPED is not in flight, nothing was sent)', async () => {
+    const h = harness({ tracker: TRK, positions: [pos('40')], books: [env([own()])], cancel: [{ status: 'UNCERTAIN', message: '{}' }] });
+    await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OWNER_ORDER_CANCEL_FAILED' });
+    const again = harness({ tracker: TRK, positions: [pos('40'), pos('40'), pos('0')], books: [env([own()]), cancelled, cancelled, filled] });
+    await expect(again.ex.process({ ...SV, id: 'cm9verdict000000000000002' }, PROD, NOW)).resolves.toEqual({ status: 'FILLED' });
+  });
+
+  it('an owner exit-side order with no order id → SKIPPED: OWNER_ORDER_CANCEL_FAILED, nothing cancelled, no exit', async () => {
+    const h = harness({ tracker: TRK, positions: [pos('40')], books: [env([own({ orderid: '' })])] });
+    await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OWNER_ORDER_CANCEL_FAILED' });
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(h.lastPatch()).toEqual(expect.objectContaining({ brokerMessage: expect.stringContaining('no order id') }));
+  });
+
+  it('an entry-side owner BUY is never touched → SKIPPED: OPEN_ORDER_EXISTS as today', async () => {
+    const h = harness({ tracker: TRK, positions: [pos('40')], books: [env([own({ transactiontype: 'BUY' })])] });
+    await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('an owner order on ANOTHER contract is never touched; the exit goes as today', async () => {
+    const other = own({ orderid: 'OTH', symboltoken: '9999', tradingsymbol: 'SENSEX26NOV83700PE' });
+    const h = harness({ tracker: TRK, positions: [pos('40'), pos('0')], books: [env([other]), env([other, { orderid: 'O1', status: 'complete', symboltoken: '1171', exchange: 'BFO' }])] });
+    await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('HOLD-list position: an AI exit is SKIPPED OWNER_HOLD before any broker call; the owner\'s own Exit-now cancels nothing', async () => {
+    const held = { ...PROD, hold: ['SENSEX26NOV83600PE'] };
+    const h = harness({ tracker: TRK, positions: [pos('40')], books: [env([own()])] });
+    await expect(h.ex.process(SV, held, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OWNER_HOLD' });
+    expect(h.sessions.withOwnerSession).not.toHaveBeenCalled();
+    const m = harness({ tracker: TRK, positions: [pos('40')], books: [env([own()])] });
+    await expect(m.ex.execute('row1', { ...SV, id: 'man_x_1' }, held, NOW, 'MANUAL')).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+    expect(m.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(m.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('EXIT_CANCEL_OWNER_ORDERS=off → SKIPPED: OPEN_ORDER_EXISTS exactly as today, nothing cancelled, no alert', async () => {
+    const h = harness({ tracker: TRK, positions: [pos('40')], books: [env([own()])] });
+    await expect(h.ex.process(SV, OFF, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(alert).not.toHaveBeenCalled();
+  });
+
+  it('works with cancel-protective OFF too (default on): a plain owner SELL LIMIT is cancelled, then the exit', async () => {
+    const h = harness({ tracker: TRK, positions: [pos('40'), pos('40'), pos('0')], books: [env([own({ quantity: '40' })]), cancelled, cancelled, filled] });
+    await expect(h.ex.process(SV, parseAutoExitConfig(base), NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('NORMAL', 'OWN1');
+  });
+
+  it('a price trigger / code-rule exit takes the same path', async () => {
+    const h = harness({ tracker: TRK, positions: [pos('40'), pos('40'), pos('0')], books: [env([own()]), cancelled, cancelled, filled] });
+    await expect(h.ex.execute('row1', SV, PROD, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('NORMAL', 'OWN1');
+  });
+
+  it('the owner order filled while being cancelled and the position is flat → SKIPPED: OWNER_ORDER_FILLED, no exit (no double exit)', async () => {
+    const h = harness({
+      tracker: TRK, positions: [pos('40'), pos('0')], books: [env([own()]), env([own({ status: 'complete', filledshares: '40' })])],
+      cancel: [{ status: 'REJECTED', message: 'Order already complete' }],
+    });
+    await expect(h.ex.process(SV, PROD, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OWNER_ORDER_FILLED' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('dry-run says what it WOULD cancel and sell; cancels and places nothing, no alert', async () => {
+    const h = harness({ tracker: TRK, positions: [pos('40')], books: [env([own()])] });
+    const dry = parseAutoExitConfig({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner' });
+    await expect(h.ex.process(SV, dry, NOW)).resolves.toEqual({
+      status: 'DRY_RUN', reason: 'would cancel owner order(s) OWN1 (LIMIT SELL 80 @ 520) then SELL 40 SENSEX26NOV83600PE (CARRYFORWARD) at MARKET',
+    });
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(alert).not.toHaveBeenCalled();
   });
 });
 
@@ -1313,9 +1466,12 @@ describe('SentinelExitExecutor — PRICE_TRIGGER (sentinel price triggers)', () 
     const done = (x: Record<string, unknown> = {}) => env([sl({ status: 'cancelled', ...x })]);
     const filledExit = env([sl({ status: 'cancelled' }), { orderid: 'O1', status: 'complete', symboltoken: '445566', exchange: 'MCX' }]);
 
-    it('flag off: a resting SL-M → SKIPPED: OPEN_ORDER_EXISTS, nothing cancelled', async () => {
+    it('flag off: a resting SL-M → SKIPPED: OPEN_ORDER_EXISTS, nothing cancelled (EXIT_CANCEL_OWNER_ORDERS=off)', async () => {
       const h = harness({ books: [env([sl()])] });
-      await expect(h.ex.execute('row1', TV, LIVE, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+      const off = parseAutoExitConfig({
+        AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_QTY_UNITS: 'MCX:units', EXIT_CANCEL_OWNER_ORDERS: 'off',
+      });
+      await expect(h.ex.execute('row1', TV, off, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
       expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
       expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
     });

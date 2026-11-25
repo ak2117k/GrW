@@ -32,12 +32,21 @@ import {
 } from '../domain/exit-order';
 import {
   CANCEL_CONFIRM_STEPS_MS,
+  OWNER_CANCEL_CONFIRM_STEPS_MS,
   READ_RETRY_BACKOFF_MS,
   READ_RETRY_WINDOW_MS,
   TAG_LOOKUP_DELAY_MS,
 } from '../domain/claim-timing';
 import { findOrderFill, type OrderFill } from '../domain/exit-fill';
-import { evaluateGuards } from '../domain/guards';
+import { evaluateGuards, isHeld } from '../domain/guards';
+import {
+  describeOwnerOrders,
+  isOwnerExitOrder,
+  ownerExitOrdersFor,
+  withOwnerFacts,
+  type CancellableOrder,
+} from '../domain/owner-orders';
+import type { FloorBrokerSlAt } from '../domain/floor-broker-sl';
 import type { ExitTrigger } from '../domain/manual-exit';
 import {
   AiExitExecutionRepository,
@@ -75,6 +84,8 @@ export interface FloorStopResult {
   side?: 'BUY' | 'SELL'; trigger?: number; limit?: number; prevTrigger?: number; quantity?: number; productType?: string;
   ltp?: number; orderId?: string; brokerStatus?: string | null; brokerMessage?: string; fillPrice?: number;
 }
+/** One syncFloorStops pass's settings. `at` (FLOOR_BROKER_SL_AT) absent = noise. */
+export interface FloorStopSyncConfig { limitTicks: number; modifyMinSec: number; exit: AutoExitConfig; at?: FloorBrokerSlAt }
 /** An exit waits at most this long for a floor-stop change in flight on its position (then goes anyway). */
 export const STOP_IDLE_WAIT_MS = 20_000;
 const STOP_IDLE_POLL_MS = 250;
@@ -85,13 +96,21 @@ const STOP_WRITE_SPACING_MS = 250;
 const CONFIRM_STEPS_MS = [2_000, 3_000, 5_000];
 /** Reason prefix for every outcome that leaves a position whose protective order we cancelled unexited. */
 export const UNPROTECTED_AFTER_CANCEL = 'UNPROTECTED_AFTER_CANCEL';
+/** EXIT_CANCEL_OWNER_ORDERS: an owner order in the exit's way could not be cancelled (or not confirmed in 5 s). SKIPPED, retried next pass. */
+export const OWNER_ORDER_CANCEL_FAILED = 'OWNER_ORDER_CANCEL_FAILED';
+/** FLOOR_BROKER_SL_AT=ceiling: an owner exit-side order rests on the contract — the ceiling stop is kept / not placed. */
+export const OWNER_ORDER_RESTING = 'OWNER_ORDER_RESTING';
 
 type Tracker = { id: string; userId: string; status: string; kind: string; exchange: string; token: string; symbol: string; qty: number; entryTime?: Date | null };
 type Inst = { tickSize: number | null; lotSize: number | null } | null;
 type PreCheck =
   | { kind: 'ok'; order: OrderRequest; ltp: number; unitVerified: boolean }
-  | { kind: 'protective'; order: OrderRequest; ltp: number; unitVerified: boolean; orders: ProtectiveOrder[] }
-  | { kind: 'skip'; reason: string }
+  /**
+   * Orders to cancel before the exit. `via` 'protective': AI_AUTO_EXIT_CANCEL_PROTECTIVE's scan (unchanged);
+   * 'owner': EXIT_CANCEL_OWNER_ORDERS — the owner's exit-side orders (plus our own floor stop) on the contract.
+   */
+  | { kind: 'protective'; via: 'protective' | 'owner'; order: OrderRequest; ltp: number; unitVerified: boolean; orders: CancellableOrder[] }
+  | { kind: 'skip'; reason: string; detail?: string }
   | { kind: 'fail'; reason: string; detail?: string };
 type OkCheck = Extract<PreCheck, { kind: 'ok' }>;
 
@@ -113,6 +132,8 @@ interface Run {
   now: Date;
   /** Wall clock (Date.now) when the attempt started: read retries are budgeted from here. */
   startedMs: number;
+  /** EXIT_CANCEL_OWNER_ORDERS: "cancelled owner order …", appended to the PLACED row's brokerMessage. */
+  ownerNote?: string;
 }
 
 /** One broker read: its rows, or null when not answered after `attempts` tries (`detail` says why). */
@@ -152,6 +173,10 @@ class SessionTokenExpiredError extends Error {}
 
 /** A non-ok check's reason. `protective` only comes back from a check that may cancel; elsewhere it is an open order. */
 const refusal = (pre: Exclude<PreCheck, { kind: 'ok' }>) => (pre.kind === 'protective' ? 'OPEN_ORDER_EXISTS' : pre.reason);
+/** "AI exit (verdict cm…: thesis broken)" — the exit an owner order is cancelled for. */
+const exitFor = (run: Run) => `${run.trigger} exit (verdict ${run.v.id}: ${String(run.v.reason ?? '').slice(0, 160)})`;
+/** The PLACED row's brokerMessage, with the owner orders cancelled to make room for it (unchanged when none). */
+const noted = (run: Run, message: string) => (run.ownerNote ? `${message} | ${run.ownerNote}`.slice(0, 500) : message);
 /** "SL1 (STOPLOSS_MARKET SELL 100), T1 (LIMIT SELL 100)" */
 const describeProtective = (orders: ProtectiveOrder[]) =>
   orders.map((o) => `${o.orderId} (${o.orderType} ${o.side} ${o.quantity})`).join(', ');
@@ -178,6 +203,8 @@ export class SentinelExitExecutor {
   private readonly stopBusy = new Set<string>();
   /** trackerId → ms of our last write to its floor stop (the modify rate limit). */
   private readonly stopChangedAt = new Map<string, number>();
+  /** FLOOR_BROKER_SL_AT=ceiling: trackers already warned "ceiling stop blocked by owner order" (once per tracker). */
+  private readonly ceilingBlockWarned = new Set<string>();
 
   constructor(
     private readonly repo: AiExitExecutionRepository,
@@ -281,6 +308,7 @@ export class SentinelExitExecutor {
         if (first.kind === 'fail' && first.reason === 'BROKER_READ' && isInvalidToken(first.detail) && !run.sent && !run.cancelSent) {
           throw new SessionTokenExpiredError(first.detail ?? 'AG8001');
         }
+        if (first.kind === 'skip' && first.reason === OWNER_ORDER_CANCEL_FAILED) return this.ownerCancelFailed(run, first.detail ?? '');
         if (first.kind === 'skip' || first.kind === 'fail') {
           return first.kind === 'skip'
             ? this.finish(id, v, 'SKIPPED', first.reason)
@@ -301,9 +329,11 @@ export class SentinelExitExecutor {
 
         if (cfg.mode === 'dry-run') {
           const sell = `${first.order.side} ${first.order.quantity} ${first.order.symbol} (${first.order.positionType}) at MARKET`;
-          const what = first.kind === 'protective'
-            ? `would cancel protective ${describeProtective(first.orders)} then ${sell}`
-            : `would ${sell}`;
+          const what = first.kind !== 'protective'
+            ? `would ${sell}`
+            : first.via === 'owner'
+              ? `would cancel owner order(s) ${describeOwnerOrders(first.orders)} then ${sell}`
+              : `would cancel protective ${describeProtective(first.orders)} then ${sell}`;
           // R16: the table has no flag column, so an unverified unit is stated in the reason.
           const reason = first.unitVerified ? what : `UNIT_UNVERIFIED: ${what}`;
           this.logger.log(`[ai-exit] DRY-RUN ${reason} — verdict ${v.id}: ${v.reason}`);
@@ -316,7 +346,7 @@ export class SentinelExitExecutor {
 
         let pre: OkCheck;
         if (first.kind === 'protective') {
-          const c = await this.cancelProtective(s, t, run, first.orders);
+          const c = await this.cancelProtective(s, t, run, first.orders, first.via);
           if (c.kind === 'stop') return c.outcome;
           pre = c.pre;
           await this.recordPlan(id, pre.order, pre.ltp);
@@ -328,7 +358,7 @@ export class SentinelExitExecutor {
         const r = await this.place(s, run, o, 'M');
         this.logger.log(`[ai-exit] LIVE MARKET ${o.side} ${o.quantity} ${o.symbol} → ${r.status} ${r.orderId || ''} (${r.message}) — verdict ${v.id}`);
         if (r.status === 'PLACED' && r.orderId) {
-          await this.repo.update(id, { status: 'PLACED', brokerOrderId: r.orderId, brokerMessage: r.message, orderSentAt: run.sentAt ?? undefined });
+          await this.repo.update(id, { status: 'PLACED', brokerOrderId: r.orderId, brokerMessage: noted(run, r.message), orderSentAt: run.sentAt ?? undefined });
           return this.confirm(s, run, o, r.orderId, 'M');
         }
         return this.settleUnplaced(s, run, o, r, 'M');
@@ -450,7 +480,7 @@ export class SentinelExitExecutor {
    * is flat (ours is cancelled). Never throws; every write's answer is re-read from the book by our ordertag.
    */
   async syncFloorStops(
-    userId: string, intents: FloorStopIntent[], cfg: { limitTicks: number; modifyMinSec: number; exit: AutoExitConfig }, now: Date = new Date(),
+    userId: string, intents: FloorStopIntent[], cfg: FloorStopSyncConfig, now: Date = new Date(),
   ): Promise<FloorStopResult[]> {
     if (intents.length === 0) return [];
     try {
@@ -483,7 +513,7 @@ export class SentinelExitExecutor {
 
   private async syncOneStop(
     s: UserBrokerSession, userId: string, i: FloorStopIntent, positions: unknown[], book: unknown[],
-    cfg: { limitTicks: number; modifyMinSec: number; exit: AutoExitConfig }, now: Date,
+    cfg: FloorStopSyncConfig, now: Date,
   ): Promise<FloorStopResult> {
     const base = { trackerId: i.trackerId };
     const exchange = String(i.exchange).toUpperCase();
@@ -500,9 +530,27 @@ export class SentinelExitExecutor {
       if (hasPriorAiExit(book, exchange, i.token, i.entryTime)) return { ...base, action: 'KEEP', reason: 'EXIT_ORDER_ON_BOOK' };
     }
     const tag = floorStopTag(i.trackerId);
-    const others = (book as Array<Record<string, unknown>>).some((o) =>
+    const otherRows = (book as Array<Record<string, unknown>>).filter((o) =>
       String(o?.symboltoken ?? '') === i.token && String(o?.exchange ?? '').toUpperCase() === exchange
       && String(o?.ordertag ?? '') !== tag && !isTerminalOrderStatus(String(o?.status ?? o?.orderstatus ?? '')));
+    const others = otherRows.length > 0;
+    // FLOOR_BROKER_SL_AT=ceiling + EXIT_CANCEL_OWNER_ORDERS: when every other open order is the owner's on the exit
+    // side, a resting ceiling stop is KEPT (no longer cancelled) and none is placed (two resting exits = a double
+    // exit) — WARN once per tracker; the executor's code exit cancels the owner order when an exit is needed.
+    // A resting stop now BIGGER than the position (the owner order part-filled) falls to today's rule (cancelled).
+    if (others && i.eligible.ok && plan.ok && cfg.at === 'ceiling' && cfg.exit.cancelOwnerOrders === true
+      && otherRows.every((o) => isOwnerExitOrder(o, plan.order.side))
+      && (stop.kind !== 'open' || stop.quantity <= plan.order.quantity)) {
+      const ids = otherRows.map((o) => String(o?.orderid ?? '?')).join(',');
+      if (stop.kind === 'open') {
+        return { ...base, action: 'KEEP', reason: OWNER_ORDER_RESTING, ltp: plan.ltp, side: stop.side, trigger: stop.trigger, limit: stop.limit, quantity: stop.quantity };
+      }
+      if (!this.ceilingBlockWarned.has(i.trackerId)) {
+        this.ceilingBlockWarned.add(i.trackerId);
+        this.logger.warn(`[floor-sl] ceiling stop blocked by owner order ${ids} on ${i.symbol} — not placed while it rests (double-exit risk); the code exit cancels it when an exit is needed`);
+      }
+      return { ...base, action: 'NONE', reason: OWNER_ORDER_RESTING, ltp: plan.ltp };
+    }
     const eligible = !i.eligible.ok ? i.eligible : !plan.ok ? { ok: false as const, reason: plan.reason } : others ? { ok: false as const, reason: 'OTHER_OPEN_ORDER' } : { ok: true as const };
     const desired = plan.ok
       ? desiredFloorStop({ side: plan.netQty > 0 ? 'LONG' : 'SHORT', floor: i.floor ?? NaN, ltp: plan.ltp, tick: i.tick, limitTicks: cfg.limitTicks, quantity: plan.order.quantity })
@@ -562,18 +610,35 @@ export class SentinelExitExecutor {
    * 3. Fresh positions + order book (no second cancel): flat ⇒ SKIPPED
    *    PROTECTIVE_FILLED (or ALREADY_FLAT); anything else refusing ⇒ FAILED
    *    UNPROTECTED_AFTER_CANCEL:<reason>; ok ⇒ the normal exit of the FRESH |netqty|.
+   *
+   * `via` 'owner' (EXIT_CANCEL_OWNER_ORDERS, 2026-11-25): the same steps for the owner's exit-side orders, with
+   * intent CANCELLING_OWNER_ORDERS:<ids>; the cancel must be confirmed from the book within 5 s
+   * (OWNER_CANCEL_CONFIRM_STEPS_MS, one read per step) or the attempt ends SKIPPED OWNER_ORDER_CANCEL_FAILED —
+   * no exit sent, loud, retried on the next pass; a flat position after it ⇒ SKIPPED OWNER_ORDER_FILLED.
+   * Either way, with EXIT_CANCEL_OWNER_ORDERS on, every confirmed-cancelled owner order is recorded (log line,
+   * ops alert, the PLACED row's brokerMessage) before the exit is sent.
    */
   private async cancelProtective(
-    s: UserBrokerSession, t: Tracker, run: Run, orders: ProtectiveOrder[],
+    s: UserBrokerSession, t: Tracker, run: Run, orders: CancellableOrder[], via: 'protective' | 'owner' = 'protective',
   ): Promise<{ kind: 'stop'; outcome: AiExitOutcome } | { kind: 'ok'; pre: OkCheck }> {
     const { id, v } = run;
+    const owner = via === 'owner';
     const ids = orders.map((o) => o.orderId);
-    const what = describeProtective(orders);
-    await this.repo.update(id, {
-      reason: `CANCELLING_PROTECTIVE:${ids.join(',')}`,
-      brokerMessage: `cancelling protective ${what} before the exit`,
-    });
-    this.logger.warn(`[ai-exit] cancelling protective ${what} on ${v.symbol} before the exit — verdict ${v.id}`);
+    if (owner) {
+      const what = describeOwnerOrders(orders);
+      await this.repo.update(id, {
+        reason: `CANCELLING_OWNER_ORDERS:${ids.join(',')}`,
+        brokerMessage: `cancelling owner order(s) ${what} to make room for the ${exitFor(run)}`.slice(0, 500),
+      });
+      this.logger.warn(`[ai-exit] cancelling owner order(s) ${what} on ${v.symbol} to make room for the ${exitFor(run)}`);
+    } else {
+      const what = describeProtective(orders);
+      await this.repo.update(id, {
+        reason: `CANCELLING_PROTECTIVE:${ids.join(',')}`,
+        brokerMessage: `cancelling protective ${what} before the exit`,
+      });
+      this.logger.warn(`[ai-exit] cancelling protective ${what} on ${v.symbol} before the exit — verdict ${v.id}`);
+    }
 
     const answers: string[] = [];
     for (const p of orders) {
@@ -583,11 +648,16 @@ export class SentinelExitExecutor {
     }
 
     let state: { open: string[]; filled: string[] } | null = null;
-    for (const step of CANCEL_CONFIRM_STEPS_MS) {
+    for (const step of owner ? OWNER_CANCEL_CONFIRM_STEPS_MS : CANCEL_CONFIRM_STEPS_MS) {
       await this.sleep(step);
-      const { rows: book } = await this.readRows(run, 'order book', () => s.getOrderBookEnvelope());
+      // Owner path: one read per step, so "confirmed within 5 s" holds (no read retry stretches it).
+      const book = owner ? await this.rows(() => s.getOrderBookEnvelope()) : (await this.readRows(run, 'order book', () => s.getOrderBookEnvelope())).rows;
       if (book) state = protectiveCancelState(book, ids);
       if (state && state.open.length === 0) break;
+    }
+    if (owner && (!state || state.open.length > 0)) {
+      const still = state ? state.open.join(',') : ids.join(',');
+      return { kind: 'stop', outcome: await this.ownerCancelFailed(run, `not confirmed cancelled within 5 s: ${still}; ${answers.join('; ')}`) };
     }
     if (!state || state.open.length > 0) {
       const still = state ? state.open.join(',') : ids.join(',');
@@ -600,17 +670,57 @@ export class SentinelExitExecutor {
       }) };
     }
 
+    this.recordOwnerCancels(run, orders, state.filled);
+
     const pre = await this.preOrderCheck(s, t, run, false);
     if (pre.kind === 'skip' && pre.reason === 'ALREADY_FLAT') {
-      const reason = state.filled.length > 0 ? 'PROTECTIVE_FILLED' : 'ALREADY_FLAT';
+      const reason = state.filled.length > 0 ? (owner ? 'OWNER_ORDER_FILLED' : 'PROTECTIVE_FILLED') : 'ALREADY_FLAT';
       return { kind: 'stop', outcome: await this.finish(id, v, 'SKIPPED', reason, {
-        brokerMessage: state.filled.length > 0 ? `protective order(s) ${state.filled.join(',')} filled` : undefined,
+        brokerMessage: state.filled.length > 0 ? `${owner ? 'owner' : 'protective'} order(s) ${state.filled.join(',')} filled` : undefined,
       }) };
     }
     if (pre.kind !== 'ok') {
       return { kind: 'stop', outcome: await this.finish(id, v, 'FAILED', `${UNPROTECTED_AFTER_CANCEL}:${refusal(pre)}`) };
     }
     return { kind: 'ok', pre };
+  }
+
+  /**
+   * EXIT_CANCEL_OWNER_ORDERS: an owner order in the exit's way could not be cancelled or the cancel was not
+   * confirmed. SKIPPED (no exit sent; nothing in flight, so the next pass retries), never silent: WARN with the
+   * order id(s) and the broker's answers, the row's brokerMessage, and (live) an ops alert.
+   */
+  private async ownerCancelFailed(run: Run, detail: string): Promise<AiExitOutcome> {
+    const { id, v } = run;
+    this.logger.warn(
+      `[ai-exit] !!! ${OWNER_ORDER_CANCEL_FAILED} on ${v.symbol} (tracker ${v.trackerId}): ${detail} — NO exit was sent; ` +
+        `retried on the next pass. Check Angel now. verdict ${v.id}`,
+    );
+    if (run.cfg.mode === 'live') {
+      void sendOpsAlert(
+        `owner-order-cancel-failed:${v.trackerId}`,
+        `GrW ALERT: exit of ${v.symbol} is BLOCKED — your order resting at Angel could not be cancelled ` +
+          `(${scrubBrokerMessage(detail, 300)}). No exit was sent; it retries next pass. Check the position.`,
+      ).catch(() => undefined);
+    }
+    return this.finish(id, v, 'SKIPPED', OWNER_ORDER_CANCEL_FAILED, { brokerMessage: detail.slice(0, 500) }, true);
+  }
+
+  /**
+   * With EXIT_CANCEL_OWNER_ORDERS on: each owner order confirmed cancelled (not filled) to make room for this
+   * exit — a `[exit] cancelled owner order …` line, one ops alert per tracker, and a note for the PLACED row.
+   */
+  private recordOwnerCancels(run: Run, orders: CancellableOrder[], filled: string[]): void {
+    if (run.cfg.cancelOwnerOrders !== true) return;
+    const gone = orders.filter((o) => o.owner && !filled.includes(o.orderId));
+    if (gone.length === 0) return;
+    const what = describeOwnerOrders(gone);
+    run.ownerNote = `cancelled owner order ${what} to make room for this exit`;
+    this.logger.warn(`[exit] cancelled owner order ${what} on ${run.v.symbol} to exit it — ${exitFor(run)}`);
+    void sendOpsAlert(
+      `owner-order-cancelled:${run.v.trackerId}`,
+      `GrW: cancelled your order ${what} on ${run.v.symbol} at Angel to make room for the ${exitFor(run)}. The exit is being sent now.`,
+    ).catch(() => undefined);
   }
 
   /**
@@ -662,7 +772,7 @@ export class SentinelExitExecutor {
     if (mine && mine.status !== 'rejected' && mine.status !== 'cancelled') {
       this.logger.warn(`[ai-exit] ${o.symbol} placement answer was "${r.message}" but order ${mine.orderId || '?'} (${mine.status || 'unknown'}) carries our tag — treating as PLACED`);
       await this.repo.update(id, {
-        status: 'PLACED', brokerOrderId: mine.orderId || null, brokerMessage: r.message, orderStatus: mine.status || null,
+        status: 'PLACED', brokerOrderId: mine.orderId || null, brokerMessage: noted(run, r.message), orderStatus: mine.status || null,
         orderSentAt: run.sentAt ?? undefined,
       });
       return mine.orderId ? this.confirm(s, run, o, mine.orderId, leg) : { status: 'PLACED' };
@@ -770,14 +880,25 @@ export class SentinelExitExecutor {
     // An exit that completed before this position opened belonged to an earlier round trip (hasPriorAiExit).
     if (hasPriorAiExit(book, plan.order.exchange, plan.order.token, t.entryTime ?? null)) return { kind: 'skip', reason: 'PRIOR_AI_EXIT_TODAY' };
     if (hasOpenOrderFor(book, plan.order.exchange, plan.order.token)) {
+      const fields = { order: plan.order, ltp: plan.ltp, unitVerified: plan.unitVerified };
       if (allowCancel && run.cfg.cancelProtective) {
         const scan = protectiveOrdersFor(book, {
           exchange: plan.order.exchange, token: plan.order.token, side: plan.order.side,
           quantity: plan.order.quantity, positionType: plan.order.positionType,
         });
         if (scan.kind === 'protective') {
-          return { kind: 'protective', order: plan.order, ltp: plan.ltp, unitVerified: plan.unitVerified, orders: scan.orders };
+          return { kind: 'protective', via: 'protective', ...fields, orders: withOwnerFacts(book, scan.orders) };
         }
+      }
+      // EXIT_CANCEL_OWNER_ORDERS: whatever the protective scan left — the owner's exit-side orders of any type,
+      // size or product. Never on a HOLD-list position (the owner's own Exit-now included).
+      if (allowCancel && run.cfg.cancelOwnerOrders === true && !isHeld(run.cfg.hold, t)) {
+        const own = ownerExitOrdersFor(
+          book, { exchange: plan.order.exchange, token: plan.order.token, side: plan.order.side, trackerId: t.id },
+          { cancelOwnStop: run.cfg.cancelProtective },
+        );
+        if (own.kind === 'cancel') return { kind: 'protective', via: 'owner', ...fields, orders: own.orders };
+        if (own.kind === 'uncancellable') return { kind: 'skip', reason: OWNER_ORDER_CANCEL_FAILED, detail: own.detail };
       }
       return { kind: 'skip', reason: 'OPEN_ORDER_EXISTS' };
     }
@@ -850,7 +971,7 @@ export class SentinelExitExecutor {
     const r = await this.place(s, run, limit, 'L');
     this.logger.log(`[ai-exit] LIVE LIMIT ${limit.side} ${limit.quantity} ${limit.symbol} @ ${price} → ${r.status} ${r.orderId || ''} (${r.message}) — verdict ${v.id}`);
     if (r.status === 'PLACED' && r.orderId) {
-      await this.repo.update(id, { status: 'PLACED', brokerOrderId: r.orderId, brokerMessage: r.message });
+      await this.repo.update(id, { status: 'PLACED', brokerOrderId: r.orderId, brokerMessage: noted(run, r.message) });
       return this.confirm(s, run, limit, r.orderId, 'L');
     }
     return this.settleUnplaced(s, run, limit, r, 'L');

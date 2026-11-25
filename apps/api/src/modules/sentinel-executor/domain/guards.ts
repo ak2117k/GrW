@@ -28,7 +28,7 @@ const no = (reason: string): GuardResult => ({ ok: false, reason });
  * The first failing guard names the SKIPPED reason; nothing is sent on any failure.
  */
 /** The owner is holding this position against the AI (AI_AUTO_EXIT_HOLD, by symbol or tracker id). */
-function isHeld(hold: string[] | undefined, t: { id?: string; symbol?: string }): boolean {
+export function isHeld(hold: string[] | undefined, t: { id?: string; symbol?: string }): boolean {
   if (!hold || hold.length === 0) return false;
   const keys = [t.symbol, t.id].map((k) => String(k ?? '').trim().toUpperCase()).filter(Boolean);
   return keys.some((k) => hold.includes(k));

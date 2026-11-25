@@ -12,6 +12,7 @@ describe('parseAutoExitConfig', () => {
       limitFallbackPct: 2,
       qtyUnits: { NFO: 'units', BFO: 'units' },
       cancelProtective: false,
+      cancelOwnerOrders: true,
       hold: [],
       problems: [],
     });
@@ -108,5 +109,17 @@ describe('AI_AUTO_EXIT_CANCEL_PROTECTIVE (cancel the owner\'s protective stop-lo
     expect(parseAutoExitConfig({ AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'true' }).cancelProtective).toBe(true);
     expect(parseAutoExitConfig({ AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'TRUE' }).cancelProtective).toBe(false);
     expect(parseAutoExitConfig({ AI_AUTO_EXIT_CANCEL_PROTECTIVE: '1' }).cancelProtective).toBe(false);
+  });
+});
+
+describe('EXIT_CANCEL_OWNER_ORDERS (an owner order resting on the contract must not block a needed exit)', () => {
+  it('on by default, off only on "off"; junk keeps on and is reported', () => {
+    expect(parseAutoExitConfig({}).cancelOwnerOrders).toBe(true);
+    expect(parseAutoExitConfig({ EXIT_CANCEL_OWNER_ORDERS: 'on' }).cancelOwnerOrders).toBe(true);
+    expect(parseAutoExitConfig({ EXIT_CANCEL_OWNER_ORDERS: ' off ' }).cancelOwnerOrders).toBe(false);
+    expect(parseAutoExitConfig({ EXIT_CANCEL_OWNER_ORDERS: 'OFF' }).cancelOwnerOrders).toBe(false);
+    const junk = parseAutoExitConfig({ EXIT_CANCEL_OWNER_ORDERS: 'maybe' });
+    expect(junk.cancelOwnerOrders).toBe(true);
+    expect(junk.problems).toEqual([expect.stringContaining('EXIT_CANCEL_OWNER_ORDERS=maybe')]);
   });
 });

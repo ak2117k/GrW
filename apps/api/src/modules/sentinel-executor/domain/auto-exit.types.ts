@@ -57,6 +57,14 @@ export interface AutoExitConfig {
    */
   cancelProtective: boolean;
   /**
+   * EXIT_CANCEL_OWNER_ORDERS (2026-11-25, default ON; only `off` turns it off): when an exit must be sent and
+   * the contract has non-terminal owner orders (not ours by ordertag) on the EXIT side, cancel them, confirm
+   * the cancel from the order book, then exit — instead of refusing OPEN_ORDER_EXISTS (prod 2026-11-25:
+   * SENSEX26NOV83600PE, six AI exits blocked by a manual order, −₹3,646). Entry-side orders and other
+   * contracts are never touched; HOLD-list positions never. Absent (hand-built configs) = off.
+   */
+  cancelOwnerOrders?: boolean;
+  /**
    * AI_AUTO_EXIT_HOLD (default empty): trading symbols (or tracker ids) the owner
    * is holding against the AI — an AI or price-trigger exit on them is SKIPPED
    * OWNER_HOLD. The owner's own "Exit now" is never held. Upper-cased.

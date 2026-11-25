@@ -23,6 +23,16 @@ function num(
   return fallback;
 }
 
+/** `on|off` (any case, trimmed); unset = `fallback`; anything else = `fallback`, reported. */
+function parseOnOff(raw: string | undefined, name: string, fallback: boolean, problems: string[]): boolean {
+  const v = String(raw ?? '').trim().toLowerCase();
+  if (v === '') return fallback;
+  if (v === 'on') return true;
+  if (v === 'off') return false;
+  problems.push(`${name}=${raw} is not on|off — using ${fallback ? 'on' : 'off'}`);
+  return fallback;
+}
+
 /**
  * AI_AUTO_EXIT_QTY_UNITS (plan ruling R16): `EXCHANGE:units|lots`, comma separated,
  * merged over DEFAULT_QTY_UNITS. Fails CLOSED: a malformed or contradictory entry
@@ -96,6 +106,7 @@ export function parseAutoExitConfig(env: Record<string, string | undefined>): Au
       DEFAULTS.limitFallbackPct, (n) => n >= 0.5 && n <= 10, problems),
     qtyUnits: parseQtyUnits(env.AI_AUTO_EXIT_QTY_UNITS, problems),
     cancelProtective: env.AI_AUTO_EXIT_CANCEL_PROTECTIVE === 'true',
+    cancelOwnerOrders: parseOnOff(env.EXIT_CANCEL_OWNER_ORDERS, 'EXIT_CANCEL_OWNER_ORDERS', true, problems),
     hold: [
       ...new Set(
         String(env.AI_AUTO_EXIT_HOLD ?? '')

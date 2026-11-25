@@ -3,6 +3,7 @@ import { SentinelExitExecutor, type FloorStopIntent } from './sentinel-exit-exec
 import { parseAutoExitConfig } from '../domain/auto-exit.config';
 import { floorStopTag } from '../domain/floor-broker-sl';
 import type { PendingVerdict } from '../repositories/ai-exit-execution.repository';
+import * as opsAlert from '../../../common/utils/ops-alert';
 
 const NOW = new Date('2026-11-06T05:00:00Z');
 const EXIT = parseAutoExitConfig({
@@ -144,6 +145,59 @@ describe('syncFloorStops (FLOOR_BROKER_SL live)', () => {
     const h = harness({ positions: [env([pos('0')])], books: [env([ourStop({ status: 'complete', averageprice: '180.7', filledshares: '130' })])] });
     expect((await h.ex.syncFloorStops('owner', [intent()], CFG, NOW))[0]).toMatchObject({ action: 'FILLED', fillPrice: 180.7 });
     expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+});
+
+describe('FLOOR_BROKER_SL_AT=ceiling and an owner order resting on the contract (EXIT_CANCEL_OWNER_ORDERS)', () => {
+  const CEIL = { ...CFG, at: 'ceiling' as const };
+  const ownerSell = { orderid: 'OWN1', ordertag: '', exchange: 'NFO', symboltoken: '40009', status: 'open', variety: 'NORMAL', ordertype: 'LIMIT', transactiontype: 'SELL', producttype: 'CARRYFORWARD', quantity: '130', price: '220' };
+  const ceilingStop = () => ourStop({ triggerprice: '120', price: '119.85' });
+  const ceilingIntent = () => intent({ floor: 120 });
+
+  it('an owner exit-side order no longer CANCELS a resting ceiling stop (KEEP)', async () => {
+    const h = harness({ books: [env([ownerSell, ceilingStop()])] });
+    const [r] = await h.ex.syncFloorStops('owner', [ceilingIntent()], CEIL, NOW);
+    expect(r).toMatchObject({ action: 'KEEP', reason: 'OWNER_ORDER_RESTING', trigger: 120 });
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(h.session.modifyOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('placement while an owner exit-side order rests stays blocked (double-exit risk) and WARNs once per tracker', async () => {
+    const h = harness({ books: [env([ownerSell])] });
+    const warn = jest.spyOn((h.ex as any).logger, 'warn');
+    expect((await h.ex.syncFloorStops('owner', [ceilingIntent()], CEIL, NOW))[0]).toMatchObject({ action: 'NONE', reason: 'OWNER_ORDER_RESTING' });
+    await h.ex.syncFloorStops('owner', [ceilingIntent()], CEIL, new Date(NOW.getTime() + 2_000));
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('ceiling stop blocked by owner order OWN1'));
+    expect(lines).toHaveLength(1);
+  });
+
+  it('an entry-side owner order: today\'s rule (OTHER_OPEN_ORDER cancels ours)', async () => {
+    const h = harness({ books: [env([{ ...ownerSell, transactiontype: 'BUY' }, ceilingStop()])] });
+    expect((await h.ex.syncFloorStops('owner', [ceilingIntent()], CEIL, NOW))[0]).toMatchObject({ action: 'CANCEL', reason: 'OTHER_OPEN_ORDER' });
+  });
+
+  it('EXIT_CANCEL_OWNER_ORDERS=off, or noise mode: today\'s rule (OTHER_OPEN_ORDER cancels ours)', async () => {
+    const off = { ...CEIL, exit: parseAutoExitConfig({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'true', EXIT_CANCEL_OWNER_ORDERS: 'off' }) };
+    const h = harness({ books: [env([ownerSell, ceilingStop()])] });
+    expect((await h.ex.syncFloorStops('owner', [ceilingIntent()], off, NOW))[0]).toMatchObject({ action: 'CANCEL', reason: 'OTHER_OPEN_ORDER' });
+    const n = harness({ books: [env([ownerSell, ourStop()])] });
+    expect((await n.ex.syncFloorStops('owner', [intent()], CFG, NOW))[0]).toMatchObject({ action: 'CANCEL', reason: 'OTHER_OPEN_ORDER' });
+  });
+
+  it('the code exit covers it: an exit cancels the owner order AND our ceiling stop, confirms, then sells once', async () => {
+    const V: PendingVerdict = { id: 'cmverdict0000000000000009', userId: 'owner', trackerId: 't1', symbol: 'NIFTY09NOV2624650CE', reason: 'HARD_LOSS', createdAt: new Date(NOW.getTime() - 3_000) };
+    const alert = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true);
+    const gone = env([{ ...ownerSell, status: 'cancelled' }, { ...ceilingStop(), status: 'cancelled' }]);
+    const h = harness({ positions: [env([pos('130', '150')]), env([pos('130', '150')]), env([pos('0', '150')])], books: [env([ownerSell, ceilingStop()]), gone, gone, gone] });
+    await h.ex.process(V, EXIT, NOW);
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('NORMAL', 'OWN1');
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('STOPLOSS', 'SL1');
+    expect(h.calls.filter((c) => c.startsWith('place:MARKET'))).toHaveLength(1);
+    expect(h.calls.findIndex((c) => c.startsWith('place:MARKET'))).toBeGreaterThan(h.calls.lastIndexOf('cancel:STOPLOSS:SL1'));
+    // Only the owner's order is recorded as an owner cancel (our own stop is not).
+    expect(alert).toHaveBeenCalledWith('owner-order-cancelled:t1', expect.not.stringContaining('SL1'));
+    alert.mockRestore();
   });
 });
 

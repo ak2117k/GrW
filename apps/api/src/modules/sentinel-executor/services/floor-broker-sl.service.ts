@@ -254,7 +254,7 @@ export class FloorBrokerSlService implements OnModuleInit, OnModuleDestroy {
       intents.set(t.userId, list);
     }
     for (const [userId, list] of intents) {
-      const results = await this.executor.syncFloorStops(userId, list.map((x) => x.intent), { limitTicks: cfg.limitTicks, modifyMinSec: cfg.modifyMinSec, exit }, now);
+      const results = await this.executor.syncFloorStops(userId, list.map((x) => x.intent), { limitTicks: cfg.limitTicks, modifyMinSec: cfg.modifyMinSec, exit, at: cfg.at }, now);
       for (const r of results) {
         const x = list.find((y) => y.t.id === r.trackerId);
         if (x) await this.recordLive(x.t, x.state, r, now);

@@ -5,6 +5,11 @@ import { BROKER_CALL_TIMEOUT_MS, ORDER_CALL_TIMEOUT_MS } from '../../auto-execut
 export const TAG_LOOKUP_DELAY_MS = 2_000;
 /** Cancel protective then exit: order-book checks at +1 s, +3 s, +6 s after the cancel request(s). */
 export const CANCEL_CONFIRM_STEPS_MS = [1_000, 2_000, 3_000];
+/**
+ * EXIT_CANCEL_OWNER_ORDERS: an owner order cancelled to make room for an exit must be confirmed within 5 s —
+ * order-book checks at +1 s, +2.5 s, +5 s. Same number of reads as CANCEL_CONFIRM_STEPS_MS (the bound below holds).
+ */
+export const OWNER_CANCEL_CONFIRM_STEPS_MS = [1_000, 1_500, 2_500];
 /** More protective orders than this on one contract ⇒ not cancelled (keeps the bound below finite). */
 export const MAX_PROTECTIVE_CANCELS = 3;
 /**

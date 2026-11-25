@@ -131,9 +131,9 @@ const CHANNEL_VIEWS_RULE = 'channel\'s view accuracy): weak, crowd sentiment —
 
 const VERIFIED_NOTES_RULE = [
   'channelViews.verifiedNotes = channel claims checked against our data at post time (today\'s session; channel, IST time,',
-  'claim, bias, verdict CONFIRMED or CONTRADICTED, the evidence numbers): context, weighted by the verdict and by the',
-  'channel\'s information accuracy — never a trigger to take or skip on their own; a CONTRADICTED note counts against the',
-  'channel\'s claim, not for the opposite trade.',
+  'claim, bias, verdict CONFIRMED or CONTRADICTED, the evidence numbers): context, weighted by the verdict — never a',
+  'trigger to take or skip on their own; a CONTRADICTED note counts against the channel\'s claim, not for the opposite',
+  'trade.',
 ].join(' ');
 
 /**

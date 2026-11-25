@@ -26,6 +26,9 @@ describe('verifiedNotes judge prompt (MESSAGE_READER=on)', () => {
       expect(off).not.toMatch(/verifiedNotes/);
       expect(on).toMatch(/channelViews\.verifiedNotes = channel claims checked against our data at post time/);
       expect(on).toMatch(/never a trigger to take or skip on their own/);
+      expect(on).toMatch(/weighted by the verdict — never a trigger/);
+      // Final review #3: the notes carry no channel accuracy (night scores are not consumed yet), so the rule cites none.
+      expect(on).not.toMatch(/information accuracy/);
       expect(on).toMatch(/a CONTRADICTED note counts against the channel's claim, not for the opposite trade/);
       // The line sits right after the channelViews line; nothing else changes.
       expect(on.replace(/ channelViews\.verifiedNotes = [^]*?not for the opposite trade\./, '')).toBe(off);

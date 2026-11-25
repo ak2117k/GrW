@@ -150,6 +150,10 @@ agreement data — not part of this build.
   - Relative breadth ("index strong, stocks weak"): right if NIFTY return > 0 and session A/D < 1, judged
     from the post time to the close.
   - SECTOR: the sector index close vs 0.3×ATR. FII / gap claims: NOT_SCORED in v1 (stored, not scored).
+  - **TODO (follow-up, 2026-11-25 final review):** the night scores are stored on each row
+    (`outcomes`) but nothing reads them yet — no per-channel information accuracy is built, and neither the
+    judge's verifiedNotes nor its prompt cite one. Wiring the scores into the night review / channel
+    accuracy is a separate follow-up ticket.
 - **Owner**: an alert (via the existing owner-alert service) for MARKET-scope CONFIRMED claims with bias
   CAUTION/BEAR/BULL, at most one per channel per 30 min; and a "Market notes" list on the Telegram signals
   page showing each reading with its verdict and evidence.

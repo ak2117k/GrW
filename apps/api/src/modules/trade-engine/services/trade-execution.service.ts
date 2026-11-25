@@ -469,6 +469,28 @@ export class TradeExecutionService {
             ? trade.entryPrice
             : undefined);
 
+      // CLAIM the paper close (2026-11-25) before any accounting — the simulated fill below already moves the
+      // virtual balance, and applyExitAccounting books the P&L. Two closers in the same instant (the paper
+      // watch, the AI setup watch, the paper sentinel) both passed the OPEN check above; only the one whose
+      // conditional update still finds the status and quantity it read goes on. The loser returns the row
+      // as it is now, with no accounting. Paper only: a live close keeps its broker-first order.
+      const claimed = await this.tradeRepository.claimClose(
+        tradeId,
+        { status: trade.status, quantity: trade.quantity },
+        isFullClose
+          ? {
+              status: 'CLOSED',
+              exitTime: new Date(),
+              exitReasonTag: opts.exitReasonTag ?? null,
+              exitNotes: opts.exitNotes ?? opts.reason ?? null,
+            }
+          : { quantity: trade.quantity - closeQty },
+      );
+      if (!claimed) {
+        this.logger.warn(`[Paper] Close of trade ${tradeId} skipped: another close claimed it first (no accounting)`);
+        return (await this.tradeRepository.getTradeById(tradeId)) ?? trade;
+      }
+
       const paperResponse =
         await this.paperTradeService.simulateOrder(closeOrder);
 

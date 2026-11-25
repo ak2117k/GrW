@@ -173,6 +173,11 @@ export class AiSetupsRepository implements SetupPacketSources {
     }) as Promise<ActiveSetupRow[]>;
   }
 
+  /** One row's current status and trade (the watch re-reads it when an attach fails). */
+  setupState(id: string): Promise<{ status: string; tradeId: string | null } | null> {
+    return this.prisma.aiSetup.findUnique({ where: { id }, select: { status: true, tradeId: true } });
+  }
+
   /** PENDING → FILLED (the claim, before the paper open). False = another pass already moved it. */
   async claimFill(id: string, at: Date): Promise<boolean> {
     const r = await this.prisma.aiSetup.updateMany({ where: { id, status: 'PENDING' }, data: { status: 'FILLED', entryAt: at } });

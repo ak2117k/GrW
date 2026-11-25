@@ -1,4 +1,5 @@
 import { PAPER_WATCH_STRATEGIES } from '../../signal-trader/domain/paper';
+import { ISOLATED_PAPER_STRATEGIES } from '../../trade-engine/services/risk-manager.service';
 import type { SignalTraderConfig } from '../../signal-trader/domain/signal-trader.config';
 import { parseSignalTraderConfig } from '../../signal-trader/domain/signal-trader.config';
 import type { AiSetupsConfig } from '../ai-setups.config';
@@ -42,6 +43,10 @@ class FakeStore implements SetupWatchStore {
   }
   async activeSetups() {
     return [...this.rows.values()].filter((r) => r.status === 'PENDING' || r.status === 'FILLED').map((r) => ({ ...r, setup: JSON.parse(JSON.stringify(r.setup)) }));
+  }
+  async setupState(id: string) {
+    const r = this.rows.get(id);
+    return r ? { status: r.status, tradeId: r.tradeId } : null;
   }
   private cas(id: string, when: (r: Row) => boolean, set: Partial<Row>): boolean {
     const r = this.rows.get(id);
@@ -337,8 +342,8 @@ describe('SetupWatchService — FILLED', () => {
       id: 'trade-7', status: 'OPEN', strategy: 'AI_SETUP', isPaperTrade: true, exitReasonTag: null, pnl: null, exitTime: null, entryPrice: 12.4,
       instrument: { token: OPT_TOKEN, exchange: 'NFO', symbol: 'DABUR30DEC26440CE' }, entryTags: ['ai-setup', 'setup:s1'],
     });
-    h.store.add({ id: 's1', status: 'FILLED', tradeId: null, entryAt: NOW });
-    h.store.add({ id: 's2', status: 'FILLED', tradeId: null, entryAt: NOW, underlying: 'DABUR' });
+    h.store.add({ id: 's1', status: 'FILLED', tradeId: null, entryAt: LATER(-2) });
+    h.store.add({ id: 's2', status: 'FILLED', tradeId: null, entryAt: LATER(-2), underlying: 'DABUR' });
     h.setUnderlying(428);
     await h.make().pass(NOW);
     expect(h.paper.open).not.toHaveBeenCalled();
@@ -361,5 +366,68 @@ describe('SetupWatchService — FILLED', () => {
 describe('AI_SETUP in the paper watch', () => {
   it('the generic paper watch + paper sentinel manage AI_SETUP paper trades too (premium floor, square-off, AI exits)', () => {
     expect(PAPER_WATCH_STRATEGIES).toContain('AI_SETUP');
+  });
+});
+
+describe('SetupWatchService — fix round 1', () => {
+  it('AI_SETUP paper trades have their own concurrent-positions pool (stale scanner paper trades cannot block them)', () => {
+    expect(ISOLATED_PAPER_STRATEGIES.has('AI_SETUP')).toBe(true);
+  });
+
+  it('no underlying line in the master → EXPIRED NO_UNDERLYING_REF; a failed lookup only waits', async () => {
+    const h = harness();
+    h.store.add({ id: 's1', underlying: 'NOSUCH' });
+    await h.svc.pass(NOW);
+    expect(h.store.rows.get('s1')).toMatchObject({ status: 'EXPIRED', exitReason: expect.stringMatching(/^NO_UNDERLYING_REF/) });
+    const h2 = harness();
+    h2.store.add({ id: 's1' });
+    (h2.market.underlyingRef as jest.Mock).mockRejectedValueOnce(new Error('master down'));
+    await h2.svc.pass(NOW);
+    expect(h2.store.rows.get('s1')!.status).toBe('PENDING');
+  });
+
+  it('interleaving: while A is inside the paper open, B (a claim younger than 60 s) does nothing; A attaches', async () => {
+    const h = harness();
+    h.store.add({ id: 's1' });
+    h.setUnderlying(424.6);
+    h.setOption(12.4);
+    const realOpen = h.paper.open.getMockImplementation()!;
+    h.paper.open.mockImplementationOnce(async (i) => {
+      // Process B passes 10 s after A's claim, before A's open returns.
+      await h.make().pass(LATER(10 / 60));
+      expect(h.store.rows.get('s1')).toMatchObject({ status: 'FILLED', tradeId: null });
+      return realOpen(i);
+    });
+    await h.svc.pass(NOW);
+    expect(h.paper.open).toHaveBeenCalledTimes(1);
+    expect(h.store.rows.get('s1')).toMatchObject({ status: 'FILLED', tradeId: 'trade-1' });
+    expect(h.exec.closeTrade).not.toHaveBeenCalled();
+  });
+
+  it('an attach that fails because the row moved closes the just-opened paper trade at once (AI_SETUP_ORPHANED)', async () => {
+    const h = harness();
+    h.store.add({ id: 's1' });
+    h.setUnderlying(424.6);
+    h.setOption(12.4);
+    const realOpen = h.paper.open.getMockImplementation()!;
+    h.paper.open.mockImplementationOnce(async (i) => {
+      // A slow open: another process recovered the stale claim meanwhile (EXPIRED OPEN_INTERRUPTED).
+      h.store.rows.get('s1')!.status = 'EXPIRED';
+      return realOpen(i);
+    });
+    await h.svc.pass(NOW);
+    expect(h.exec.closeTrade).toHaveBeenCalledTimes(1);
+    expect(h.exec.closeTrade.mock.calls[0][0]).toBe('trade-1');
+    expect(h.exec.closeTrade.mock.calls[0][1]).toMatchObject({ exitReasonTag: 'AI_SETUP_ORPHANED' });
+    expect(h.store.trades.get('trade-1')!.status).toBe('CLOSED');
+  });
+
+  it('a close another closer claimed first: the row takes THEIR reason and P&L', async () => {
+    const h = harness();
+    filledRow(h);
+    h.setUnderlying(419);
+    h.exec.closeTrade.mockResolvedValueOnce({ status: 'CLOSED', exitReasonTag: 'AI_EXIT', pnl: -300, exitTime: LATER(-1) } as never);
+    await h.svc.pass(NOW);
+    expect(h.store.rows.get('s1')).toMatchObject({ status: 'EXITED', exitReason: 'AI_EXIT', pnl: -300, exitAt: LATER(-1) });
   });
 });

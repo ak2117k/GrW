@@ -48,7 +48,7 @@ export interface SetupWatchMarket {
 /** The ai_setups / trades reads and conditional writes the watch uses (AiSetupsRepository). */
 export type SetupWatchStore = Pick<
   AiSetupsRepository,
-  'activeSetups' | 'claimFill' | 'attachTrade' | 'failOpen' | 'expire' | 'saveWatch' | 'markExited' | 'setupTrade' | 'tradeForSetup'
+  'activeSetups' | 'setupState' | 'claimFill' | 'attachTrade' | 'failOpen' | 'expire' | 'saveWatch' | 'markExited' | 'setupTrade' | 'tradeForSetup'
 >;
 
 type PaperOpener = Pick<EntryEnginePaperService, 'open'>;
@@ -62,6 +62,8 @@ const OPEN_TRADE = new Set(['OPEN', 'PARTIALLY_FILLED', 'PENDING']);
 const BARS_BACK_MS = 2 * BAR_15M_MS;
 /** A 15m read that has not yet returned the latest closed bar is retried after this long. */
 const BARS_RETRY_MS = 60_000;
+/** A FILLED row with no trade is recovered only once its claim is this old (another process may still be opening it). */
+export const CLAIM_RECOVER_MS = 60_000;
 
 const isPlan = (v: unknown): v is SetupPlan & { watch?: SetupWatchState } => {
   const s = v as SetupPlan | null;
@@ -125,9 +127,17 @@ export class SetupWatchService {
       this.barCache.clear();
       return;
     }
-    const refs = new Map<string, WatchRef | null>();
+    // null = the master has no line for it (a PENDING setup then EXPIREs NO_UNDERLYING_REF); undefined = the read
+    // failed this pass (it waits — a transient master outage never expires a setup).
+    const refs = new Map<string, WatchRef | null | undefined>();
     for (const u of new Set(rows.map((r) => r.underlying))) {
-      refs.set(u, await this.market.underlyingRef(u, now).catch(() => null));
+      refs.set(
+        u,
+        await this.market.underlyingRef(u, now).catch((err) => {
+          this.logger.warn(`[ai-setup] ${u} underlying lookup failed: ${errText(err)}`);
+          return undefined;
+        }),
+      );
     }
     const trades = new Map<string, SetupTradeRow | null>();
     for (const r of rows) {
@@ -149,9 +159,9 @@ export class SetupWatchService {
     for (const id of this.barCache.keys()) if (!live.has(id)) this.barCache.delete(id);
     for (const row of rows) {
       try {
-        const uref = refs.get(row.underlying) ?? null;
+        const uref = refs.get(row.underlying);
         if (row.status === 'PENDING') await this.onPending(row, uref, ltps, now);
-        else await this.onFilled(row, uref, row.tradeId ? (trades.get(row.tradeId) ?? null) : null, ltps, now);
+        else await this.onFilled(row, uref ?? null, row.tradeId ? (trades.get(row.tradeId) ?? null) : null, ltps, now);
       } catch (err) {
         this.logger.warn(`[ai-setup] ${row.underlying} setup ${row.id}: ${errText(err)}`);
       }
@@ -160,13 +170,19 @@ export class SetupWatchService {
 
   // ---- PENDING ------------------------------------------------------------------------------------------------
 
-  private async onPending(row: ActiveSetupRow, uref: WatchRef | null, ltps: Map<string, number>, now: Date): Promise<void> {
+  private async onPending(row: ActiveSetupRow, urefRead: WatchRef | null | undefined, ltps: Map<string, number>, now: Date): Promise<void> {
     if (!isPlan(row.setup)) {
       if (await this.store.expire(row.id, 'INVALID_SETUP: the stored setup has no readable instrument / entry / SL / targets', now)) {
         this.logger.warn(`[ai-setup] ${row.underlying} setup ${row.id} EXPIRED: unreadable setup`);
       }
       return;
     }
+    if (urefRead === null) {
+      const reason = `NO_UNDERLYING_REF: no priced line for ${row.underlying} in the instrument master (index / NSE cash / MCX front future) — its levels cannot be watched`;
+      if (await this.store.expire(row.id, reason, now)) this.logger.warn(`[ai-setup] ${row.underlying} setup ${row.id} EXPIRED — ${reason}`);
+      return;
+    }
+    const uref = urefRead ?? null;
     const setup = row.setup;
     // A closed market's last price is not a fill: only validUntil can act then.
     const open = !!uref && this.market.isOpen(uref.exchange, now);
@@ -189,7 +205,7 @@ export class SetupWatchService {
     }
     const watch: SetupWatchState = { sl: setup.sl, trailed: false, worstFill: worstFillLevel(setup, ltp as number), entryUnderlying: ltp, entryPremium: opened.entryPremium };
     if (!(await this.store.attachTrade(row.id, opened.tradeId, { ...setup, watch }))) {
-      this.logger.warn(`[ai-setup] ${row.underlying} setup ${row.id}: paper trade ${opened.tradeId} opened but the row moved — the next pass re-attaches it by its tag`);
+      await this.onAttachFailed(row, opened.tradeId);
       return;
     }
     this.logger.warn(`[ai-setup] ${row.underlying} setup ${row.id} FILLED — ${step.reason}; paper ${opened.symbol} @ ${opened.entryPremium ?? '?'} (trade ${opened.tradeId})`);
@@ -318,28 +334,56 @@ export class SetupWatchService {
       return;
     }
     const optPx = trade.instrument ? (ltps.get(keyOf(trade.instrument)) ?? null) : null;
-    let closed: { pnl?: number | null } | null = null;
+    type Closed = { pnl?: number | null; exitReasonTag?: string | null; exitTime?: Date | null };
+    let closed: Closed | null = null;
     try {
       closed = (await this.exec.closeTrade(trade.id, {
         exitReasonTag: step.tag,
         reason: `AI setup ${step.tag}: ${step.reason}`,
         exitNotes: `AI setup ${row.id}: ${step.reason}${optPx === null ? ' (no fresh option tick: the paper close prices it)' : ''}`.slice(0, 2000),
         ...(optPx !== null && optPx > 0 ? { exitPrice: optPx } : {}),
-      })) as { pnl?: number | null };
+      })) as Closed;
     } catch (err) {
       // Closed meanwhile (closeTrade refuses a non-OPEN trade): the next pass reads who closed it.
       this.logger.warn(`[ai-setup] ${row.underlying} setup ${row.id}: close ${step.tag} failed: ${errText(err)}`);
       return;
     }
-    await this.store.markExited(row.id, { exitReason: step.tag, exitAt: now, pnl: closed?.pnl ?? null });
-    this.logger.warn(`[ai-setup] ${row.underlying} setup ${row.id} EXITED ${step.tag} — ${step.reason}; option ${optPx ?? 'unpriced'}, P&L ${closed?.pnl ?? '?'}`);
+    // A close another closer claimed first returns the row as THEY closed it: their reason and P&L stand.
+    const reason = closed?.exitReasonTag ?? step.tag;
+    const exitAt = reason === step.tag ? now : (closed?.exitTime ?? now);
+    await this.store.markExited(row.id, { exitReason: reason, exitAt, pnl: closed?.pnl ?? null });
+    this.logger.warn(`[ai-setup] ${row.underlying} setup ${row.id} EXITED ${reason} — ${step.reason}; option ${optPx ?? 'unpriced'}, P&L ${closed?.pnl ?? '?'}`);
+  }
+
+  /**
+   * The paper trade opened but the claimed row would not take it (another process expired / moved the claim while
+   * this open was in flight). Re-read the row: still FILLED with this trade (another process re-attached it by its
+   * tag) ⇒ fine; anything else ⇒ the trade is managed by no setup, so it is closed at once (AI_SETUP_ORPHANED).
+   */
+  private async onAttachFailed(row: ActiveSetupRow, tradeId: string): Promise<void> {
+    const cur = await this.store.setupState(row.id).catch(() => null);
+    if (cur && cur.status === 'FILLED' && cur.tradeId === tradeId) return;
+    this.logger.error(
+      `[ai-setup] ${row.underlying} setup ${row.id}: paper trade ${tradeId} opened but the row is ${cur ? `${cur.status}${cur.tradeId ? ` (trade ${cur.tradeId})` : ''}` : 'unreadable'} — closing the orphan (AI_SETUP_ORPHANED)`,
+    );
+    try {
+      await this.exec.closeTrade(tradeId, {
+        exitReasonTag: 'AI_SETUP_ORPHANED',
+        reason: `AI setup ${row.id}: the setup row was no longer FILLED when its paper trade opened`,
+        exitNotes: `AI setup ${row.id}: orphaned paper trade closed at once (row ${cur?.status ?? 'unreadable'})`,
+      });
+    } catch (err) {
+      this.logger.error(`[ai-setup] ${row.underlying} setup ${row.id}: orphan close of ${tradeId} failed: ${errText(err)} — the paper watch squares it off`);
+    }
   }
 
   /**
    * A FILLED row with no trade: the process stopped between the claim and the attach. The paper trade carries the
-   * setup's tag, so it is re-attached; none ⇒ nothing was opened ⇒ EXPIRED (visible, never stuck).
+   * setup's tag, so it is re-attached; none ⇒ nothing was opened ⇒ EXPIRED (visible, never stuck). Only a claim
+   * older than CLAIM_RECOVER_MS: a younger one may still be inside another process's paper open.
    */
   private async recoverClaim(row: ActiveSetupRow, now: Date): Promise<void> {
+    if (row.entryAt && now.getTime() - row.entryAt.getTime() < CLAIM_RECOVER_MS) return;
     const t = await this.store.tradeForSetup(row.id);
     if (!t) {
       if (await this.store.failOpen(row.id, `OPEN_INTERRUPTED: no paper trade carries ${setupTag(row.id)} (stopped between the claim and the open)`, now)) {

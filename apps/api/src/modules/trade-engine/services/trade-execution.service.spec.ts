@@ -34,6 +34,13 @@ function buildMockRepo() {
       return trades[id];
     }),
     getTradeById: jest.fn(async (id: string) => trades[id] ?? null),
+    // The paper close claim: a synchronous check-and-set on status + quantity (the DB's conditional updateMany).
+    claimClose: jest.fn(async (id: string, expected: { status: string; quantity: number }, data: any) => {
+      const t = trades[id];
+      if (!t || t.status !== expected.status || t.quantity !== expected.quantity || !['OPEN', 'PARTIALLY_FILLED'].includes(t.status)) return false;
+      trades[id] = { ...t, ...data };
+      return true;
+    }),
     findInstrumentId: jest.fn(async () => 'inst_1'),
     getOpenTrades: jest.fn(async () =>
       Object.values(trades).filter((t: any) => t.status === 'OPEN'),
@@ -164,6 +171,29 @@ describe('TradeExecutionService.closeTrade — exit-reason persistence', () => {
     expect(persisted.exitNotes).toBe('Kill switch: max daily loss');
     expect(persisted.exitReasonTag).toBeNull();
     expect(persisted.status).toBe('CLOSED');
+  });
+
+  it('two concurrent closes of one paper trade: one simulated fill, one accounting entry, the first closer\'s reason stands', async () => {
+    const paper = module.get(PaperTradeService) as unknown as { simulateOrder: jest.Mock; applyExitAccounting: jest.Mock };
+    const [a, b] = await Promise.all([
+      service.closeTrade('trade_1', { exitReasonTag: 'AI_SETUP_SL', exitPrice: 90 }),
+      service.closeTrade('trade_1', { exitReasonTag: 'AI_EXIT', exitPrice: 91 }),
+    ]);
+    expect(paper.simulateOrder).toHaveBeenCalledTimes(1);
+    expect(paper.applyExitAccounting).toHaveBeenCalledTimes(1);
+    expect(repo._trades['trade_1']).toMatchObject({ status: 'CLOSED', exitReasonTag: 'AI_SETUP_SL', exitPrice: 90, pnl: -500 });
+    // The loser gets the row as it is now (closed by the winner).
+    expect(a.status).toBe('CLOSED');
+    expect(b.status).toBe('CLOSED');
+    expect(repo.createTradeEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('a close of a trade another close already claimed books nothing', async () => {
+    const paper = module.get(PaperTradeService) as unknown as { applyExitAccounting: jest.Mock };
+    repo.claimClose.mockResolvedValueOnce(false);
+    await service.closeTrade('trade_1', { exitReasonTag: 'AI_SETUP_SL', exitPrice: 90 });
+    expect(paper.applyExitAccounting).not.toHaveBeenCalled();
+    expect(repo.updateTrade).not.toHaveBeenCalled();
   });
 });
 

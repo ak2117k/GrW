@@ -340,6 +340,22 @@ export class TradeRepository {
     });
     return r.count > 0;
   }
+
+  /**
+   * Claim a paper close (closeTrade): one conditional statement that only succeeds while the trade still has the
+   * status AND quantity the closer read (OPEN / PARTIALLY_FILLED). False = another close got there first.
+   */
+  async claimClose(
+    id: string,
+    expected: { status: string; quantity: number },
+    data: Partial<{ status: string; quantity: number; exitTime: Date; exitReasonTag: string | null; exitNotes: string | null }>,
+  ): Promise<boolean> {
+    const r = await this.prisma.trade.updateMany({
+      where: { id, status: { in: ['OPEN', 'PARTIALLY_FILLED'], equals: expected.status }, quantity: expected.quantity },
+      data,
+    });
+    return r.count === 1;
+  }
 }
 
 export interface InstrumentCandidate {

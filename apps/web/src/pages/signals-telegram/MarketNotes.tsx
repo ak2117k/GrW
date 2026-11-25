@@ -1,13 +1,16 @@
 import { useQuery } from '@tanstack/react-query';
 import { Badge } from '@/components/common';
 import { cn } from '@/utils/cn';
+import { SetupCard } from './SetupCard';
 import {
+  fetchAiSetups,
   fetchMarketNotes,
   fetchReaderHealth,
   latencyLabel,
   modeBadge,
   readerNotReading,
   verdictChip,
+  type AiSetupRow,
   type MarketNote,
   type NoteClaim,
   type ReaderHealth,
@@ -54,7 +57,7 @@ function ClaimRow({ c }: { c: NoteClaim }) {
   );
 }
 
-function NoteRow({ n }: { n: MarketNote }) {
+function NoteRow({ n, setups }: { n: MarketNote; setups: AiSetupRow[] }) {
   return (
     <li className={CARD} data-testid="market-note">
       <div className="flex flex-wrap items-center gap-2">
@@ -67,14 +70,24 @@ function NoteRow({ n }: { n: MarketNote }) {
       {n.summary && <p className={cn('mt-1 break-words text-sm', SECONDARY)}>{n.summary}</p>}
       {n.error && <p className="mt-1 break-words text-xs text-red-400">{n.error}</p>}
       {n.claims.length > 0 && <ul className="mt-2 space-y-1.5">{n.claims.map((c, i) => <ClaimRow key={i} c={c} />)}</ul>}
+      {setups.map((s) => (
+        <SetupCard key={s.id} s={s} />
+      ))}
     </li>
   );
 }
 
-/** Pure: the reader's header (mode, p95, dead-reader badge) and one row per reading. Nothing when the reader is off. */
-export function MarketNotesView({ health, notes, nowMs }: { health: ReaderHealth; notes: MarketNote[]; nowMs: number }) {
+/**
+ * Pure: the reader's header (mode, p95, dead-reader badge) and one row per reading, each with the AI setup cards it
+ * produced; setups whose reading is not in the list are shown after it. Nothing when the reader is off.
+ */
+export function MarketNotesView({ health, notes, nowMs, setups = [] }: { health: ReaderHealth; notes: MarketNote[]; nowMs: number; setups?: AiSetupRow[] }) {
   if (health.mode === 'off') return null;
   const badge = modeBadge(health.mode);
+  const byReading = new Map<string, AiSetupRow[]>();
+  for (const s of setups) byReading.set(s.readingId, [...(byReading.get(s.readingId) ?? []), s]);
+  const shown = new Set(notes.map((n) => n.messageId));
+  const other = setups.filter((s) => !shown.has(s.readingId));
   return (
     <section data-testid="market-notes">
       <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -94,15 +107,26 @@ export function MarketNotesView({ health, notes, nowMs }: { health: ReaderHealth
       ) : (
         <ul className="space-y-2">
           {notes.map((n) => (
-            <NoteRow key={n.messageId} n={n} />
+            <NoteRow key={n.messageId} n={n} setups={byReading.get(n.messageId) ?? []} />
           ))}
         </ul>
+      )}
+      {other.length > 0 && (
+        <div className={cn('mt-2', CARD)} data-testid="other-setups">
+          <p className={cn('text-xs font-medium', SECONDARY)}>AI setups from other posts</p>
+          {other.map((s) => (
+            <SetupCard key={s.id} s={s} />
+          ))}
+        </div>
       )}
     </section>
   );
 }
 
-/** Owner-only "Market notes": the AI reader's verdicts on each Telegram post for one IST session. Polls every 30 s. */
+/**
+ * Owner-only "Market notes": the AI reader's verdicts on each Telegram post for one IST session, with the AI setup
+ * cards under the reading they came from (hidden when AI_SETUPS=off). Polls every 30 s.
+ */
 export function MarketNotes({ date }: { date: string }) {
   const health = useQuery({ queryKey: ['message-reader', 'health'], queryFn: fetchReaderHealth, refetchInterval: POLL_MS, staleTime: 15_000 });
   const on = !!health.data && health.data.mode !== 'off';
@@ -113,12 +137,21 @@ export function MarketNotes({ date }: { date: string }) {
     staleTime: 15_000,
     enabled: on,
   });
+  const setups = useQuery({
+    queryKey: ['ai-setups', date],
+    queryFn: () => fetchAiSetups(date),
+    refetchInterval: POLL_MS,
+    staleTime: 15_000,
+    enabled: on,
+  });
+  const cards = setups.data && setups.data.mode !== 'off' ? setups.data.setups : [];
   if (health.isError) return <p className="text-sm text-[var(--color-accent-red)]">Could not load the message reader's health.</p>;
   if (!health.data || !on) return null;
   return (
     <>
-      <MarketNotesView health={health.data} notes={notes.data?.notes ?? []} nowMs={Date.now()} />
+      <MarketNotesView health={health.data} notes={notes.data?.notes ?? []} nowMs={Date.now()} setups={cards} />
       {notes.isError && <p className="mt-1 text-sm text-[var(--color-accent-red)]">Could not load market notes.</p>}
+      {setups.isError && <p className="mt-1 text-sm text-[var(--color-accent-red)]">Could not load AI setups.</p>}
     </>
   );
 }

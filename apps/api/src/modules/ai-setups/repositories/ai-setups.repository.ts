@@ -59,6 +59,27 @@ export interface GradeCandidateRow extends GradeRow {
   updatedAt: Date;
 }
 
+/** One ai_setups row as the owner's setup card reads it (never the packet). */
+export interface SessionSetupRow {
+  id: string;
+  readingId: string;
+  underlying: string;
+  channelId: string;
+  channelTitle: string | null;
+  decision: string;
+  status: string;
+  reason: string;
+  setup: unknown;
+  checks: unknown;
+  validUntil: Date | null;
+  entryAt: Date | null;
+  exitAt: Date | null;
+  exitReason: string | null;
+  pnl: number | null;
+  grade: unknown;
+  createdAt: Date;
+}
+
 /** Row statuses that count as an AI setup made (the daily cap); a NO_TRADE or a SKIPPED never counts. */
 export const COUNTED_SETUP_STATUSES: readonly string[] = ['PENDING', 'FILLED', 'EXITED', 'EXPIRED'];
 /** Setups still in play on their underlying (block another setup on it). */
@@ -300,6 +321,29 @@ export class AiSetupsRepository implements SetupPacketSources {
       take: 5_000,
     });
     return rows.map((r) => r.grade);
+  }
+
+  // ---- The owner's setup cards (controllers/ai-setups.controller.ts). ----
+
+  /** Every ai_setups row made in one IST session `day` ('YYYY-MM-DD'), newest first, with its channel's title. */
+  async setupsForSession(day: string): Promise<SessionSetupRow[]> {
+    const start = new Date(`${day}T00:00:00+05:30`);
+    const end = new Date(start.getTime() + 24 * 60 * 60_000);
+    const rows = await this.prisma.aiSetup.findMany({
+      where: { createdAt: { gte: start, lt: end } },
+      select: {
+        id: true, readingId: true, underlying: true, channelId: true, decision: true, status: true, reason: true, setup: true, checks: true,
+        validUntil: true, entryAt: true, exitAt: true, exitReason: true, pnl: true, grade: true, createdAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+    const ids = [...new Set(rows.map((r) => r.channelId))];
+    const channels = ids.length
+      ? await this.prisma.telegramChannel.findMany({ where: { id: { in: ids } }, select: { id: true, title: true, username: true } })
+      : [];
+    const title = new Map(channels.map((c) => [c.id, c.title || c.username || null]));
+    return rows.map((r) => ({ ...r, channelTitle: title.get(r.channelId) ?? null }));
   }
 
   async channelTitle(channelId: string): Promise<string | null> {

@@ -22,6 +22,7 @@ import { TradeEngineModule } from '../trade-engine/trade-engine.module';
 import { makeSentinelClock } from '../trade-sentinel/overnight/overnight-calendar';
 import { TradeSentinelModule } from '../trade-sentinel/trade-sentinel.module';
 import { AI_SETUPS_CONFIG, parseAiSetupsConfig, type AiSetupsConfig } from './ai-setups.config';
+import { AiSetupsController } from './controllers/ai-setups.controller';
 import { AiSetupsRepository } from './repositories/ai-setups.repository';
 import { AiSetupsService } from './services/ai-setups.service';
 import { AI_SETUP_GRADE_CLOCK, SetupGradeCron } from './services/setup-grade.cron';
@@ -39,6 +40,7 @@ import { SETUP_WATCH_MARKET, SetupWatchService, type SetupWatchMarket } from './
  * the re-entry watch does) and closes it on the underlying's levels (TradeExecutionService.closeTrade, paper only).
  */
 @Module({
+  controllers: [AiSetupsController],
   imports: [PrismaModule, AiGatewayModule, TradeSentinelModule, MarketDataModule, SignalTraderModule, SignalIntakeModule, OptionsChainModule, NewsModule, TradeEngineModule],
   providers: [
     { provide: AI_SETUPS_CONFIG, useFactory: (): AiSetupsConfig => parseAiSetupsConfig(process.env) },

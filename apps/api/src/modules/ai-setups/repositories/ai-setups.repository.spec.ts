@@ -68,3 +68,23 @@ describe('AiSetupsRepository packet sources', () => {
     expect((m.prisma.aiSetup.count.mock.calls[0] as unknown as [{ where: { createdAt: { gte: Date } } }])[0].where.createdAt.gte).toEqual(new Date('2026-11-24T18:30:00Z'));
   });
 });
+
+describe('AiSetupsRepository.setupsForSession', () => {
+  it("reads one IST session's rows newest first (no packet) and adds each channel's title", async () => {
+    const rows = [
+      { id: 's2', channelId: 'ch1', createdAt: new Date('2026-11-25T05:00:00Z') },
+      { id: 's1', channelId: 'ch2', createdAt: new Date('2026-11-25T04:00:00Z') },
+    ];
+    const prisma = {
+      aiSetup: { findMany: jest.fn(async () => rows) },
+      telegramChannel: { findMany: jest.fn(async () => [{ id: 'ch1', title: 'Stock Gainers', username: 'sg' }, { id: 'ch2', title: '', username: 'beta' }]) },
+    };
+    const repo = new AiSetupsRepository(prisma as never);
+    const out = await repo.setupsForSession('2026-11-25');
+    const q = (prisma.aiSetup.findMany.mock.calls[0] as unknown[])[0] as { where: { createdAt: { gte: Date; lt: Date } }; orderBy: unknown; select: Record<string, boolean> };
+    expect(q.where.createdAt).toEqual({ gte: new Date('2026-11-24T18:30:00Z'), lt: new Date('2026-11-25T18:30:00Z') });
+    expect(q.orderBy).toEqual({ createdAt: 'desc' });
+    expect(q.select.packet).toBeUndefined();
+    expect(out.map((r) => [r.id, r.channelTitle])).toEqual([['s2', 'Stock Gainers'], ['s1', 'beta']]);
+  });
+});

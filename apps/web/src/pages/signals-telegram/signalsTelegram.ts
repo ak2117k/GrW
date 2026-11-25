@@ -233,7 +233,7 @@ export function channelStatsLine(stats: unknown): string {
   return parts.length ? parts.join(' · ') : 'no stats yet';
 }
 
-const rupee = (n: number) => `${n < 0 ? '−' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
+export const rupee = (n: number) => `${n < 0 ? '−' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 
 /** "7 closed · 4W/3L · 1 open · P&L ₹1,250" — the same line for live and paper so they compare. */
 export function outcomeLine(s: TradeOutcomeSummary | null | undefined): string {
@@ -384,4 +384,158 @@ export function latencyLabel(ms: number | null | undefined): string {
 /** Today's IST session date, YYYY-MM-DD. */
 export function istToday(nowMs: number): string {
   return new Date(nowMs).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}
+
+// ---- AI setups: the setup card under the reading it came from (owner only) ----
+
+export interface SetupPlanView {
+  instrument: { kind: string; symbol: string; strike: number; optionType: 'CE' | 'PE'; expiry: string };
+  side: string;
+  entry: { type: string; low: number; high: number; trigger: number | null; level: number | null };
+  sl: number;
+  targets: number[];
+  validUntil: string;
+  confidence: number;
+  evidence?: Array<{ fact: string; value: string; source: string }>;
+  /** The setup watch's state once filled (the SL now in force). */
+  watch?: { sl?: number; trailed?: boolean } | null;
+}
+
+/** A plan-only / what-if part of the nightly grade. */
+export interface GradePartView {
+  status: string;
+  reason?: string;
+  filled?: boolean;
+  outcome?: string;
+  rupees?: number | null;
+  rupeesNote?: string;
+  hypothetical?: boolean;
+  reference?: string;
+}
+
+export interface SetupGradeView {
+  status: string;
+  kind?: string;
+  reason?: string;
+  actual?: { filled: boolean; exitReason: string | null; pnlGross: number; fees: number; net: number };
+  plan?: GradePartView;
+  whatIf?: GradePartView;
+}
+
+/** One ai_setups row (GET /api/ai-setups). */
+export interface AiSetupRow {
+  id: string;
+  readingId: string;
+  underlying: string;
+  channelId: string;
+  channelTitle: string | null;
+  createdAt: string;
+  /** SETUP | NO_TRADE | SKIPPED (a code-check veto keeps SETUP with status NO_TRADE). */
+  decision: string;
+  /** PENDING | FILLED | EXITED | EXPIRED | NO_TRADE | SKIPPED. */
+  status: string;
+  reason: string;
+  claim: { text: string; subject: string | null; bias: string | null; verdict: string | null } | null;
+  failedCheck: { name: string; detail: string } | null;
+  setup: SetupPlanView | null;
+  validUntil: string | null;
+  entryAt: string | null;
+  exitAt: string | null;
+  exitReason: string | null;
+  pnl: number | null;
+  grade: SetupGradeView | null;
+}
+
+/** GET /api/ai-setups?date=YYYY-MM-DD — the IST session's setups, newest first; mode 'off' = hide the cards. */
+export async function fetchAiSetups(date: string): Promise<{ date: string; mode: string; setups: AiSetupRow[] }> {
+  const { data } = await api.get<{ date: string; mode: string; setups: AiSetupRow[] }>('/ai-setups', { params: { date } });
+  return data;
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** "DABUR 520 CE · 27 Nov expiry". */
+export function optionName(i: SetupPlanView['instrument']): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(i.expiry ?? '');
+  const exp = m ? `${Number(m[3])} ${MONTHS[Number(m[2]) - 1] ?? m[2]}` : i.expiry;
+  return `${i.symbol} ${i.strike} ${i.optionType}${exp ? ` · ${exp} expiry` : ''}`;
+}
+
+/** The entry in plain words (levels are the underlying's prices). */
+export function entryLine(s: SetupPlanView): string {
+  const u = s.instrument.symbol;
+  const up = s.instrument.optionType !== 'PE';
+  const e = s.entry;
+  if (e.type === 'LIMIT_PULLBACK') return e.low === e.high ? `Buy when ${u} comes back to ${e.low}` : `Buy when ${u} comes back into ${e.low}–${e.high}`;
+  if (e.type === 'BREAKOUT_TRIGGER') return `Buy when a 15-min candle of ${u} closes ${up ? 'above' : 'below'} ${e.trigger ?? e.high}`;
+  if (e.type === 'MARKET_NOW') return `Buy now (${u} near ${e.high})`;
+  return `${e.type} ${e.low}–${e.high}`;
+}
+
+const EXIT_LABEL: Record<string, string> = {
+  AI_SETUP_SL: 'stop-loss hit',
+  AI_SETUP_TARGET: 'target hit',
+  AI_SETUP_TIME: 'time ran out',
+  AI_SETUP_ORPHANED: 'closed: the setup lost track of it',
+  VALID_UNTIL_PASSED: 'entry price never came before the time limit',
+  SL_CROSSED_BEFORE_ENTRY: 'stop-loss level crossed before the entry',
+  OPEN_FAILED: 'paper trade could not be opened',
+  INVALID_SETUP: 'the setup could not be read',
+  TRADE_MISSING: 'paper trade row is gone',
+  CLOSED_ELSEWHERE: 'closed outside the setup',
+};
+
+/** "stop-loss hit" for AI_SETUP_SL; "entry price never came …" for "VALID_UNTIL_PASSED: …" (detail dropped). */
+export function exitLabel(reason: string | null | undefined): string {
+  if (!reason) return '';
+  const code = /^([A-Z_]+)/.exec(reason)?.[1] ?? '';
+  return EXIT_LABEL[code] ?? reason.replace(/_/g, ' ').toLowerCase();
+}
+
+const CHECK_LABEL: Record<string, string> = {
+  data_unavailable: 'market data missing',
+  malformed: 'AI reply incomplete',
+  not_option_buy: 'not an option buy',
+  option_not_in_chain: 'option not in the option chain',
+  ltp_unavailable: 'no live price',
+  atr_unavailable: 'no 15-min range data',
+  delta_unavailable: 'no option delta',
+  lot_unavailable: 'no lot size',
+  spread_unavailable: 'no option bid/ask',
+  oi_unavailable: 'no open interest',
+  no_evidence: 'no numbers given',
+  evidence_not_in_packet: 'numbers not in the data',
+  level_not_a_level: 'entry not at a real level',
+  sl_wrong_side: 'stop-loss on the wrong side',
+  targets_wrong_side: 'targets on the wrong side',
+  pullback_wrong_side: 'entry zone on the wrong side',
+  anti_chase: 'price already ran too far (chasing)',
+  rr_below_min: 'reward too small for the risk',
+  spread_too_wide: 'option bid/ask gap too wide',
+  oi_too_low: 'too few open contracts',
+  valid_until_after_close: 'time limit after market close',
+  valid_until_past: 'time limit already passed',
+  sl_too_wide: 'loss at stop-loss above the ₹ limit',
+};
+
+export function checkLabel(name: string): string {
+  return CHECK_LABEL[name] ?? name.replace(/_/g, ' ');
+}
+
+/** The card's paper status line: waiting / in trade / exited / expired (with why) / no trade / skipped. */
+export function setupStatus(r: Pick<AiSetupRow, 'status' | 'exitReason'>): string {
+  if (r.status === 'PENDING') return 'Waiting for entry (paper)';
+  if (r.status === 'FILLED') return 'In trade (paper)';
+  if (r.status === 'EXITED') return `Exited (paper)${r.exitReason ? ` — ${exitLabel(r.exitReason)}` : ''}`;
+  if (r.status === 'EXPIRED') return `Expired, no trade${r.exitReason ? ` — ${exitLabel(r.exitReason)}` : ''}`;
+  if (r.status === 'SKIPPED') return 'Skipped';
+  return 'No trade';
+}
+
+/** The decision chip: what the AI (or a code check) decided. */
+export function setupDecisionChip(r: Pick<AiSetupRow, 'decision' | 'status'>): { label: string; variant: 'success' | 'neutral' | 'warning' } {
+  if (r.decision === 'SETUP' && r.status !== 'NO_TRADE') return { label: 'AI SETUP', variant: 'success' };
+  if (r.decision === 'SETUP') return { label: 'SETUP BLOCKED', variant: 'warning' };
+  if (r.decision === 'SKIPPED') return { label: 'SKIPPED', variant: 'neutral' };
+  return { label: 'NO TRADE', variant: 'neutral' };
 }

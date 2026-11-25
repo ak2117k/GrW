@@ -91,6 +91,12 @@ describe('Stock Gainers calls missed in prod (2026-11-25)', () => {
       expect(pf.pass ? parseSignal(text, vocab, pf.norm) : null).toBeNull();
     });
 
+    it('Support 200 points on a BUY verb call → stop under 0 → refused, not a no-stop call', () => {
+      expect(parseSignal('BUY ALKEM LAB 5300CE 145 Support 200 points TGT 200', vocab)).toBeNull();
+      // the same call inside range is read
+      expect(parseSignal('BUY ALKEM LAB 5300CE 145 Support 50 points TGT 200', vocab)).toMatchObject({ side: 'BUY', sl: 95, targets: [200] });
+    });
+
     it('a bare "SUPPORT 60" (HUL) is still the stop price 60', () => {
       expect(parseSignal(`HUL\n\nHUL 2060 CE 75-77\n\nSUPPORT 60\n\nVIEW 90\n\n\n${DISCLAIMER}`, vocab)).toMatchObject({ sl: 60 });
     });
@@ -98,6 +104,16 @@ describe('Stock Gainers calls missed in prod (2026-11-25)', () => {
     it('with a target: CMP 37 Support 20 points For 57 → SL 17', () => {
       expect(parseSignal('ATHER ENERGY 1420CE CMP 37 Support 20 points For 57', vocab)).toMatchObject({ sl: 17, targets: [57] });
     });
+  });
+
+  it.each([
+    ['a bullish view on a PE', 'Bullish view on ALKEM LAB 5300PE CMP 145 Support 50'],
+    ['NOT BULLISH on a CE', 'NOT BULLISH on ALKEM LAB 5300CE CMP 145 Support 50'],
+    ['NO BULLISH on a CE', 'No bullish view, ALKEM LAB 5300CE CMP 145 Support 50'],
+    ['NOT VERY BULLISH on a CE', 'Not very bullish on ALKEM LAB 5300CE CMP 145 Support 50'],
+  ])('the bullish-CMP layout needs a CE and an un-negated BULLISH: %s', (_why, text) => {
+    const pf = prefilter(text, vocab);
+    expect(pf.pass ? parseSignal(text, vocab, pf.norm) : null).toBeNull();
   });
 
   it.each([

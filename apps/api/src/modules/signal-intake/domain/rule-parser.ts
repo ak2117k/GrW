@@ -189,7 +189,10 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
   // "Bullish View On ALKEM LAB 5300CE CMP 145 Support 50" (Stock Gainers, prod 2026-11-12): a named option,
   // its current premium and a stop under it, with the channel's bullish call as the verb. Without the
   // bullish word the same layout is a study post ("BN 63000PE CMP 400+ Support 60 points"): no call.
-  const bullishCmp = option && strike !== null && t.includes('CMP') && t.includes('BULLISH') && !t.includes('BEARISH');
+  // Only a CE (a bullish view does not buy a PE), and never a negated "NOT / NO (very) BULLISH".
+  const bullIdx = t.indexOf('BULLISH');
+  const bullNegated = bullIdx >= 0 && t.slice(Math.max(0, bullIdx - 2), bullIdx).some((w) => w === 'NOT' || w === 'NO');
+  const bullishCmp = kind === 'CE' && strike !== null && t.includes('CMP') && bullIdx >= 0 && !bullNegated && !t.includes('BEARISH');
   if (!side) {
     if (entryType === 'ABOVE') side = 'BUY';
     else if (entryType === 'BELOW' && (kind === 'FUT' || kind === 'EQ')) side = 'SELL';
@@ -202,6 +205,8 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
     else return null;
   }
   if (slPoints !== null) sl = pointsSl(side);
+  // "Support N points" that puts the stop at or under 0 is a broken call, not a no-stop one: refuse it.
+  if (slPoints !== null && sl === null) return null;
   if (!(entryLow > 0)) return null;
   if (!entryType) entryType = entry.length === 2 ? 'RANGE' : 'AT';
   if (entryType === 'RANGE' && entryLow === entryHigh) entryType = 'AT';

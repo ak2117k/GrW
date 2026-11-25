@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Badge } from '@/components/common';
 import { cn } from '@/utils/cn';
+import { MarketNotes } from './MarketNotes';
 import {
   channelStatsLine,
   countdown,
@@ -220,7 +221,18 @@ function PaperSection({ paper }: { paper: NonNullable<SignalOverview['paper']> }
   );
 }
 
-export function SignalsTelegramView({ data, onTogglePaper, toggleBusy }: { data: SignalOverview; onTogglePaper?: (enabled: boolean) => void; toggleBusy?: boolean }) {
+/** `marketNotesDate` (IST session, YYYY-MM-DD) mounts the AI reader's "Market notes" above the signal list (needs a QueryClient). */
+export function SignalsTelegramView({
+  data,
+  onTogglePaper,
+  toggleBusy,
+  marketNotesDate,
+}: {
+  data: SignalOverview;
+  onTogglePaper?: (enabled: boolean) => void;
+  toggleBusy?: boolean;
+  marketNotesDate?: string;
+}) {
   const badge = modeBadge(data.mode);
   const open = openOrders(data.orders);
   const takes = data.decisions.filter((d) => d.decision === 'TAKE').length;
@@ -270,6 +282,8 @@ export function SignalsTelegramView({ data, onTogglePaper, toggleBusy }: { data:
           </div>
         )}
       </section>
+
+      {marketNotesDate && <MarketNotes date={marketNotesDate} />}
 
       <section>
         <h2 className={cn('mb-2 text-sm font-semibold', PRIMARY)}>Today's signals</h2>

@@ -300,3 +300,88 @@ export function engineSlLabel(e: { method: string } | null | undefined): string 
   const m: Record<string, string> = { level: 'level', level_fut: 'level', level_delta: 'level × delta', premium_pct: 'premium %', atr: 'ATR' };
   return `ENGINE SL · ${m[e.method] ?? e.method}`;
 }
+
+// ---- AI message reader: "Market notes" (owner only) ----
+
+export type ClaimVerdict = 'CONFIRMED' | 'CONTRADICTED' | 'UNCLEAR' | 'NOT_CHECKABLE';
+
+/** One claim a post makes, with the reader's verdict against live data and the packet numbers behind it. */
+export interface NoteClaim {
+  text: string;
+  subject: string;
+  bias: string;
+  horizon: string;
+  claimType: string;
+  verdict: ClaimVerdict;
+  evidence: Array<{ fact: string; value: string; source: string }>;
+  evidenceMissing?: boolean;
+}
+
+/** One reading of a Telegram post (GET /api/message-reader/notes). */
+export interface MarketNote {
+  messageId: string;
+  channelId: string;
+  channelTitle: string;
+  postedAt: string;
+  readAt: string | null;
+  status: string;
+  kind: string | null;
+  scope: string | null;
+  claims: NoteClaim[];
+  summary: string | null;
+  latencyMs: number | null;
+  error: string | null;
+}
+
+/** GET /api/message-reader/health. */
+export interface ReaderHealth {
+  mode: string;
+  agentsOn: boolean;
+  lastReadAt: string | null;
+  lastHour: { posts: number; byStatus: Record<string, number>; p50Ms: number | null; p95Ms: number | null };
+}
+
+/** GET /api/message-reader/notes?date=YYYY-MM-DD — the IST session's readings, newest first. */
+export async function fetchMarketNotes(date: string): Promise<{ date: string; notes: MarketNote[] }> {
+  const { data } = await api.get<{ date: string; notes: MarketNote[] }>('/message-reader/notes', { params: { date } });
+  return data;
+}
+
+export async function fetchReaderHealth(): Promise<ReaderHealth> {
+  const { data } = await api.get<ReaderHealth>('/message-reader/health');
+  return data;
+}
+
+/** No READ for this long while posts keep arriving = the reader is not reading. */
+export const READER_STALE_MS = 15 * 60_000;
+
+/**
+ * Red "Reader not reading": posts arrived in the last hour but the last READ is older than 15 min (or never),
+ * or the reader is switched on while the AI agents are off (it cannot run).
+ */
+export function readerNotReading(h: ReaderHealth, nowMs: number): boolean {
+  if (h.mode === 'off') return false;
+  if (!h.agentsOn) return true;
+  if (h.lastHour.posts <= 0) return false;
+  const last = h.lastReadAt ? Date.parse(h.lastReadAt) : NaN;
+  return !Number.isFinite(last) || nowMs - last > READER_STALE_MS;
+}
+
+/** Verdict chip: CONFIRMED green, CONTRADICTED red, UNCLEAR grey, NOT_CHECKABLE outline. */
+export function verdictChip(v: ClaimVerdict | string): { label: string; variant: 'success' | 'danger' | 'neutral'; outline: boolean } {
+  if (v === 'CONFIRMED') return { label: 'CONFIRMED', variant: 'success', outline: false };
+  if (v === 'CONTRADICTED') return { label: 'CONTRADICTED', variant: 'danger', outline: false };
+  if (v === 'NOT_CHECKABLE') return { label: 'NOT CHECKABLE', variant: 'neutral', outline: true };
+  return { label: 'UNCLEAR', variant: 'neutral', outline: false };
+}
+
+/** "9.8s" / "850ms" / "—". */
+export function latencyLabel(ms: number | null | undefined): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return '—';
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+}
+
+/** Today's IST session date, YYYY-MM-DD. */
+export function istToday(nowMs: number): string {
+  return new Date(nowMs).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}

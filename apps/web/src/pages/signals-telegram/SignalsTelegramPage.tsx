@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import { apiErrorMessage } from '@/pages/core-strategies/core-strategy-picker';
-import { getSignalOverview, setPaperOnNoFunds } from './signalsTelegram';
+import { getSignalOverview, istToday, setPaperOnNoFunds } from './signalsTelegram';
 import { SignalsTelegramView } from './SignalsTelegramView';
 
 /** Owner-only: Telegram signal trading — decisions, open signal trades, paper (no funds), per-channel stats. */
@@ -31,7 +31,12 @@ export default function SignalsTelegramPage() {
       ) : q.isError ? (
         <p className="text-sm text-[var(--color-accent-red)]">{apiErrorMessage(q.error, 'Could not load signal trading')}</p>
       ) : q.data ? (
-        <SignalsTelegramView data={q.data} onTogglePaper={(enabled) => toggle.mutate(enabled)} toggleBusy={toggle.isPending} />
+        <SignalsTelegramView
+          data={q.data}
+          onTogglePaper={(enabled) => toggle.mutate(enabled)}
+          toggleBusy={toggle.isPending}
+          marketNotesDate={istToday(Date.now())}
+        />
       ) : null}
     </div>
   );

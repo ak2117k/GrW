@@ -137,3 +137,8 @@ T1 / T2 / time exit), net ₹; per-channel and per-claim-type tallies; NO_TRADE 
 ## 8. Left to the builder
 Exact prompt; liquidity thresholds; table schema (`ai_setups`); setup card layout; how SECTOR claims map
 to an instrument (sector index future/ETF or skip in v1).
+
+**Owner 2026-11-25 ("go with the recommendation"):** stock-option ceiling stays ₹3,000 for AI setups; the
+setup AI picks the strike so SL distance × |delta| × lot ≤ ceiling; reward:risk AND ₹ risk are measured from
+the WORST fill (zone top for a bullish pullback, zone bottom for bearish; max(high, trigger) / min(low,
+trigger) for breakouts).

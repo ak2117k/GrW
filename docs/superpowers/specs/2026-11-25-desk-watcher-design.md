@@ -272,3 +272,6 @@ from ₹2,000. Env: `HARD_LOSS_CEILING_BY_CLASS=INDEX_OPT:5000,STOCK_OPT:3000,GO
 
 **Broker stop live is blocked** until owner resting orders can no longer cancel/block it (executor
 `OTHER_OPEN_ORDER`); same root as the resting-order exit fix (SENSEX 11-25).
+
+**Minis (owner 2026-11-25):** GOLDM / SILVERM ceiling **₹4,000** (full GOLD / SILVER stay ₹7,500). Table:
+`HARD_LOSS_CEILING_BY_CLASS=INDEX_OPT:5000,STOCK_OPT:3000,GOLD:7500,SILVER:7500,GOLD_MINI:4000,SILVER_MINI:4000,MCX:5000`.

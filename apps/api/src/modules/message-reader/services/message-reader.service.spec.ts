@@ -8,6 +8,7 @@ import type { CachedReading, ReadingWrite, RuleClass } from '../repositories/mes
 import type { ReaderInput } from './message-reader-llm.service';
 import type { ReaderPacket } from './reader-packet.service';
 import { MessageReaderService } from './message-reader.service';
+import { __resetOpsAlerts, sendOpsAlert } from '../../../common/utils/ops-alert';
 
 const NOW = new Date('2026-11-25T04:01:00Z'); // 09:31 IST
 const vocab = buildVocabulary(['RELIANCE-EQ']);
@@ -32,6 +33,7 @@ type Fakes = {
   agents?: boolean;
   read?: (i: ReaderInput) => Promise<{ reply: ReaderReply; ms: number; model: string }>;
   rule?: RuleClass | null;
+  alert?: (key: string, text: string) => Promise<boolean>;
 };
 
 function make(o: Fakes = {}) {
@@ -62,11 +64,12 @@ function make(o: Fakes = {}) {
   const llm = { read: jest.fn(o.read ?? (async () => ({ reply: INFO, ms: 900, model: 'claude-sonnet-5' }))) };
   let now = NOW;
   const cfg = parseMessageReaderConfig({ MESSAGE_READER: o.mode ?? 'shadow' });
-  const svc = new MessageReaderService(repo, packet, llm, { get: async () => vocab }, cfg, () => now, () => o.agents ?? true);
+  const alert = jest.fn(o.alert ?? (async () => true));
+  const svc = new MessageReaderService(repo, packet, llm, { get: async () => vocab }, cfg, () => now, () => o.agents ?? true, alert);
   const post = (id: string, text: string, agoMin = 1, extra: Record<string, unknown> = {}) => ({
     messageId: id, channelId: 'ch1', text, postedAt: new Date(NOW.getTime() - agoMin * 60_000), hasMedia: false, ...extra,
   });
-  return { svc, repo, packet, llm, rows, upserts, post, rule, setNow: (d: Date) => (now = d) };
+  return { svc, repo, packet, llm, alert, rows, upserts, post, rule, setNow: (d: Date) => (now = d) };
 }
 
 const tick = () => new Promise((r) => setImmediate(r));
@@ -359,6 +362,105 @@ describe('MessageReaderService', () => {
       await m.svc.whenIdle();
       expect(m.llm.read).toHaveBeenCalledTimes(2);
       expect(m.rows.get('m2')).toMatchObject({ status: 'READ' });
+    });
+  });
+
+  describe('owner market-note alert', () => {
+    const BEAR: ReaderReply = {
+      ...INFO,
+      claims: [
+        INFO.claims[0],
+        { text: 'weak day ahead', subject: 'MARKET', bias: 'BEAR', horizon: 'INTRADAY', claimType: 'DIRECTION', verdict: 'UNCLEAR', evidence: [] },
+      ],
+    };
+
+    it('sends a market note alert in on mode', async () => {
+      const m = make({ mode: 'on', read: async () => ({ reply: BEAR, ms: 900, model: 'claude-sonnet-5' }) });
+      m.svc.onTelegramMessage(m.post('m1', 'Stay cautious, only index showing strength'));
+      await m.svc.whenIdle();
+      await tick();
+      expect(m.alert).toHaveBeenCalledTimes(1);
+      expect(m.alert).toHaveBeenCalledWith('market-note:ch1', 'Stock Gainers (SEBI Registered) 09:30 — stocks weak, index strong → CONFIRMED (A/D 0.6)');
+    });
+
+    it('no market note alert in shadow mode', async () => {
+      const m = make({ mode: 'shadow' });
+      m.svc.onTelegramMessage(m.post('m1', 'Stay cautious, only index showing strength'));
+      await m.svc.whenIdle();
+      await tick();
+      expect(m.rows.get('m1')).toMatchObject({ status: 'READ' });
+      expect(m.alert).not.toHaveBeenCalled();
+    });
+
+    it('no alert for an UNCLEAR claim', async () => {
+      const unclear: ReaderReply = { ...INFO, claims: [{ ...INFO.claims[0], verdict: 'UNCLEAR', evidence: [] }] };
+      const m = make({ mode: 'on', read: async () => ({ reply: unclear, ms: 900, model: 'claude-sonnet-5' }) });
+      m.svc.onTelegramMessage(m.post('m1', 'Stay cautious'));
+      await m.svc.whenIdle();
+      await tick();
+      expect(m.alert).not.toHaveBeenCalled();
+    });
+
+    it('no alert for a CACHED copy (only a fresh READ alerts)', async () => {
+      const m = make({ mode: 'on' });
+      m.svc.onTelegramMessage(m.post('m1', 'Stay cautious, only index showing strength'));
+      await m.svc.whenIdle();
+      m.svc.onTelegramMessage({ ...m.post('m2', 'Stay cautious, only index showing strength'), channelId: 'ch2' });
+      await m.svc.whenIdle();
+      await tick();
+      expect(m.rows.get('m2')).toMatchObject({ status: 'CACHED' });
+      expect(m.alert).toHaveBeenCalledTimes(1);
+      expect(m.alert).toHaveBeenCalledWith('market-note:ch1', expect.any(String));
+    });
+
+    it('an alert that throws leaves the row READ and makes no second AI call', async () => {
+      const throwing = [
+        async () => {
+          throw new Error('telegram down');
+        },
+        () => {
+          throw new Error('sync boom');
+        },
+      ];
+      for (const alert of throwing) {
+        const m = make({ mode: 'on', alert: alert as (k: string, t: string) => Promise<boolean> });
+        m.svc.onTelegramMessage(m.post('m1', 'Stay cautious, only index showing strength'));
+        await m.svc.whenIdle();
+        await tick();
+        expect(m.alert).toHaveBeenCalledTimes(1);
+        expect(m.llm.read).toHaveBeenCalledTimes(1);
+        expect(m.upserts.map((u) => u.status)).toEqual(['READ']);
+      }
+      // The alert step itself throwing synchronously (malformed claims) does not touch the stored row either.
+      const bad = { ...INFO, claims: null } as unknown as ReaderReply;
+      const m = make({ mode: 'on', read: async () => ({ reply: bad, ms: 900, model: 'claude-sonnet-5' }) });
+      m.svc.onTelegramMessage(m.post('m1', 'Stay cautious, only index showing strength'));
+      await m.svc.whenIdle();
+      await tick();
+      expect(m.llm.read).toHaveBeenCalledTimes(1);
+      expect(m.upserts.map((u) => u.status)).toEqual(['READ']);
+    });
+
+    it('a second confirmed claim from the same channel within 30 min does not send (ops-alert cooldown)', async () => {
+      __resetOpsAlerts();
+      const fetch = jest.fn(async () => ({ ok: true, status: 200 }));
+      let clock = NOW.getTime();
+      const real = (k: string, t: string) =>
+        sendOpsAlert(k, t, { env: { TELEGRAM_ALERT_BOT_TOKEN: 't', TELEGRAM_ALERT_CHAT_ID: 'c' }, fetch, now: () => clock });
+      const m = make({ mode: 'on', alert: real });
+      m.svc.onTelegramMessage(m.post('m1', 'Stay cautious, only index showing strength'));
+      await m.svc.whenIdle();
+      await tick();
+      clock += 29 * 60_000;
+      m.svc.onTelegramMessage(m.post('m2', 'Breadth is poor, careful with longs'));
+      await m.svc.whenIdle();
+      await tick();
+      m.svc.onTelegramMessage({ ...m.post('m3', 'Market weak, index propped up'), channelId: 'ch2' });
+      await m.svc.whenIdle();
+      await tick();
+      expect(m.alert).toHaveBeenCalledTimes(3);
+      expect(fetch).toHaveBeenCalledTimes(2); // ch1 once (the second within 30 min is held back), ch2 once
+      __resetOpsAlerts();
     });
   });
 });

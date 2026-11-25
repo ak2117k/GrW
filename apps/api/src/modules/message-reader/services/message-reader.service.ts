@@ -1,12 +1,14 @@
 import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
+import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { agentsOn } from '../../ai-gateway/agents/agent-registry';
 import { prefilter } from '../../signal-intake/domain/prefilter';
 import { SIGNAL_VISION_DONE_EVENT, TELEGRAM_MESSAGE_EVENT, type TelegramMessageEvent, type VisionDoneEvent } from '../../signal-intake/domain/types';
 import { textHash, type VocabularySource } from '../../signal-intake/services/signal-intake.service';
 import { SignalVocabularyService } from '../../signal-intake/services/signal-vocabulary.service';
 import { parseAgrees } from '../domain/parse-compare';
-import type { ReaderCall, ReadKind } from '../domain/reading.types';
+import { marketNoteClaims, marketNoteText } from '../domain/reader-health';
+import type { Claim, ReaderCall, ReadKind } from '../domain/reading.types';
 import { MESSAGE_READER_CONFIG, type MessageReaderConfig } from '../message-reader.config';
 import { MessageReaderRepository, type ReadingWrite } from '../repositories/message-reader.repository';
 import { MessageReaderLlm } from './message-reader-llm.service';
@@ -14,6 +16,9 @@ import { ReaderPacketService } from './reader-packet.service';
 
 export const MESSAGE_READER_NOW = Symbol('MESSAGE_READER_NOW');
 export const MESSAGE_READER_AGENTS_ON = Symbol('MESSAGE_READER_AGENTS_ON');
+/** Owner / ops alert sender (default sendOpsAlert, which sends each key at most once per 30 min). */
+export const MESSAGE_READER_ALERT = Symbol('MESSAGE_READER_ALERT');
+export type ReaderAlert = (key: string, text: string) => Promise<boolean>;
 
 export type ReaderStore = Pick<MessageReaderRepository, 'upsertReading' | 'readingOf' | 'cachedByHash' | 'ruleClassOf' | 'channelTitle' | 'updateRuleComparison'>;
 export type ReaderPacketPort = Pick<ReaderPacketService, 'build'>;
@@ -111,6 +116,7 @@ export class MessageReaderService implements OnModuleDestroy {
     @Inject(MESSAGE_READER_CONFIG) private readonly cfg: MessageReaderConfig,
     @Optional() @Inject(MESSAGE_READER_NOW) private readonly nowFn?: () => Date,
     @Optional() @Inject(MESSAGE_READER_AGENTS_ON) private readonly agentsOnFn?: () => boolean,
+    @Optional() @Inject(MESSAGE_READER_ALERT) private readonly alertFn?: ReaderAlert,
   ) {}
 
   private now(): Date {
@@ -247,6 +253,7 @@ export class MessageReaderService implements OnModuleDestroy {
     }
 
     let packetMs: number | null = null;
+    let stored: ReadingWrite;
     try {
       const underlyings = await this.underlyingsOf(j);
       const built = await this.packet.build({ text: j.text, channelId: j.channelId, underlyings, now: dequeuedAt });
@@ -277,8 +284,7 @@ export class MessageReaderService implements OnModuleDestroy {
         ...(await this.compareWithRules(j.messageId, reply.kind, call)),
       };
       await this.repo.upsertReading(row);
-      this.afterStore(row);
-      return false;
+      stored = row;
     } catch (e) {
       const failedAt = this.now();
       const error = `${j.attempt > 1 ? 'retry: ' : ''}${errText(e)}`.slice(0, 500);
@@ -288,6 +294,9 @@ export class MessageReaderService implements OnModuleDestroy {
         .catch((err) => this.logger.warn(`[message-reader] storing FAILED for ${j.messageId} failed: ${errText(err)}`));
       return j.attempt === 1 && failedAt.getTime() - j.postedAt.getTime() < this.cfg.retryMaxAgeMin * 60_000;
     }
+    // Outside the try: nothing after the READ row is stored may turn it into FAILED or cause a second AI call.
+    this.afterStore(stored);
+    return false;
   }
 
   /**
@@ -310,10 +319,17 @@ export class MessageReaderService implements OnModuleDestroy {
     }
   }
 
-  /** A stored READ / CACHED row whose rule class was not final: re-check at +60 s and +5 min (unref'd). */
+  /**
+   * After a stored READ / CACHED row: rule re-checks at +60 s and +5 min when the rule class was not final
+   * (unref'd), then the owner alert. Never throws: the stored row stands whatever happens here.
+   */
   private afterStore(row: ReadingWrite): void {
-    if (row.ruleStatus === RULE_PENDING) this.scheduleRechecks(row.messageId, row.textHash, row.kind as ReadKind, row.call ?? null);
-    this.afterRead(row);
+    try {
+      if (row.ruleStatus === RULE_PENDING) this.scheduleRechecks(row.messageId, row.textHash, row.kind as ReadKind, row.call ?? null);
+      this.afterRead(row);
+    } catch (e) {
+      this.logger.warn(`[message-reader] after-read work for ${row.messageId} failed: ${errText(e)}`);
+    }
   }
 
   private scheduleRechecks(messageId: string, hash: string, kind: ReadKind, call: ReaderCall | null): void {
@@ -356,10 +372,19 @@ export class MessageReaderService implements OnModuleDestroy {
   }
 
   /**
-   * Runs after every stored READ / CACHED row. The single place later work hooks into (Task 7: owner
-   * market-note alerts). Must not throw or block the queue.
+   * Owner market-note alert (MESSAGE_READER=on only): a fresh READ (not a CACHED copy) with a market-wide
+   * claim the live data CONFIRMED, bias CAUTION / BEAR / BULL → one alert keyed `market-note:<channelId>`;
+   * sendOpsAlert sends each key at most once per 30 min. Fire-and-forget: never throws, never blocks the queue.
    */
-  private afterRead(_row: ReadingWrite): void {
-    // Intentionally empty until owner alerts are added.
+  private afterRead(row: ReadingWrite): void {
+    if (this.cfg.mode !== 'on' || row.status !== 'READ') return;
+    const claims = marketNoteClaims(row.claims);
+    if (claims.length === 0) return;
+    void this.sendMarketNote(row, claims).catch((e) => this.logger.warn(`[message-reader] market-note alert for ${row.messageId} failed: ${errText(e)}`));
+  }
+
+  private async sendMarketNote(row: ReadingWrite, claims: Claim[]): Promise<void> {
+    const title = (await this.repo.channelTitle(row.channelId).catch(() => null)) ?? row.channelId;
+    await (this.alertFn ?? sendOpsAlert)(`market-note:${row.channelId}`, marketNoteText(title, row.postedAt, claims));
   }
 }

@@ -58,6 +58,23 @@ export interface ReaderCounts {
   lastReadAt: Date | null;
 }
 
+/** One reading as the owner's "Market notes" list shows it (every status, failures included). */
+export interface SessionNote {
+  messageId: string;
+  channelId: string;
+  channelTitle: string;
+  postedAt: Date;
+  readAt: Date | null;
+  status: string;
+  kind: string | null;
+  scope: string | null;
+  claims: Claim[];
+  summary: string | null;
+  /** queued + packet + AI ms; null when none was measured. */
+  latencyMs: number | null;
+  error: string | null;
+}
+
 export interface UnscoredReading {
   messageId: string;
   channelId: string;
@@ -74,6 +91,8 @@ const json = (v: unknown) => (v === null || v === undefined ? Prisma.DbNull : (v
 const RECENT_POSTS = 20;
 const NOTE_ROWS = 50;
 const UNSCORED_ROWS = 500;
+/** A session's list for the UI (a busy day is a few hundred posts). */
+const SESSION_NOTE_ROWS = 1_000;
 
 /** Nearest-rank percentile of an ascending list; null when empty. */
 export function percentile(sorted: number[], p: number): number | null {
@@ -220,6 +239,54 @@ export class MessageReaderRepository implements ReaderPacketSources {
     }
     ms.sort((a, b) => a - b);
     return { posts, byStatus, p50Ms: percentile(ms, 50), p95Ms: percentile(ms, 95), lastReadAt: last?.readAt ?? null };
+  }
+
+  /** The newest FAILED reading (the dead-reader alert names its error). */
+  async lastFailure(): Promise<{ at: Date | null; error: string | null } | null> {
+    const r = await this.prisma.messageReading.findFirst({ where: { status: 'FAILED' }, orderBy: { readAt: 'desc' }, select: { readAt: true, error: true } });
+    return r ? { at: r.readAt, error: r.error } : null;
+  }
+
+  /** Every reading of the IST session (all statuses) with its channel title, newest post first. */
+  async notesForSession(sessionDate: string): Promise<SessionNote[]> {
+    const rows = await this.prisma.messageReading.findMany({
+      where: { sessionDate },
+      orderBy: { postedAt: 'desc' },
+      take: SESSION_NOTE_ROWS,
+      select: {
+        messageId: true,
+        channelId: true,
+        postedAt: true,
+        readAt: true,
+        status: true,
+        kind: true,
+        scope: true,
+        claims: true,
+        summary: true,
+        queuedMs: true,
+        packetMs: true,
+        aiMs: true,
+        error: true,
+      },
+    });
+    const titles = await this.titles(rows.map((r) => r.channelId));
+    return rows.map((r) => {
+      const parts = [r.queuedMs, r.packetMs, r.aiMs].filter((x): x is number => x !== null);
+      return {
+        messageId: r.messageId,
+        channelId: r.channelId,
+        channelTitle: titles.get(r.channelId) ?? r.channelId,
+        postedAt: r.postedAt,
+        readAt: r.readAt,
+        status: r.status,
+        kind: r.kind,
+        scope: r.scope,
+        claims: (r.claims ?? []) as unknown as Claim[],
+        summary: r.summary,
+        latencyMs: parts.length > 0 ? parts.reduce((a, b) => a + b, 0) : null,
+        error: r.error,
+      };
+    });
   }
 
   /** READ rows posted at or after `since` that the night review has not scored yet, oldest first. */

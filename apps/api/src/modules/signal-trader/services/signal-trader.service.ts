@@ -684,14 +684,30 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     }
   }
 
-  /** A late entry's room, from the packet's own level book + chain blocks and the option's delta. Never throws. */
-  private async lateRoomFor(s: SignalView, plan: EntryPlan, market: Record<string, CtxBlock>, contract: ResolvedContract | null, owner: string | null, now: Date): Promise<LateRoom> {
+  /**
+   * A late entry's room, from the packet's own level book + chain blocks and the option's delta. Only the
+   * delta read is raced against `deadlineMs` (lateRoom itself is synchronous): past it the delta is null, so
+   * the room lists it in `missing` like any other unread input. Never throws.
+   */
+  private async lateRoomFor(s: SignalView, plan: EntryPlan, market: Record<string, CtxBlock>, contract: ResolvedContract | null, owner: string | null, now: Date, deadlineMs: number): Promise<{ room: LateRoom; deltaTimedOut: boolean }> {
     const val = (b: CtxBlock | undefined) => (b && b.status === 'present' && b.value && typeof b.value === 'object' ? (b.value as Record<string, unknown>) : {});
     const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
     const st = val(market.structure);
     const ch = val(market.chain);
-    const delta = contract ? await this.context.optionDelta({ signal: s, contract, ownerUserId: owner, now }).catch(() => null) : null;
-    return lateRoom({
+    let deltaTimedOut = false;
+    const delta = contract
+      ? await withinDeadline<number | null>(
+          Promise.resolve()
+            .then(() => this.context.optionDelta({ signal: s, contract, ownerUserId: owner, now }))
+            .catch(() => null),
+          deadlineMs,
+          () => {
+            deltaTimedOut = true;
+            return null;
+          },
+        )
+      : null;
+    const room = lateRoom({
       kind: s.instrumentKind,
       side: plan.side,
       ltp: plan.ltp,
@@ -704,21 +720,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       putWall: num(ch.putWall),
       delta,
     });
-  }
-
-  /**
-   * `{ room }` from {@link lateRoomFor} within `deadlineMs`; past it `{ room: null, roomUnavailable: 'late room: timed out after <n> ms' }`
-   * (the packet's other keys unchanged). Never throws.
-   */
-  private lateRoomWithin(s: SignalView, plan: EntryPlan, market: Record<string, CtxBlock>, contract: ResolvedContract | null, owner: string | null, now: Date, deadlineMs: number): Promise<{ room: LateRoom | null; roomUnavailable?: string }> {
-    return withinDeadline<{ room: LateRoom | null; roomUnavailable?: string }>(
-      this.lateRoomFor(s, plan, market, contract, owner, now).then(
-        (room) => ({ room }),
-        (err: unknown) => ({ room: null, roomUnavailable: `late room: ${errText(err)}` }),
-      ),
-      deadlineMs,
-      (reason) => ({ room: null, roomUnavailable: `late room: ${reason}` }),
-    );
+    return { room, deltaTimedOut };
   }
 
   /** The AI judge on a plan. Never throws (an unavailable judge = SKIP). */
@@ -796,6 +798,18 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     } catch {
       judgeLessons = [];
     }
+    const lateRead = plan.late ? await this.timed('lateRoomMs', () => this.lateRoomFor(s, plan, market, contract ?? null, owner, now, deadlineMs)) : null;
+    const late = plan.late && lateRead ? { ...plan.late, room: lateRead.room } : null;
+    // One warn per decision naming every source that hit SIGNAL_CONTEXT_DEADLINE_MS (else the miss is silent).
+    const deadlineReason = `timed out after ${deadlineMs} ms`;
+    const missed = [
+      ...Object.entries(market)
+        .filter(([key, b]) => key !== 'noise' && b?.status === 'unavailable' && typeof b.reason === 'string' && b.reason.endsWith(deadlineReason))
+        .map(([key]) => key),
+      ...(market.noise?.status === 'unavailable' && market.noise.reason === `noise units: ${deadlineReason}` ? ['noise'] : []),
+      ...(lateRead?.deltaTimedOut ? ['late-room delta'] : []),
+    ];
+    if (missed.length > 0) this.logger.warn(`[signal-trader] ${what}: deadline ${deadlineMs} ms hit — ${missed.join(', ')}`);
     const packet = {
       promptVersion: signalJudgePromptVersion(cfg.judgeDefault),
       at: now.toISOString(),
@@ -816,7 +830,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         lots: plan.lots,
         qty: plan.qty,
         riskRupees: plan.riskRupees,
-        late: plan.late ? { ...plan.late, ...(await this.timed('lateRoomMs', () => this.lateRoomWithin(s, plan, market, contract ?? null, owner, now, deadlineMs))) } : null,
+        late,
         optionValue: optionValueBlock,
       },
       caps: { maxLots: cfg.maxLots, maxLossPerTrade: lossCap, tradesToday, maxTradesPerDay: cfg.maxTradesPerDay },
@@ -1051,7 +1065,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     live.judge = { ...j, record };
     live.persistedAt = now.getTime();
     this.logger.log(`[signal-trader] ${describeSignal(live.signal)}: trigger ${trigger.op} ${trigger.price} slipped before sending — waiting again until ${trigger.expiresAt}: ${retry.detail}`);
-    void sendOpsAlert(`signal-rearm:${decisionId}:${trigger.lastCheckAt}`, `Signal ${plan.tradingsymbol}: trigger ${trigger.op} ${trigger.price} hit but ${retry.detail}. Waiting again until ${trigger.expiresAt}.`);
+    void sendOpsAlert(`signal-rearm:${decisionId}`, `Signal ${plan.tradingsymbol}: trigger ${trigger.op} ${trigger.price} hit but ${retry.detail}. Waiting again until ${trigger.expiresAt}.`);
     return { decisionId, decision: 'PENDING', skipReason: null };
   }
 

@@ -132,10 +132,41 @@ describe('SignalTraderService — the judge\'s market-data collection has a dead
     }
   });
 
-  it('a late call whose room hangs is judged with a null room and the reason', async () => {
-    const t = build({ cfg: { contextDeadlineMs: 30 }, context: { optionDelta: jest.fn(hang) }, ltp: 130 });
+  it('a late call whose option delta hangs keeps its room, with the delta listed in missing', async () => {
+    const structure = { status: 'present', source: 'x', value: { spot: 25010, nearestSupport: 24900, nearestResistance: 25100 } };
+    const t = build({
+      cfg: { contextDeadlineMs: 30 },
+      context: { build: jest.fn(async () => ({ chain: { status: 'present', source: 'x', value: { callWall: 25200 } }, structure })), optionDelta: jest.fn(hang) },
+      ltp: 130,
+    });
     await t.svc.evaluate(ev, NOW);
-    expect(packetOf(t).plan.late).toMatchObject({ chasePct: 30, room: null, roomUnavailable: 'late room: timed out after 30 ms' });
+    const late = packetOf(t).plan.late;
+    expect(late).toMatchObject({ chasePct: 30, room: { needs: 'UP', roomPoints: 90, contractRoom: null } });
+    expect(late.room.missing).toContain('option delta');
+    expect(late).not.toHaveProperty('roomUnavailable');
+  });
+
+  it('warns once per decision naming each source that hit the deadline', async () => {
+    const t = build({
+      cfg: { contextDeadlineMs: 30 },
+      context: {
+        build: jest.fn(async () => ({ chain: { status: 'present', source: 'x', value: {} }, structure: { status: 'unavailable', reason: 'signal-generator 15m level book: timed out after 30 ms' } })),
+        noise: jest.fn(hang),
+        optionDelta: jest.fn(hang),
+      },
+      ltp: 130,
+    });
+    const warn = jest.spyOn((t.svc as any).logger, 'warn').mockImplementation(() => undefined);
+    await t.svc.evaluate(ev, NOW);
+    const hits = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('deadline'));
+    expect(hits).toEqual(['[signal-trader] BUY NIFTY 25000 CE ABOVE 100 SL 90 T 160: deadline 30 ms hit — structure, noise, late-room delta']);
+  });
+
+  it('does not warn when nothing hits the deadline', async () => {
+    const t = build({ ltp: 130 });
+    const warn = jest.spyOn((t.svc as any).logger, 'warn').mockImplementation(() => undefined);
+    await t.svc.evaluate(ev, NOW);
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('deadline'))).toEqual([]);
   });
 
   it('a late call whose room answers in time is unchanged (no extra key)', async () => {

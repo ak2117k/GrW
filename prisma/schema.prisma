@@ -3609,6 +3609,7 @@ model MessageReading {
   @@index([scope, postedAt])
   @@index([textHash])
   @@index([outcomeFilledAt])
+  @@index([sessionDate, status])
   @@map("message_readings")
 }
 

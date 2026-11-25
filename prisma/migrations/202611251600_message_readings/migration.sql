@@ -35,3 +35,4 @@ CREATE INDEX "message_readings_posted_at_idx" ON "message_readings"("posted_at")
 CREATE INDEX "message_readings_scope_posted_at_idx" ON "message_readings"("scope", "posted_at");
 CREATE INDEX "message_readings_text_hash_idx" ON "message_readings"("text_hash");
 CREATE INDEX "message_readings_outcome_filled_at_idx" ON "message_readings"("outcome_filled_at");
+CREATE INDEX "message_readings_session_date_status_idx" ON "message_readings"("session_date", "status");

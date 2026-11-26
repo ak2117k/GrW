@@ -50,8 +50,10 @@ export interface PlaceInput {
    * claim is exactly as before. 'reentry' stores source + the watch key on the claimed signal_orders row (the
    * ordertag keeps the signal executor's 20-char form) so the re-entry caps count it while it is in flight.
    */
-  source?: 'signal' | 'reentry';
+  source?: 'signal' | 'reentry' | 'manager';
   reentryWatchKey?: string | null;
+  /** The entry's underlying (the desk manager's OPEN; the desk guard's per-underlying pause). */
+  underlying?: string | null;
 }
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));

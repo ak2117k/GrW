@@ -37,7 +37,8 @@ import { LESSONS_READER, type InjectedLesson, type LessonsReader } from '../../s
 import { SESSION_TUNING, type TuningReader } from '../../self-review/tuning/tunables';
 import { SignalExecutorService } from './signal-executor.service';
 import type { PaperOpenInput, PaperOpenResult } from './signal-paper.service';
-import { fundsCheck, isFundsRejection, marginPosition, needsMargin, parseMarginResponse, requiredFunds, type BrokerMargin, type FundsCheck } from '../domain/funds';
+import { isFundsRejection, marginPosition, parseMarginResponse, type BrokerMargin, type FundsCheck } from '../domain/funds';
+import { preSendChecks } from './pre-send-checks';
 import { SIGNAL_PAPER_SKIP_REASON, SIGNAL_PAPER_STRATEGY, paperAlert, paperCause, paperProduct, type PaperCause } from '../domain/paper';
 
 /** One queued evaluation's hard limit; an older evaluation may not place a live order. */
@@ -905,37 +906,33 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       return { decisionId, decision: 'TAKE', skipReason: null };
     }
 
-    // ---- live: re-check price (the judge took time) right before the order ----
-    const fresh = await this.timed('preSendQuoteMs', () => this.quotes.ltp(owner as string, finalPlan.token, finalPlan.exchange).catch(() => null));
-    const inBand = fresh !== null && fresh >= finalPlan.bandLow - 1e-9 && fresh <= finalPlan.bandHigh + 1e-9;
-    const stillProtective = fresh !== null && (finalPlan.side === 'BUY' ? finalPlan.sl < fresh : finalPlan.sl > fresh);
-    const recheck: GateCheck = { name: 'pre_send_price', ok: inBand && stillProtective, required: true, detail: fresh === null ? 'no fresh quote before sending' : `LTP ${fresh} vs band [${finalPlan.bandLow}, ${finalPlan.bandHigh}], SL ${finalPlan.sl}` };
-    const checks: GateCheck[] = [...gateChecks, recheck];
-    if (!recheck.ok) {
+    // ---- live: re-check price (the judge took time) right before the order, then enough funds for this entry?
+    // (unknown → sent as before; short → PAPER / SKIP).
+    // Shared with the desk manager's OPEN (pre-send-checks.ts). MCX mini fallback (owner 2026-11-19): the full lot
+    // does not fit the funds or the loss cap → the same call on the mini (same strike + expiry), lots sized to the
+    // cap AND the funds (domain/mini-swap). Never throws.
+    const pre = await preSendChecks({
+      plan: finalPlan,
+      signal: s,
+      cfg,
+      quote: () => this.timed('preSendQuoteMs', () => this.quotes.ltp(owner as string, finalPlan.token, finalPlan.exchange).catch(() => null)),
+      margin: (p) => this.brokerMargin(owner as string, p, base.slEnf.qtyUnit),
+      available: () => this.readFunds(owner as string),
+      mini: (p, px, fundsOk, avail) => this.miniFallback(s, p, px, fundsOk, avail, owner as string, base),
+    });
+    const fresh = pre.fresh;
+    const checks: GateCheck[] = [...gateChecks, ...pre.checks];
+    if (pre.stage === 'price') {
       // A crossed stop is a dead call. Otherwise the premium may be back in a moment (CRUDEOIL 8200 PE, 2026-11-09: ₹1.50 out after the judge's 54 s).
-      const waiting = fresh !== null && !stillProtective ? null : await this.retryEntry({ kind: 'price', detail: recheck.detail }, decisionId, s, channel, now, checks, finalPlan, j, fresh, base);
-      return waiting ?? this.skip(decisionId, 'price_moved', recheck.detail, checks, judgeWithChanges, finalPlan, channel, what);
+      const waiting = fresh !== null && !pre.stillProtective ? null : await this.retryEntry({ kind: 'price', detail: pre.recheck.detail }, decisionId, s, channel, now, checks, finalPlan, j, fresh, base);
+      return waiting ?? this.skip(decisionId, 'price_moved', pre.recheck.detail, checks, judgeWithChanges, finalPlan, channel, what);
     }
-
-    // ---- live: enough funds for this entry? (unknown → sent as before; short → PAPER / SKIP) ----
-    const broker = needsMargin(finalPlan.side, s.instrumentKind) ? await this.brokerMargin(owner as string, finalPlan, base.slEnf.qtyUnit) : null;
-    let need = requiredFunds(finalPlan, s, cfg, broker);
-    const available = await this.readFunds(owner as string);
-    let funds = fundsCheck(available, need);
-    // MCX mini fallback (owner 2026-11-19): the full lot does not fit the funds or the loss cap → the same call
-    // on the mini (same strike + expiry), lots sized to the cap AND the funds (domain/mini-swap). Never throws.
-    const mini = await this.miniFallback(s, finalPlan, fresh as number, funds.ok, available, owner as string, base);
-    if (mini) {
-      checks.push(mini.check);
-      if (mini.plan) {
-        this.logger.warn(`[signal-trader] ${what}: MINI fallback — ${mini.check.detail}`);
-        finalPlan = mini.plan;
-        judgeWithChanges = { ...judgeWithChanges, miniFallback: mini.check.detail };
-        need = requiredFunds(finalPlan, s, cfg, null);
-        funds = fundsCheck(available, need);
-      }
+    if (pre.mini?.plan) {
+      this.logger.warn(`[signal-trader] ${what}: MINI fallback — ${pre.mini.check.detail}`);
+      finalPlan = pre.plan;
+      judgeWithChanges = { ...judgeWithChanges, miniFallback: pre.mini.check.detail };
     }
-    checks.push(funds);
+    const { need, available, funds } = pre;
     const noFunds: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: base.c?.expiry ?? null, channel, what, required: need.required, available, method: need.method };
     if (funds.ok === false) {
       // Cash can free up in minutes (UNIONBANK, 2026-11-09: refused at 15:07, ₹25k came back at 15:09).

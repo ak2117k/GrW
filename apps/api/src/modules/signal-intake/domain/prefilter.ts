@@ -41,10 +41,39 @@ export function instrumentHits(tokens: readonly string[], vocab: Vocabulary): Ar
     const name = vocab.names.get(tokens[i]);
     if (!name) continue;
     // SME symbols that are plain words (EXCELLENT, MOMENTUM, CURRENT): a stock only beside a contract.
-    if ((AMBIGUOUS_SYMBOLS.has(tokens[i]) || LOOSE_STOPWORDS.has(tokens[i])) && !contractBeside(tokens, i)) continue;
+    if (LOOSE_STOPWORDS.has(tokens[i]) && !contractBeside(tokens, i)) continue;
+    if (AMBIGUOUS_SYMBOLS.has(tokens[i]) && !contractBeside(tokens, i) && !levelBeside(tokens, i, vocab)) continue;
     out.push({ i, name });
   }
   return out;
+}
+
+/** Words that make an ambiguous symbol a price-level post ("BSE CASH ABOVE 3860", "BSE 3894 modify support 3870"). */
+const LEVEL_WORDS: ReadonlySet<string> = new Set(['CASH', 'ABOVE', 'BELOW', 'CMP', 'SUPPORT', 'RESISTANCE', 'TARGET', 'TGT', 'SL', 'BUY', 'SELL']);
+const isLevelWord = (t: string): boolean => LEVEL_WORDS.has(t) || /^TGT\d$/.test(t);
+
+/**
+ * Real NSE symbols that are also everyday channel words ("NIFTY IT", "global cues", "star pick BUY…"): they keep
+ * the strict contract-beside rule only. Checked 2026-11-27 — of AMBIGUOUS_SYMBOLS only ABB, BEL, BSE, GLOBAL,
+ * IDEA, IT, MCX, RAIN, STAR are NSE cash symbols; the other words can never resolve, so they carry no risk.
+ */
+const CONTRACT_ONLY: ReadonlySet<string> = new Set(['IT', 'GLOBAL', 'STAR']);
+
+/** A vocabulary instrument that counts on its own (not an ambiguous / loose word). */
+function plainInstrument(token: string, vocab: Vocabulary): boolean {
+  return vocab.names.has(token) && !AMBIGUOUS_SYMBOLS.has(token) && !LOOSE_STOPWORDS.has(token);
+}
+
+/**
+ * An ambiguous symbol also counts when a level word or a number is one of the next 2 tokens (2026-11-26:
+ * "BSE CASH ABOVE 3860" was NOISE), unless another instrument follows within those 2 tokens ("MCX GOLD",
+ * "IDEA: BUY NIFTY") — there it is the exchange / ordinary word. A level word is never the instrument itself.
+ */
+function levelBeside(tokens: readonly string[], i: number, vocab: Vocabulary): boolean {
+  if (isLevelWord(tokens[i]) || CONTRACT_ONLY.has(tokens[i])) return false;
+  const next = tokens.slice(i + 1, i + 3);
+  if (next.some((t) => plainInstrument(t, vocab))) return false;
+  return next.some((t) => isLevelWord(t) || isNumber(t));
 }
 
 function contractBeside(tokens: readonly string[], i: number): boolean {

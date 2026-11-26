@@ -27,7 +27,15 @@ export interface Claim {
   /** Set by validation when the model gave CONFIRMED/CONTRADICTED with no evidence (downgraded to UNCLEAR). */
   evidenceMissing?: boolean;
   claimType: ClaimType;
+  /**
+   * Why a NOT_CHECKABLE claim could not be checked (only on NOT_CHECKABLE). A failed packet block's reason
+   * wins over the model's code; neither → OTHER (filled by the reader service before storing).
+   */
+  reasonCode?: ReasonCode;
 }
+
+export type ReasonCode = 'NO_INSTRUMENT' | 'QUOTE_BUDGET' | 'STALE' | 'TIMEOUT' | 'FORWARD_LOOKING' | 'NO_BARS' | 'OTHER';
+export const REASON_CODES: readonly ReasonCode[] = ['NO_INSTRUMENT', 'QUOTE_BUDGET', 'STALE', 'TIMEOUT', 'FORWARD_LOOKING', 'NO_BARS', 'OTHER'];
 
 export interface ReaderCall {
   underlying: string;
@@ -70,7 +78,7 @@ export const READER_REPLY_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['text', 'subject', 'bias', 'horizon', 'claimType', 'verdict', 'evidence'],
+        required: ['text', 'subject', 'bias', 'horizon', 'claimType', 'verdict', 'reasonCode', 'evidence'],
         properties: {
           text: { type: 'string' },
           subject: { type: 'string' },
@@ -78,6 +86,7 @@ export const READER_REPLY_SCHEMA = {
           horizon: { type: 'string', enum: [...CLAIM_HORIZONS] },
           claimType: { type: 'string', enum: [...CLAIM_TYPES] },
           verdict: { type: 'string', enum: [...CLAIM_VERDICTS] },
+          reasonCode: { anyOf: [{ type: 'string', enum: [...REASON_CODES] }, { type: 'null' }] },
           evidence: {
             type: 'array',
             items: {

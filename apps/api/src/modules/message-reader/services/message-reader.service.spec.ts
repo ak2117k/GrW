@@ -36,6 +36,8 @@ type Fakes = {
   alert?: (key: string, text: string) => Promise<boolean>;
   env?: Record<string, string>;
   events?: { emit: (event: string, payload: unknown) => boolean };
+  packet?: ReaderPacket;
+  addInstruments?: jest.Mock;
 };
 
 function make(o: Fakes = {}) {
@@ -62,7 +64,10 @@ function make(o: Fakes = {}) {
     }),
     channelTitle: jest.fn(async () => 'Stock Gainers (SEBI Registered)'),
   };
-  const packet = { build: jest.fn(async () => ({ packet: { at: NOW.toISOString() } as unknown as ReaderPacket, ms: 7 })) };
+  const packet = {
+    build: jest.fn(async () => ({ packet: o.packet ?? ({ at: NOW.toISOString() } as unknown as ReaderPacket), ms: 7 })),
+    ...(o.addInstruments ? { addInstruments: o.addInstruments } : {}),
+  };
   const llm = { read: jest.fn(o.read ?? (async () => ({ reply: INFO, ms: 900, model: 'claude-sonnet-5' }))) };
   let now = NOW;
   const cfg = parseMessageReaderConfig({ MESSAGE_READER: o.mode ?? 'shadow', ...(o.env ?? {}) });
@@ -528,6 +533,79 @@ describe('MessageReaderService', () => {
       expect(emit).toHaveBeenCalledTimes(1);
       expect(m.llm.read).toHaveBeenCalledTimes(1);
       expect(m.upserts.map((u) => u.status)).toEqual(['READ']);
+    });
+  });
+
+  describe('second pass and NOT_CHECKABLE reason codes (2026-11-26)', () => {
+    const unavailable = (reason: string) => ({ status: 'unavailable', source: 's', reason });
+    const present = { status: 'present', source: 's', value: 1 };
+    const claim = (subject: string, over: Record<string, unknown> = {}) => ({
+      text: `${subject} going up`, subject, bias: 'BULL', horizon: 'INTRADAY', claimType: 'DIRECTION', verdict: 'NOT_CHECKABLE', evidence: [], ...over,
+    }) as ReaderReply['claims'][number];
+    const basePacket = (instruments: Record<string, unknown> = {}) =>
+      ({ at: NOW.toISOString(), marketPulse: { indices: present, breadth: present, sectors: present }, instruments, channelRecent: present, todayNotes: present }) as unknown as ReaderPacket;
+
+    it('second pass quotes an AI-named instrument the prefilter missed (cap 3), reading re-asked once with the added block', async () => {
+      const reply1: ReaderReply = {
+        ...INFO,
+        scope: 'INSTRUMENT',
+        claims: ['RELIANCE', 'NIFTY', 'BANKNIFTY', 'SENSEX', 'BANK'].map((s) => claim(s)),
+      };
+      const reply2: ReaderReply = { ...reply1, claims: [claim('RELIANCE', { verdict: 'CONFIRMED', evidence: [{ fact: 'ltp', value: '1500', source: 'instruments.RELIANCE.quote' }] })], summary: 'second' };
+      const added = basePacket({ RELIANCE: { quote: present }, NIFTY: { quote: present }, BANKNIFTY: { quote: present } });
+      const addInstruments = jest.fn(async () => ({ packet: added, ms: 40 }));
+      const m = make({ packet: basePacket(), addInstruments });
+      m.llm.read
+        .mockImplementationOnce(async () => ({ reply: reply1, ms: 900, model: 'claude-sonnet-5' }))
+        .mockImplementationOnce(async () => ({ reply: reply2, ms: 800, model: 'claude-sonnet-5' }));
+      m.svc.onTelegramMessage(m.post('m1', 'markets look strong today'));
+      await m.svc.whenIdle();
+      expect(addInstruments).toHaveBeenCalledTimes(1);
+      expect(addInstruments).toHaveBeenCalledWith(expect.anything(), ['RELIANCE', 'NIFTY', 'BANKNIFTY'], NOW);
+      expect(m.llm.read).toHaveBeenCalledTimes(2);
+      expect(m.llm.read.mock.calls[1][0].packet).toBe(added);
+      expect(m.rows.get('m1')).toMatchObject({ status: 'READ', summary: 'second', packet: added, packetMs: 47, aiMs: 1_700 });
+    });
+
+    it('no second pass when the AI names nothing new; a failed second pass keeps the first reading', async () => {
+      const addInstruments = jest.fn(async () => {
+        throw new Error('broker down');
+      });
+      const m = make({ packet: basePacket({ NIFTY: { quote: present } }), addInstruments });
+      m.llm.read.mockImplementation(async () => ({ reply: { ...INFO, claims: [claim('NIFTY'), claim('MARKET')] }, ms: 900, model: 'claude-sonnet-5' }));
+      m.svc.onTelegramMessage(m.post('m1', 'nifty strong'));
+      await m.svc.whenIdle();
+      expect(addInstruments).not.toHaveBeenCalled();
+      m.llm.read.mockImplementation(async () => ({ reply: { ...INFO, claims: [claim('RELIANCE')], summary: 'first' }, ms: 900, model: 'claude-sonnet-5' }));
+      m.svc.onTelegramMessage(m.post('m2', 'that stock looks strong'));
+      await m.svc.whenIdle();
+      expect(addInstruments).toHaveBeenCalledTimes(1);
+      expect(m.llm.read).toHaveBeenCalledTimes(2); // one per post
+      expect(m.rows.get('m2')).toMatchObject({ status: 'READ', summary: 'first' });
+    });
+
+    it('NOT_CHECKABLE claim gets a reasonCode from the failed block, else the model code, else OTHER', async () => {
+      const packet = basePacket({
+        RELIANCE: { quote: unavailable('reader quote budget: 6 new underlyings already quoted in the last minute'), context: present },
+        NIFTY: { quote: unavailable('stale quote: last update 2026-11-25T03:00:00.000Z is over 5 min old'), context: present },
+        BANKNIFTY: { quote: present, context: unavailable('timed out after 3000 ms') },
+      });
+      const m = make({ packet });
+      const claims = [
+        claim('RELIANCE', { reasonCode: 'FORWARD_LOOKING' }),
+        claim('NIFTY'),
+        claim('BANKNIFTY'),
+        claim('SENSEX'), // an instrument with no block in the packet
+        claim('METAL', { reasonCode: 'FORWARD_LOOKING' }), // sector, sectors block present → the model's code stands
+        claim('MARKET'), // nothing failed, no model code → OTHER
+        claim('NIFTY', { verdict: 'UNCLEAR', reasonCode: 'STALE' }), // not NOT_CHECKABLE → no code
+      ];
+      m.llm.read.mockImplementation(async () => ({ reply: { ...INFO, claims }, ms: 900, model: 'claude-sonnet-5' }));
+      m.svc.onTelegramMessage(m.post('m1', 'everything up'));
+      await m.svc.whenIdle();
+      const stored = m.rows.get('m1')!.claims;
+      expect(stored.map((c) => c.reasonCode)).toEqual(['QUOTE_BUDGET', 'STALE', 'TIMEOUT', 'NO_INSTRUMENT', 'FORWARD_LOOKING', 'OTHER', undefined]);
+      expect(stored[6]).not.toHaveProperty('reasonCode');
     });
   });
 });

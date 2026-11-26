@@ -8,11 +8,13 @@ import { textHash, type VocabularySource } from '../../signal-intake/services/si
 import { SignalVocabularyService } from '../../signal-intake/services/signal-vocabulary.service';
 import { parseAgrees } from '../domain/parse-compare';
 import { marketNoteClaims, marketNoteText } from '../domain/reader-health';
-import type { Claim, ReaderCall, ReadKind, ReadScope } from '../domain/reading.types';
+import { fillReasonCodes } from '../domain/reason-code';
+import type { Claim, ReaderCall, ReaderReply, ReadKind, ReadScope } from '../domain/reading.types';
+import { AMBIGUOUS_SYMBOLS, type Vocabulary } from '../../signal-intake/domain/vocabulary';
 import { MESSAGE_READER_CONFIG, type MessageReaderConfig } from '../message-reader.config';
 import { MessageReaderRepository, type ReadingWrite } from '../repositories/message-reader.repository';
 import { MessageReaderLlm } from './message-reader-llm.service';
-import { ReaderPacketService } from './reader-packet.service';
+import { ReaderPacketService, type ReaderPacket } from './reader-packet.service';
 
 export const MESSAGE_READER_NOW = Symbol('MESSAGE_READER_NOW');
 export const MESSAGE_READER_AGENTS_ON = Symbol('MESSAGE_READER_AGENTS_ON');
@@ -37,7 +39,8 @@ export interface ReadingStoredEvent {
 }
 
 export type ReaderStore = Pick<MessageReaderRepository, 'upsertReading' | 'readingOf' | 'cachedByHash' | 'ruleClassOf' | 'channelTitle' | 'updateRuleComparison'>;
-export type ReaderPacketPort = Pick<ReaderPacketService, 'build'>;
+/** `addInstruments` is the optional second pass; without it the first reading is stored as is. */
+export type ReaderPacketPort = Pick<ReaderPacketService, 'build'> & Partial<Pick<ReaderPacketService, 'addInstruments'>>;
 export type ReaderLlmPort = Pick<MessageReaderLlm, 'read'>;
 
 export interface ReadJob {
@@ -63,6 +66,8 @@ export const READER_MAX_IN_FLIGHT = 8;
 const CACHE_WINDOW_MS = 15 * 60_000;
 const IST_OFFSET_MS = 330 * 60_000;
 const MAX_UNDERLYINGS = 3;
+/** Instruments the second pass may add (AI-named, missed by the pre-filter). */
+const MAX_SECOND_PASS = 3;
 /** When the rules had not decided at read time, the comparison is re-checked after these delays. */
 export const RULE_RECHECK_MS: readonly number[] = [60_000, 5 * 60_000];
 /** ruleStatus when the rule class was absent / not final at read time (and still not at the last re-check). */
@@ -275,15 +280,38 @@ export class MessageReaderService implements OnModuleDestroy {
       const underlyings = await this.underlyingsOf(j);
       const built = await this.packet.build({ text: j.text, channelId: j.channelId, underlyings, now: dequeuedAt });
       packetMs = built.ms;
+      let packet = built.packet;
       const channelTitle = (await this.repo.channelTitle(j.channelId)) ?? j.channelId;
-      const { reply, ms, model } = await this.llm.read({
-        text: j.text,
-        channelTitle,
-        postedAtIst: istClock(j.postedAt),
-        packet: built.packet,
-        ...(j.imageReading !== undefined ? { imageReading: j.imageReading } : {}),
-        ...(j.imageSkipped !== undefined ? { imageSkipped: j.imageSkipped } : {}),
-      });
+      const ask = (p: ReaderPacket) =>
+        this.llm.read({
+          text: j.text,
+          channelTitle,
+          postedAtIst: istClock(j.postedAt),
+          packet: p,
+          ...(j.imageReading !== undefined ? { imageReading: j.imageReading } : {}),
+          ...(j.imageSkipped !== undefined ? { imageSkipped: j.imageSkipped } : {}),
+        });
+      const first = await ask(packet);
+      let { reply, model } = first;
+      let ms = first.ms;
+      const vocab = await this.vocab.get().catch(() => null);
+      // Second pass (once): the AI named instruments the pre-filter missed → quote them and ask again.
+      const missed = this.missedInstruments(reply, underlyings, packet, vocab);
+      if (missed.length > 0 && this.packet.addInstruments) {
+        try {
+          const more = await this.packet.addInstruments(packet, missed, dequeuedAt);
+          const second = await ask(more.packet);
+          packet = more.packet;
+          packetMs += more.ms;
+          ({ reply, model } = second);
+          ms += second.ms;
+        } catch (e) {
+          // The first reading stands.
+          this.logger.warn(`[message-reader] second pass for ${j.messageId} (${missed.join(', ')}) failed: ${errText(e)}`);
+        }
+      }
+      const isInstrument = (s: string) => !!vocab && vocab.classOf.has(vocab.names.get(s) ?? s);
+      const claims = fillReasonCodes(reply.claims, packet, isInstrument);
       const call = reply.call ? { ...reply.call, underlying: reply.call.underlying.trim().toUpperCase() } : null;
       const row: ReadingWrite = {
         ...base,
@@ -291,11 +319,11 @@ export class MessageReaderService implements OnModuleDestroy {
         status: 'READ',
         kind: reply.kind,
         scope: reply.scope,
-        claims: reply.claims,
+        claims,
         call,
         summary: reply.summary,
         model,
-        packet: built.packet,
+        packet,
         packetMs,
         aiMs: ms,
         ...(await this.compareWithRules(j.messageId, reply.kind, call)),
@@ -398,6 +426,26 @@ export class MessageReaderService implements OnModuleDestroy {
     } catch (e) {
       this.logger.warn(`[message-reader] rule re-check of ${messageId} not stored: ${errText(e)}`);
     }
+  }
+
+  /**
+   * Instruments the AI's reading names (its call's underlying, claim subjects) that the vocabulary knows but
+   * the packet does not carry, at most 3. Claim subjects that are ambiguous words (BANK, IT …) are sectors, not stocks.
+   */
+  private missedInstruments(reply: ReaderReply, underlyings: readonly string[], packet: ReaderPacket, vocab: Vocabulary | null): string[] {
+    if (!vocab) return [];
+    const have = new Set([...underlyings, ...Object.keys(packet.instruments ?? {})]);
+    const canonical = (raw: string, fromCall: boolean): string | null => {
+      const s = raw.trim().toUpperCase();
+      if (!s || s === 'MARKET' || (!fromCall && AMBIGUOUS_SYMBOLS.has(s))) return null;
+      const name = vocab.names.get(s) ?? (vocab.classOf.has(s) ? s : null);
+      return name && vocab.classOf.has(name) ? name : null;
+    };
+    const named = [
+      ...(reply.call ? [canonical(reply.call.underlying, true)] : []),
+      ...(Array.isArray(reply.claims) ? reply.claims : []).map((c) => (typeof c?.subject === 'string' ? canonical(c.subject, false) : null)),
+    ].filter((n): n is string => !!n && !have.has(n));
+    return [...new Set(named)].slice(0, MAX_SECOND_PASS);
   }
 
   /** The instruments the post names (the intake's free pre-filter vocabulary), plus any the image reading names. */

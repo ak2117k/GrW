@@ -5,6 +5,7 @@ import {
   CLAIM_VERDICTS,
   READ_KINDS,
   READ_SCOPES,
+  REASON_CODES,
   type Claim,
   type Evidence,
   type ReaderCall,
@@ -120,6 +121,8 @@ function readClaim(raw: unknown, i: number, idx: PacketIndex | null): Result<Cla
     claim.verdict = 'UNCLEAR';
     claim.evidenceMissing = true;
   }
+  // A reason code only means something on NOT_CHECKABLE; an off-list or missing one is filled later (OTHER).
+  if (claim.verdict === 'NOT_CHECKABLE' && oneOf(REASON_CODES, raw.reasonCode)) claim.reasonCode = raw.reasonCode;
   return { ok: true, value: claim };
 }
 

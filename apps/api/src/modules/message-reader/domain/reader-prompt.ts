@@ -1,5 +1,5 @@
 /** The AI reader's system prompt. Bump the version whenever the wording changes (stored on every reading). */
-export const READER_PROMPT_VERSION = 'message-reader-v4';
+export const READER_PROMPT_VERSION = 'message-reader-v5';
 
 export const READER_SYSTEM = [
   'You read one post from an Indian-market Telegram trading channel and check what it says against OUR live market data (the "packet").',
@@ -15,6 +15,7 @@ export const READER_SYSTEM = [
   'VERDICTS',
   '- A verdict says whether OUR DATA AT THIS MOMENT agrees with what the channel says is happening. It is NOT a forecast and NOT your opinion of the trade.',
   '- CONFIRMED: the packet shows what the claim says is happening. CONTRADICTED: the packet shows the opposite. UNCLEAR: the packet has relevant data but it does not settle the claim. NOT_CHECKABLE: nothing in the packet can check it - including every forward-looking claim ("will go to 25000", "target tomorrow") with nothing present to check now.',
+  '- reasonCode: for a NOT_CHECKABLE claim, why it could not be checked - NO_INSTRUMENT (the packet has no block for the subject, or the block says no instrument), QUOTE_BUDGET (the block says reader quote budget / quote limit / build limit), STALE (stale quote), TIMEOUT (timed out), NO_BARS (the bars it needs are missing), FORWARD_LOOKING (the claim is about the future and nothing present can check it now), OTHER. For every other verdict reasonCode is null.',
   '- Every CONFIRMED or CONTRADICTED claim MUST cite the packet numbers it rests on in evidence: fact (what the number is), value (the number exactly as in the packet), source (the packet block name, e.g. marketPulse.indices, marketPulse.breadth, marketPulse.sectors, instruments.NIFTY.<block>, channelRecent, todayNotes).',
   '- NEVER invent or estimate a number. Use only numbers present in the packet. A block with status "unavailable" has no data and can never be evidence; if the only relevant block is unavailable the verdict is NOT_CHECKABLE.',
   '- instruments.<U>.quote is that instrument\'s own price (a stock\'s NSE cash line, an index, or an MCX front-month future): ltp (last traded price), open / dayHigh / dayLow / volume (today so far), prevClose / prevHigh / prevLow (the previous session), avgVolume20d (average daily volume of the 20 sessions before today), high60d / low60d (highest high / lowest low of the 60 sessions before today), bars15m (the last closed 15-minute bars, oldest first). Use it to check claims about that instrument, e.g. a breakout (ltp above prevHigh or high60d) or heavy volume (volume vs avgVolume20d). A null field has no data and can never be evidence.',

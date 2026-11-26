@@ -31,7 +31,7 @@ const tick = (ltp: number, underlying: number, high = 380.4): TickReading => ({
   factorValues: {}, factorsReason: null, noise: noise('2026-10-29T15:30:00.000Z'),
 });
 
-function makeSvc(discipline: ExitDisciplineConfig | undefined, gate?: JudgeGateConfig) {
+function makeSvc(discipline: ExitDisciplineConfig | undefined, gate?: JudgeGateConfig, manager?: { managerTrackerIds(ids: readonly string[]): Promise<ReadonlySet<string>> }) {
   const build = jest.fn().mockResolvedValue([entry()]);
   const evaluate = jest.fn().mockReturnValue({ fires: [], heartbeat: false, shouldEvaluate: false, trigger: null });
   const buildPacket = jest.fn().mockImplementation((_e, t) =>
@@ -47,7 +47,7 @@ function makeSvc(discipline: ExitDisciplineConfig | undefined, gate?: JudgeGateC
     { build } as never, { evaluate } as never, { build: buildPacket } as never, { ensureFor: jest.fn().mockResolvedValue({ direction: 'SHORT', reason: 'long put', levelPrice: 9560, targetPrice: 9480, invalidation: 9650, source: 'INFERRED' }) } as never,
     { judge, promptVersion: 'v9/t1' } as never, { record, recentForTracker } as never,
     { captureAndCompare: jest.fn().mockResolvedValue({ now: null, prev: null }) } as never, { tickFor } as never,
-    undefined, discipline, undefined, undefined, undefined, undefined, undefined, undefined, gate,
+    undefined, discipline, undefined, undefined, undefined, undefined, undefined, undefined, gate, undefined, undefined, undefined, manager,
   );
   /** One cycle pass at `hms` IST over `t`; resolves once its work (judgement or rule verdict) is recorded. */
   const pass = async (hms: string, t: TickReading) => {
@@ -323,6 +323,53 @@ describe('SentinelCycleService — noise-aware HARD_LOSS_EXIT (prod 2026-11-04 N
     t.build.mockResolvedValue([entry({ symbol: NIFTY, exchange: 'NFO', trackerId: 'paper:abc' })]);
     for (const [hms, r] of [['11:21:00', nifty(130, 23830)], ['11:21:30', nifty(130, 23830)]] as Array<[string, TickReading]>) await t.pass(hms, r);
     expect(ruleRows(t.record).filter((r) => /MAX_LOSS/.test(r.reason))).toHaveLength(0);
+  });
+
+  describe('desk manager positions (2026-11-26): their own stop, the class ceiling as the backstop', () => {
+    const TABLE = { HARD_LOSS_CEILING_BY_CLASS: 'INDEX_OPT:5000,STOCK_OPT:3000,GOLD:7500,SILVER:7500,MCX:5000' };
+    const twice = (hms: [string, string], r: TickReading): Array<[string, TickReading]> => [[hms[0], r], [hms[1], r]];
+    const runWith = async (manager: { managerTrackerIds(ids: readonly string[]): Promise<ReadonlySet<string>> } | undefined, env: Record<string, string>, reads: Array<[string, TickReading]>) => {
+      Object.assign(process.env, env);
+      const t = makeSvc(parseExitDisciplineConfig({}), undefined, manager);
+      t.build.mockResolvedValue([entry({ symbol: NIFTY, exchange: 'NFO', trackerId: 't-nifty' })]);
+      for (const [hms, r] of reads) await t.pass(hms, r);
+      return ruleRows(t.record);
+    };
+    const isManager = { managerTrackerIds: jest.fn(async (ids: readonly string[]) => new Set(ids.filter((id) => id === 't-nifty'))) };
+    const notManager = { managerTrackerIds: jest.fn(async () => new Set<string>()) };
+
+    it('manager tracker skips the flat 2000 exit but not the class ceiling', async () => {
+      // −₹2.5k with NIFTY 3.03 N15 against: a sentinel position exits here; the manager's does not.
+      const past2k = twice(['11:20:00', '11:20:30'], nifty(140, 23903, { underlyingN15: 30 }));
+      expect(await runWith(notManager, TABLE, past2k)).toHaveLength(1);
+      expect(await runWith(isManager, TABLE, past2k)).toHaveLength(0);
+      // −₹5.1k: the INDEX_OPT ceiling still exits it, labelled as the ceiling.
+      const rows = await runWith(isManager, TABLE, twice(['11:22:00', '11:22:30'], nifty(120, 23903, { underlyingN15: 30 })));
+      expect(rows).toHaveLength(1);
+      expect(rows[0].reason).toMatch(/MAX_LOSS: net ₹-5\d{3} reached the absolute hard loss cap of ₹5000 \(HARD_LOSS_CEILING_BY_CLASS\)/);
+      expect(isManager.managerTrackerIds).toHaveBeenCalledWith(['t-nifty']);
+    });
+
+    it('table off: a manager tracker is cut only at the ₹3,000 cap, never at ₹2,000', async () => {
+      expect(await runWith(isManager, {}, twice(['11:20:00', '11:20:30'], nifty(140, 23845)))).toHaveLength(0);
+      const rows = await runWith(isManager, {}, twice(['11:21:00', '11:21:30'], nifty(135.5, 23830)));
+      expect(rows).toHaveLength(1);
+      expect(rows[0].reason).toMatch(/reached the absolute hard loss cap of ₹3000 \(HARD_LOSS_CAP_RUPEES\)/);
+    });
+
+    it('non-manager tracker unchanged (no lookup, or a lookup that names nothing)', async () => {
+      const reads = twice(['11:20:00', '11:20:30'], nifty(140, 23845));
+      const none = await runWith(undefined, {}, reads);
+      const empty = await runWith(notManager, {}, reads);
+      expect(none).toHaveLength(1);
+      expect(empty).toHaveLength(1);
+      expect(empty[0].reason).toBe(none[0].reason);
+    });
+
+    it('a failed lookup is fail safe: the flat rule applies', async () => {
+      const broken = { managerTrackerIds: jest.fn(async () => { throw new Error('db down'); }) };
+      expect(await runWith(broken, {}, twice(['11:20:00', '11:20:30'], nifty(140, 23845)))).toHaveLength(1);
+    });
   });
 });
 

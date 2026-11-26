@@ -57,7 +57,16 @@ export class ManualExitService {
   async request(
     user: AuthenticatedUser,
     trackerId: string,
-    opts: { now?: Date; env?: Record<string, string | undefined> } = {},
+    opts: {
+      now?: Date;
+      env?: Record<string, string | undefined>;
+      /**
+       * Who asked and why, stored on the execution row (verdictReason, after `MANUAL:`). Omitted = the
+       * owner's Portfolio button. A system caller (the desk manager, `{ userId: owner, role: 'ADMIN',
+       * email: 'desk-manager' }`) names itself here; it is the same MANUAL trigger: no thesis gate, no AI daily cap.
+       */
+      reason?: string;
+    } = {},
   ): Promise<ManualExitResult> {
     const now = opts.now ?? new Date();
     const cfg = parseAutoExitConfig(opts.env ?? process.env);
@@ -93,7 +102,7 @@ export class ManualExitService {
       userId: user.userId,
       trackerId: tracker.id,
       symbol: tracker.symbol,
-      reason: `${MANUAL_REASON_PREFIX} owner Exit now (Portfolio)`,
+      reason: `${MANUAL_REASON_PREFIX} ${opts.reason?.trim() || 'owner Exit now (Portfolio)'}`.slice(0, 500),
       createdAt: now,
     };
     // CLAIM — before any broker call, live mode (the owner's order is always live).

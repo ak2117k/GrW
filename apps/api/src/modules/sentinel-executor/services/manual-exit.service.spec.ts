@@ -108,6 +108,26 @@ describe('ManualExitService', () => {
     expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
   });
 
+  it('a system caller (desk manager) passes its reason: stored after MANUAL:, same MANUAL pipeline, no AI cap', async () => {
+    const h = harness();
+    const r = await h.svc.request({ userId: 'owner', role: 'ADMIN', email: 'desk-manager' }, 't1', {
+      now: NOW, env: ENV, reason: 'DESK_MANAGER EXIT: thesis broken below 3863',
+    });
+    expect(r.started).toBe(true);
+    expect(r.row.verdictReason).toBe('MANUAL: DESK_MANAGER EXIT: thesis broken below 3863');
+    await expect(r.done).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.repo.countCountedSince).not.toHaveBeenCalled();
+    expect(h.gate.decide).not.toHaveBeenCalled();
+  });
+
+  it('without a reason the row keeps the Portfolio wording', async () => {
+    const h = harness();
+    const r = await h.svc.request(OWNER, 't1', { now: NOW, env: ENV });
+    expect(r.row.verdictReason).toBe('MANUAL: owner Exit now (Portfolio)');
+    await r.done;
+  });
+
   it('a double click (two concurrent requests) yields ONE attempt and ONE order; both get the same row', async () => {
     const h = harness();
     const [a, b] = await Promise.all([

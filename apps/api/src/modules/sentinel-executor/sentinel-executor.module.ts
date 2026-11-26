@@ -98,5 +98,7 @@ import { ExitNoiseRepository } from '../exit-noise/exit-noise.repository';
       inject: [PrismaService],
     },
   ],
+  // The desk manager EXIT / BOOK go through the owner manual-exit path (desk-manager plan Task 7).
+  exports: [ManualExitService],
 })
 export class SentinelExecutorModule {}

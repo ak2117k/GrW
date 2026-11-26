@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { DeskGuardModule } from '../desk-manager/desk-guard.module';
 import { TradeSentinelModule } from '../trade-sentinel/trade-sentinel.module';
 import { ConfigService } from '@nestjs/config';
 import { PrismaModule } from '../../common/prisma/prisma.module';
@@ -43,7 +44,7 @@ import { REENTRY_ALERT, REENTRY_CLOCK, REENTRY_ENV, REENTRY_FUNDS, REENTRY_MASTE
  */
 @Module({
   // TradeSentinelModule: the AI entry judge (EntryJudgeService).
-  imports: [PrismaModule, MarketDataModule, TradeEngineModule, TradeSentinelModule, TradeTrackerModule, CredentialDecryptorModule, CredentialVaultModule],
+  imports: [PrismaModule, MarketDataModule, TradeEngineModule, TradeSentinelModule, TradeTrackerModule, CredentialDecryptorModule, CredentialVaultModule, DeskGuardModule],
   providers: [
     ReentryWatchRepository,
     ReentryWatchService,

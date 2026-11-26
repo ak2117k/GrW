@@ -57,6 +57,6 @@ import { ENGINE_CLOCK, ENGINE_MASTER, ENGINE_QUOTES, ENGINE_SIGNAL_CONFIG, Entry
       inject: [UserFeedManager],
     },
   ],
-  exports: [EntryEngineService],
+  exports: [EntryEngineService, EntryEnginePaperService],
 })
 export class EntryEngineModule {}

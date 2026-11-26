@@ -80,6 +80,6 @@ import { SETUP_WATCH_MARKET, SetupWatchService, type SetupWatchMarket } from './
     { provide: AI_SETUP_GRADE_CLOCK, useFactory: () => makeSentinelClock(process.env.HUB_MCX_LATE_CLOSE) },
     SetupGradeCron,
   ],
-  exports: [AiSetupsRepository, AI_SETUPS_CONFIG],
+  exports: [AiSetupsRepository, AI_SETUPS_CONFIG, SETUP_WATCH_MARKET],
 })
 export class AiSetupsModule {}

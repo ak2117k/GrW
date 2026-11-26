@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { PrismaManagerTrackers } from './adapters/manager-trackers.prisma';
+import { MANAGER_TRACKERS } from './ports/manager-trackers.port';
 import { ConfigService } from '@nestjs/config';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
@@ -143,6 +145,9 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
   ],
   controllers: [SentinelController, NightAnalysisController],
   providers: [
+    // Desk manager trades ride their own stop, not the flat HARD_LOSS_EXIT_RUPEES (desk-manager plan Task 7).
+    PrismaManagerTrackers,
+    { provide: MANAGER_TRACKERS, useExisting: PrismaManagerTrackers },
     {
       provide: ANTHROPIC_CLIENT,
       /**

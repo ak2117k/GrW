@@ -57,6 +57,7 @@ export const navItems: NavItem[] = [
   { path: '/reinvest', label: 'Reinvest', icon: PiggyBank },
   { path: '/auto-trade', label: 'Auto-Trade', icon: Bot },
   { path: '/positions', label: 'Positions', icon: Briefcase },
+  { path: '/desk', label: 'Desk', icon: Target },
   { path: '/night-report', label: 'Night Report', icon: Moon },
   { path: '/self-review', label: 'Self-review', icon: ListChecks },
   { path: '/portfolio', label: 'Portfolio', icon: PieChart },

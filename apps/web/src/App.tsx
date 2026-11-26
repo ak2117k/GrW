@@ -41,6 +41,7 @@ import SignupPage from '@/pages/signup/SignupPage';
 import VerifyEmailPage from '@/pages/verify-email/VerifyEmailPage';
 import TelegramSignalsPage from '@/pages/telegram/TelegramSignalsPage';
 import NightReportPage from '@/pages/night-report/NightReportPage';
+import DeskPage from '@/pages/desk/DeskPage';
 import SelfReviewPage from '@/pages/self-review/SelfReviewPage';
 import PortfolioReviewPage from '@/pages/portfolio-review/PortfolioReviewPage';
 import SignalsTelegramPage from '@/pages/signals-telegram/SignalsTelegramPage';
@@ -177,6 +178,7 @@ export default function App() {
         <Route path="auto-trade" element={<RequireRole role="ADMIN"><AutoTradePage /></RequireRole>} />
         <Route path="manual-trade" element={<RequireRole role="ADMIN"><ManualTradePage /></RequireRole>} />
         <Route path="positions" element={<PositionsPage />} />
+        <Route path="desk" element={<RequireRole role="ADMIN"><DeskPage /></RequireRole>} />
         <Route path="night-report" element={<RequireRole role="ADMIN"><NightReportPage /></RequireRole>} />
         <Route path="self-review" element={<RequireRole role="ADMIN"><SelfReviewPage /></RequireRole>} />
         <Route path="signals-telegram" element={<RequireRole role="ADMIN"><SignalsTelegramPage /></RequireRole>} />

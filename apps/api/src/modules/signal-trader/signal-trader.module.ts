@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { DeskGuardModule } from '../desk-manager/desk-guard.module';
 import { ConfigService } from '@nestjs/config';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
@@ -52,6 +53,7 @@ import { MarketEventsRepository } from '../news-events/events/market-events.repo
 @Module({
   imports: [
     PrismaModule,
+    DeskGuardModule,
     MarketDataModule,
     CredentialDecryptorModule,
     CredentialVaultModule,
@@ -137,6 +139,6 @@ import { MarketEventsRepository } from '../news-events/events/market-events.repo
     },
   ],
   // The AI message reader reuses the judge's market packet and the owner user id.
-  exports: [SignalContextService, SIGNAL_TRADER_CONFIG],
+  exports: [SignalContextService, SIGNAL_TRADER_CONFIG, SignalExecutorService, SIGNAL_QUOTES, SIGNAL_FUNDS],
 })
 export class SignalTraderModule {}

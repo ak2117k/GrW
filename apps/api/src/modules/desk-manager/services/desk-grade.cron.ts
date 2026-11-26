@@ -185,9 +185,9 @@ export class DeskGradeCron {
     if (!ref) return null;
     const run = await this.prisma.deskManagerRun.findUnique({ where: { id: row.runId }, select: { packet: true } });
     const block = isRec(run?.packet) ? run!.packet.proposals : null;
-    const list = isRec(block) && block.status === 'present' && Array.isArray(block.value) ? block.value : [];
-    const p = list.find((x): x is Proposal => isRec(x) && x.ref === ref);
-    return p ?? null;
+    const list: unknown[] = isRec(block) && block.status === 'present' && Array.isArray(block.value) ? (block.value as unknown[]) : [];
+    const p = list.find((x) => isRec(x) && x.ref === ref);
+    return (p as Proposal | undefined) ?? null;
   }
 
   private async barsFor(underlying: string, from: Date, to: Date): Promise<{ bars: Bar15m[] | null; error: string | null }> {

@@ -39,6 +39,7 @@ import {
 import { squareOffLook, type SquareOffDecision, type SquareOffLook } from './square-off-look';
 import { OWNER_ALERTS, type OwnerAlert, type OwnerAlertPort } from '../ports/owner-alerts.port';
 import { CLOSE_PRODUCTS, NO_CLOSE_CONTEXT, type CloseContext, type CloseProductLookup } from '../ports/close-products.port';
+import { MANAGER_TRACKERS, type ManagerTrackerLookup } from '../ports/manager-trackers.port';
 import type { Verdict as SentinelVerdict } from './sentinel-agent.service';
 import { ThesisService, isRetryable as isRetryableThesis, type EnsuredThesis } from './thesis.service';
 import { SentinelAgentService } from './sentinel-agent.service';
@@ -58,7 +59,7 @@ import {
 import { exitConfirmFire } from '../tripwires/exit-confirm';
 import { floorNoiseUnit, solveCycleFloor } from './cycle-floor';
 import { EMPTY_ANCHORS, solveCycleAnchors, type AnchorMemory } from './cycle-anchors';
-import { confirmHardFloor, hardFloorReading, hardLossConfig, hardLossReading, widenExitTrigger, type HardFloorInput, type HardFloorMemo, type HardFloorReading } from '../../exit-discipline/hard-floor';
+import { confirmHardFloor, hardFloorReading, hardLossConfig, hardLossReading, widenExitTrigger, type HardFloorInput, type HardFloorMemo, type HardFloorReading, type HardLossConfig } from '../../exit-discipline/hard-floor';
 import {
   EXEC_REST_TIMEOUT_MS, describeExecCheck, execConfirm, execHolds, execPriceOf, floorReadingAtExec, freshHubBook, ladderTrailTripsAt, parseExecConfirmMode,
   type ContractBook, type ExecCheck, type ExecConfirmMode,
@@ -747,6 +748,12 @@ export class SentinelCycleService {
   private readonly blind = new BlindWatch();
   /** Per-position sensor passes still running (started at, ms) — a stuck one is skipped, never doubled. */
   private readonly sensorRunning = new Map<string, number>();
+  /**
+   * The desk manager's real positions as of the latest pass (ports/manager-trackers.port.ts): the flat
+   * HARD_LOSS_EXIT_RUPEES does not cut them, the class ceiling still does. Refreshed every pass; a failed
+   * read is an empty set (the flat rule applies). Keyed by user.
+   */
+  private readonly managerTracked = new Map<string, ReadonlySet<string>>();
 
   /** When the concurrency cap was last reported, so a full cap logs once a minute, not per tick. */
   private capReportedAt = 0;
@@ -793,7 +800,46 @@ export class SentinelCycleService {
     // Intraday carry (2026-11-04, ports/close-products.port.ts): the position's product and its
     // CARRY/EXIT close window. Optional: absent ⇒ product unknown, every look exactly as before.
     @Optional() @Inject(CLOSE_PRODUCTS) private readonly closeProducts?: CloseProductLookup | null,
+    // Desk manager (2026-11-26, ports/manager-trackers.port.ts): its positions skip the flat ₹ hard-loss exit,
+    // never the class ceiling. Optional: absent ⇒ every position exactly as before.
+    @Optional() @Inject(MANAGER_TRACKERS) private readonly managerTrackers?: ManagerTrackerLookup | null,
   ) {}
+
+  /**
+   * Which of this pass's real positions the desk manager opened. Never throws: a failed lookup is an empty
+   * set, so the flat hard-loss rule keeps applying (fail safe).
+   */
+  private async refreshManagerTracked(userId: string, entries: readonly RosterEntry[]): Promise<void> {
+    if (!this.managerTrackers) return;
+    const ids = entries.filter((e) => !isPaperTracker(e.trackerId)).map((e) => e.trackerId);
+    if (ids.length === 0) {
+      this.managerTracked.set(userId, new Set());
+      return;
+    }
+    try {
+      this.managerTracked.set(userId, new Set(await this.managerTrackers.managerTrackerIds(ids)));
+    } catch (err) {
+      this.managerTracked.set(userId, new Set());
+      this.logger.warn(
+        `[hard-loss] manager-tracker lookup failed — the flat hard-loss exit applies to every position this pass: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * HARD_LOSS for a desk-manager position: the flat ₹limit and its noise band are dropped and only the cap (the
+   * class catastrophe floor) is left, as a plain rule. Without a cap the config is unchanged (never uncapped).
+   */
+  private hardLossCfgFor(entry: RosterEntry, cfg: HardLossConfig): HardLossConfig {
+    if (!this.managerTracked.get(entry.userId)?.has(entry.trackerId) || cfg.limit === null || cfg.cap === null) return cfg;
+    return { limit: cfg.cap, cap: cfg.cap, noiseN: null };
+  }
+
+  /** A desk-manager position trips only at the cap, so its trip is labelled CAP (the class ceiling), not the ₹ exit. */
+  private managerCapBand<R extends { trip: boolean; band: string | null; limit: number | null; cap: number | null }>(entry: RosterEntry, r: R): R {
+    const capOnly = r.cap !== null && r.limit === r.cap && this.managerTracked.get(entry.userId)?.has(entry.trackerId) === true;
+    return r.trip && capOnly ? { ...r, band: 'CAP' } : r;
+  }
 
   /** The position's close context (product + carry window). Never throws: a faulty lookup is "unknown". */
   private closeContextFor(entry: RosterEntry): CloseContext {
@@ -830,6 +876,7 @@ export class SentinelCycleService {
     now: Date = new Date(),
   ): Promise<{ report: CycleReport; pending: number; settled: Promise<CycleReport> }> {
     const entries = await this.roster.build(userId);
+    await this.refreshManagerTracked(userId, entries);
     const report: CycleReport = { evaluated: 0, skipped: 0, failed: 0, unwatched: 0 };
     const jobs: Array<Promise<JudgeOutcome>> = [];
     const candidates: JudgeCandidate[] = [];
@@ -1349,13 +1396,14 @@ export class SentinelCycleService {
   private hardLossFor(entry: RosterEntry, state: TrackerState, tick: TickReading, now: Date): { reading: HardFloorReading; floor: number; netPnl: number } | null {
     // Per-underlying limit (2026-11-04 owner: GOLD ₹7,500) — the same source the exit gate's HARD_MAX_LOSS reads.
     // Catastrophe floor (2026-11-25): with HARD_LOSS_CEILING_BY_CLASS on, a listed class gets its ceiling as the cap.
-    const cfg = hardLossConfig(process.env, lossLimitForTrade(entry.symbol, tick.entryPrice * Math.abs(tick.qty) * valueFactorOf(entry), entry.exchange));
+    // Desk manager positions (2026-11-26): only the cap — their stop is the manager's own armed trigger.
+    const cfg = this.hardLossCfgFor(entry, hardLossConfig(process.env, lossLimitForTrade(entry.symbol, tick.entryPrice * Math.abs(tick.qty) * valueFactorOf(entry), entry.exchange)));
     if (cfg.limit === null || entry.ownership !== 'SENTINEL' || isPaperTracker(entry.trackerId) || !isDerivativeSegment(tick.segment)) return null;
     const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side, valueFactor: valueFactorOf(entry) });
     const hold = this.gateCfg?.hold ?? this.futileCfg?.hold;
     // The band's unit: N1 today; N15 with the table on (a missing N15 ⇒ BAND_UNMEASURED, never N1).
     const nUnit = usesN15Band(entry.symbol, entry.exchange, process.env) ? 'N15' : 'N';
-    const loss = hardLossReading({
+    const loss = this.managerCapBand(entry, hardLossReading({
       netPnl: green.netPnl,
       cfg,
       exposure: exposureOf(entry.symbol, tick.side),
@@ -1365,7 +1413,7 @@ export class SentinelCycleService {
       nUnderlying: hardLossNoiseUnit(process.env, entry.symbol, entry.exchange, tick.noise?.underlying1m?.n, tick.underlyingN15),
       // The classifier plug (NoiseOpinion): nothing supplies one yet ⇒ the N test.
       noise: null,
-    });
+    }));
     if (!loss.trip && (loss.band === 'HOLD_UNDER_N' || loss.band === 'HOLD_NOISE')) {
       if (now.getTime() - (state.hardLossHeldLoggedAt ?? Number.NEGATIVE_INFINITY) >= HARD_LOSS_HELD_LOG_MS) {
         state.hardLossHeldLoggedAt = now.getTime();
@@ -1402,10 +1450,10 @@ export class SentinelCycleService {
       const q = await withTimeout(this.ticks.quickPrice(entry.trackerId), QUICK_PRICE_TIMEOUT_MS, () => new Error('quick price read timed out'));
       if (!isDerivativeSegment(q.segment)) return;
       const vf = valueFactorOf(entry);
-      const cfg = hardLossConfig(process.env, lossLimitForTrade(entry.symbol, q.entryPrice * Math.abs(q.qty) * vf, entry.exchange));
+      const cfg = this.hardLossCfgFor(entry, hardLossConfig(process.env, lossLimitForTrade(entry.symbol, q.entryPrice * Math.abs(q.qty) * vf, entry.exchange)));
       if (cfg.limit === null) return;
       const green = computeGreenFloor({ segment: q.segment, entryPrice: q.entryPrice, ltp: q.ltp, qty: q.qty, side: q.side, valueFactor: vf });
-      const loss = hardLossReading({
+      const loss = this.managerCapBand(entry, hardLossReading({
         netPnl: green.netPnl,
         cfg,
         exposure: exposureOf(entry.symbol, q.side),
@@ -1414,7 +1462,7 @@ export class SentinelCycleService {
         bestUnderlying: null,
         nUnderlying: null,
         noise: null,
-      });
+      }));
       const state = this.stateFor(entry);
       const c = confirmHardFloor(state.hardLoss, loss.trip, now.getTime());
       state.hardLoss = c.memo;

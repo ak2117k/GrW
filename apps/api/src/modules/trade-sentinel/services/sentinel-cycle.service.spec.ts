@@ -38,6 +38,7 @@ import {
 import { JUDGE_GATE_CONFIG, parseJudgeGateConfig, type JudgeGateConfig } from './judge-gate';
 import { OWNER_ALERTS, type OwnerAlertPort } from '../ports/owner-alerts.port';
 import { LADDER_PLANS } from '../ports/ladder-plans.port';
+import { MANAGER_TRACKERS } from '../ports/manager-trackers.port';
 
 const USER = 'u1';
 
@@ -599,7 +600,9 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     // signal_orders and sentinel_verdicts for the target ladder, bound in the module).
     // The 20th the CLOSE_PRODUCTS port (ports/close-products.port.ts, type-only: a synchronous
     // in-memory product cache for the intraday close decision, bound in the module; 2026-11-04).
-    expect(injected).toHaveLength(20);
+    // The 21st the MANAGER_TRACKERS port (ports/manager-trackers.port.ts, type-only: a READ-ONLY view of
+    // signal_orders.source for the desk manager's hard-loss exemption; 2026-11-26).
+    expect(injected).toHaveLength(21);
     // `TickSource` is an interface, so paramtypes emits Object for it and Nest
     // cannot resolve it by type. Without an explicit token Task 12 could not
     // register an adapter without editing this file.
@@ -620,6 +623,7 @@ describe('SentinelCycleService — shadow mode is structural', () => {
         expect.objectContaining({ index: 16, param: JUDGE_GATE_CONFIG }),
         expect.objectContaining({ index: 17, param: OWNER_ALERTS }),
         expect.objectContaining({ index: 18, param: LADDER_PLANS }),
+        expect.objectContaining({ index: 20, param: MANAGER_TRACKERS }),
       ]),
     );
 

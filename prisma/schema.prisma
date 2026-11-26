@@ -4152,3 +4152,95 @@ model NewsBrief {
   @@index([createdAt])
   @@map("news_briefs")
 }
+
+/// Desk manager (2026-11-26, apps/api/src/modules/desk-manager): one row per manager run (packet, reply, timings).
+model DeskManagerRun {
+  id          String    @id @default(cuid())
+  userId      String    @map("user_id")
+  startedAt   DateTime  @map("started_at") @db.Timestamptz(6)
+  finishedAt  DateTime? @map("finished_at") @db.Timestamptz(6)
+  wakeReasons Json      @map("wake_reasons")
+  mode        String
+  packet      Json?
+  packetMs    Int?      @map("packet_ms")
+  aiMs        Int?      @map("ai_ms")
+  reply       Json?
+  summary     String?
+  error       String?
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([userId, startedAt])
+  @@map("desk_manager_runs")
+}
+
+/// One manager decision: its payload, the code validation, what acting on it did, and the nightly grade.
+model DeskManagerDecision {
+  id         String   @id @default(cuid())
+  runId      String   @map("run_id")
+  userId     String   @map("user_id")
+  action     String // OPEN | EXIT | BOOK | TIGHTEN | PAUSE_ENTRIES | RESUME | WATCH | FLAG_DATA_HOLE | NO_ACTION
+  underlying String?
+  trackerId  String?  @map("tracker_id")
+  payload    Json
+  validation Json // { ok, problems[] }
+  status     String // VALID | INVALID | DONE | PENDING | REFUSED | FAILED | RECORDED
+  result     Json?
+  orderRowId String?  @map("order_row_id") // signal_orders.id (live OPEN)
+  tradeId    String?  @map("trade_id") // trades.id (shadow OPEN)
+  execId     String?  @map("exec_id") // ai_exit_executions.id (EXIT / BOOK)
+  grade      Json?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([userId, createdAt])
+  @@index([action, status])
+  @@map("desk_manager_decisions")
+}
+
+/// A manager OPEN waiting for its price (ZONE / BREAKOUT) until filled or expired.
+model DeskManagerPendingEntry {
+  id         String   @id @default(cuid())
+  decisionId String   @unique @map("decision_id")
+  userId     String   @map("user_id")
+  underlying String
+  mode       String
+  decision   Json
+  validUntil DateTime @map("valid_until") @db.Timestamptz(6)
+  status     String // PENDING | FILLED | EXPIRED | REFUSED | FAILED
+  result     Json?
+  orderRowId String?  @map("order_row_id")
+  tradeId    String?  @map("trade_id")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status, validUntil])
+  @@map("desk_manager_pending_entries")
+}
+
+/// Every desk-guard block of an automatic live entry, with the numbers it used.
+model DeskGuardEvent {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  at        DateTime @db.Timestamptz(6)
+  source    String // signal | reentry | manager
+  blocked   Boolean
+  reasons   Json
+  path      Json
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([userId, at])
+  @@map("desk_guard_events")
+}
+
+/// The guard's per-user day state: a manager / owner pause and the owner's reset.
+model DeskGuardState {
+  userId      String    @id @map("user_id")
+  day         String // IST YYYY-MM-DD the pause / reset belongs to
+  pausedUntil DateTime? @map("paused_until") @db.Timestamptz(6)
+  pauseScope  String?   @map("pause_scope") // all | <UNDERLYING>
+  resetAt     DateTime? @map("reset_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("desk_guard_state")
+}

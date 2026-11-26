@@ -12,6 +12,11 @@ import type { HubExchange, InstrumentRef } from './hub.types';
  * MIDCPNIFTY is not in INDICES; its token is the one market-context.service.ts
  * (UNDERLYING_TOKEN_MAP) already uses. `NIFTY MIDCAP 50` (99926025) is a
  * different index and has no options here.
+ *
+ * BANKEX (2026-11-26): BSE token 12, the only BANKEX index row in Angel's
+ * master (99919012, used in index-volume.ts, is not in it). Missing here, every
+ * BANKEX option resolved to no price line: the sentinel had no spot / level
+ * book / noise unit and all four exit-noise reads that day were NO_DATA.
  */
 export const INDEX_UNDERLYINGS: Readonly<Record<string, InstrumentRef>> = Object.freeze({
   NIFTY: { exchange: INDICES.NIFTY_50.exchange, token: INDICES.NIFTY_50.token, symbol: INDICES.NIFTY_50.symbol },
@@ -19,6 +24,7 @@ export const INDEX_UNDERLYINGS: Readonly<Record<string, InstrumentRef>> = Object
   FINNIFTY: { exchange: INDICES.FIN_NIFTY.exchange, token: INDICES.FIN_NIFTY.token, symbol: INDICES.FIN_NIFTY.symbol },
   MIDCPNIFTY: { exchange: 'NSE', token: '99926074', symbol: 'MIDCPNIFTY' },
   SENSEX: { exchange: INDICES.SENSEX.exchange, token: INDICES.SENSEX.token, symbol: INDICES.SENSEX.symbol },
+  BANKEX: { exchange: 'BSE', token: '12', symbol: 'BANKEX' },
 });
 
 const DERIVATIVE_EXCHANGES: ReadonlySet<string> = new Set(['NFO', 'BFO', 'MCX']);

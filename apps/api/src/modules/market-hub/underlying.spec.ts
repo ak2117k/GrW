@@ -1,3 +1,4 @@
+import { INDEX_CLUSTER } from '../entry-engine/domain/entry-gates';
 import { INDEX_UNDERLYINGS, isDerivative, resolveUnderlying, type UnderlyingLookup } from './underlying';
 
 function lookup(name: string | null, cash: Record<string, string> = {}) {
@@ -19,7 +20,18 @@ describe('the one index map', () => {
       FINNIFTY: { exchange: 'NSE', token: '99926037', symbol: 'FINNIFTY' },
       MIDCPNIFTY: { exchange: 'NSE', token: '99926074', symbol: 'MIDCPNIFTY' },
       SENSEX: { exchange: 'BSE', token: '99919000', symbol: 'SENSEX' },
+      BANKEX: { exchange: 'BSE', token: '12', symbol: 'BANKEX' },
     });
+  });
+
+  it('has a price line for every index the entry gates trade (a missing one blinds the sentinel silently)', () => {
+    const missing = INDEX_CLUSTER.filter((n) => !INDEX_UNDERLYINGS[n]);
+    expect(missing).toEqual([]);
+  });
+
+  it('resolves a BANKEX option to the BSE BANKEX index line', async () => {
+    const r = await resolveUnderlying({ exchange: 'BFO', token: '826841', symbol: 'BANKEX26NOV73100PE' }, lookup('BANKEX'));
+    expect(r).toEqual({ name: 'BANKEX', ref: { exchange: 'BSE', token: '12', symbol: 'BANKEX' } });
   });
 });
 

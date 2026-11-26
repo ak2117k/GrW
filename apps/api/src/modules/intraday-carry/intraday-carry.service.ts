@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, Optional, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
+import { contractByToken } from '../../common/instruments/contract-by-token';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../common/utils/boot-jobs';
 import type { ConvertPositionRequest, ConvertPositionResult } from '../../common/interfaces/broker-adapter.interface';
@@ -481,7 +482,7 @@ export class IntradayCarryService implements OnModuleInit, OnModuleDestroy {
     // By tradingsymbol first: tokens are REUSED after expiry (2026-11-06 BHARTIARTL / BANKINDIA), newest row otherwise.
     const bySymbol = await this.prisma.instrument.findFirst({ where: { exchange: up(exchange), symbol }, orderBy: { updatedAt: 'desc' }, select: { expiry: true } });
     if (bySymbol) { const e0 = bySymbol.expiry ?? null; return { today: e0 !== null && istYmd(e0) === istYmd(now), expiry: e0 ? istYmd(e0) : null }; }
-    const inst = await this.prisma.instrument.findFirst({ where: { exchange: up(exchange), token: String(token) }, orderBy: { updatedAt: 'desc' }, select: { expiry: true } });
+    const inst = await contractByToken(this.prisma, up(exchange), String(token), { at: now, symbol });
     const e = inst?.expiry ?? null;
     return { today: e !== null && istYmd(e) === istYmd(now), expiry: e ? istYmd(e) : null };
   }

@@ -8,6 +8,7 @@ import {
   SECTOR_INDICES,
   TIMEFRAMES,
 } from '@td/shared/constants';
+import { contractByToken } from '../../../common/instruments/contract-by-token';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { AngelOneAdapterService } from './angel-one-adapter.service';
@@ -395,10 +396,10 @@ export class DailyCandleBackfillCron implements OnModuleInit {
       name: true,
       expiry: true,
     };
-    const byToken = await this.prisma.instrument.findFirst({
-      where: { token: entry.token, exchange: entry.exchange },
-      select,
-    });
+    // Through contractByToken (symbol hint): a re-used token also names an expired contract of another
+    // underlying, and its row must not receive this instrument's candles.
+    const c = await contractByToken(this.prisma, entry.exchange, entry.token, { symbol: entry.symbol });
+    const byToken = c ? { id: c.id, symbol: c.symbol, token: c.token, exchange: c.exchange, name: c.name, expiry: c.expiry } : null;
     if (byToken || !entry.symbol) return byToken;
     return this.prisma.instrument.findFirst({
       where: { symbol: entry.symbol, exchange: entry.exchange },

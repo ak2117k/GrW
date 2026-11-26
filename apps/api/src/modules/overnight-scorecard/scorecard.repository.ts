@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { contractByToken } from '../../common/instruments/contract-by-token';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { visibleNewsWhere } from '../news-events/filter/news-relevance';
 import { INDEX_UNDERLYINGS } from '../market-hub/underlying';
@@ -82,10 +83,8 @@ export class ScorecardRepository {
   async underlyingInstrument(name: string): Promise<{ id: string; token: string; exchange: string } | null> {
     const idx = INDEX_UNDERLYINGS[name];
     if (idx) {
-      return this.prisma.instrument.findFirst({
-        where: { token: idx.token, exchange: idx.exchange },
-        select: { id: true, token: true, exchange: true },
-      });
+      const c = await contractByToken(this.prisma, idx.exchange, idx.token);
+      return c ? { id: c.id, token: c.token, exchange: c.exchange } : null;
     }
     const rows = await this.prisma.instrument.findMany({
       where: { exchange: 'NSE', symbol: { in: [`${name}-EQ`, name] } },

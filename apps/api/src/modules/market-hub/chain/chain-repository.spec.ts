@@ -1,6 +1,17 @@
 import { PrismaChainRepo } from './chain-repository';
 import { localMidnight } from './chain-dates';
 
+const CALL_AT = new Date('2026-10-12T05:00:00Z');
+
+/** A full instrument-master row (what contractsByTokens selects). */
+function row(p: { token: string; symbol: string; name: string; exchange?: string; optionType?: string | null; expiry?: Date | null; isActive?: boolean }) {
+  return {
+    id: `id-${p.symbol}`, exchange: 'NFO', lotSize: 1, tickSize: 0.05, strike: null, optionType: 'CE',
+    expiry: new Date('2026-12-29T00:00:00Z'), isActive: true, createdAt: new Date('2026-08-01T00:00:00Z'), updatedAt: new Date('2026-10-01T00:00:00Z'),
+    ...p,
+  };
+}
+
 function prismaMock() {
   return {
     instrument: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
@@ -130,7 +141,11 @@ describe('PrismaChainRepo', () => {
 
   it('describe covers BFO (SENSEX) contracts, never cash', async () => {
     const prisma = prismaMock();
-    prisma.instrument.findMany.mockResolvedValue([{ name: 'SENSEX', expiry: localMidnight('2026-10-29') }]);
+    prisma.instrument.findMany.mockResolvedValue([
+      row({ exchange: 'BFO', token: '8001', symbol: 'SENSEX2610282000CE', name: 'SENSEX', expiry: localMidnight('2026-10-29') }),
+      // The same token re-used: an expired BANKEX contract must not add a dead chain.
+      row({ exchange: 'BFO', token: '8001', symbol: 'BANKEX25AUG2660000CE', name: 'BANKEX', expiry: localMidnight('2026-08-25'), isActive: false }),
+    ]);
     const repo = new PrismaChainRepo(prisma as any);
     await expect(
       repo.describe([
@@ -159,22 +174,32 @@ describe('PrismaChainRepo', () => {
   it("optionCallUnderlyings: today's NFO option calls (by token) then open option trades, de-duplicated in order", async () => {
     const prisma: any = {
       ...prismaMock(),
-      telegramSignal: { findMany: jest.fn().mockResolvedValue([{ token: 'T1' }, { token: 'T2' }, { token: 'T1' }, { token: 'TFUT' }]) },
+      telegramSignal: {
+        findMany: jest.fn().mockResolvedValue([
+          { token: 'T1', symbol: 'KOTAKBANK29DEC262000CE', createdAt: CALL_AT },
+          { token: 'T2', symbol: 'ADANIPORTS29DEC261500PE', createdAt: CALL_AT },
+          { token: 'T1', symbol: 'KOTAKBANK29DEC262000CE', createdAt: CALL_AT },
+          { token: 'TFUT', symbol: 'KOTAKBANK29DEC26FUT', createdAt: CALL_AT },
+        ]),
+      },
       trade: { findMany: jest.fn().mockResolvedValue([{ instrument: { name: 'cipla' } }, { instrument: { name: 'KOTAKBANK' } }]) },
     };
     prisma.instrument.findMany.mockResolvedValue([
-      { token: 'T1', name: 'KOTAKBANK' },
-      { token: 'T2', name: 'ADANIPORTS' },
+      row({ token: 'T1', symbol: 'KOTAKBANK29DEC262000CE', name: 'KOTAKBANK', optionType: 'CE' }),
+      row({ token: 'T2', symbol: 'ADANIPORTS29DEC261500PE', name: 'ADANIPORTS', optionType: 'PE' }),
+      // T2 re-used: an expired contract of another underlying held it before.
+      row({ token: 'T2', symbol: 'BDL25AUG261500CE', name: 'BDL', optionType: 'CE', expiry: new Date('2026-08-25T00:00:00Z'), isActive: false }),
+      row({ token: 'TFUT', symbol: 'KOTAKBANK29DEC26FUT', name: 'KOTAKBANK', optionType: null }),
     ]);
     const repo = new PrismaChainRepo(prisma);
     const since = new Date('2026-10-11T18:30:00Z');
+    // Only option contracts name a chain (the futures call adds none); the re-used T2 is ADANIPORTS, not BDL.
     await expect(repo.optionCallUnderlyings(since)).resolves.toEqual(['KOTAKBANK', 'ADANIPORTS', 'CIPLA']);
     expect(prisma.telegramSignal.findMany.mock.calls[0][0].where).toEqual({ createdAt: { gte: since }, exchange: 'NFO', token: { not: null } });
     expect(prisma.trade.findMany.mock.calls[0][0].where).toEqual({
       status: { in: ['OPEN', 'PARTIALLY_FILLED'] },
       instrument: { exchange: 'NFO', optionType: { in: ['CE', 'PE'] } },
     });
-    // Only option contracts resolve a call's token (a futures call names no chain).
-    expect(prisma.instrument.findMany.mock.calls[0][0].where).toEqual({ exchange: 'NFO', token: { in: ['T1', 'T2', 'TFUT'] }, optionType: { in: ['CE', 'PE'] } });
+    expect(prisma.instrument.findMany).toHaveBeenCalledTimes(1);
   });
 });

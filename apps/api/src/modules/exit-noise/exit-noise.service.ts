@@ -180,7 +180,7 @@ export class ExitNoiseReadService {
   async input(r: ExitNoiseRequest, pos: NonNullable<ExitNoiseRequest['position']>, want: NoiseReadInput['want']) {
     const exchange = pos.exchange.toUpperCase();
     const cash = CASH.has(exchange);
-    const contract = await this.repo.contract(exchange, pos.token, pos.symbol);
+    const contract = await this.repo.contract(exchange, pos.token, pos.symbol, r.at);
     const name = String(contract?.name ?? '').toUpperCase() || null;
     const today = istMidnight(r.at);
     // A stock's near-month future too (F&O stocks' futures OI is captured every 3 min).

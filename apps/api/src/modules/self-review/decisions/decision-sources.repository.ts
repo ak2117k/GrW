@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { contractByToken, contractsByTokens } from '../../../common/instruments/contract-by-token';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { PAPER_TRACKER_PREFIX } from '../../trade-sentinel/paper/paper-tracker';
@@ -61,7 +62,7 @@ export class DecisionSourcesRepository {
     const floorVerdicts = rows.filter((r) => FLOOR_JUSTIFICATIONS.has(String(obj(r.gate).justification))).map((r) => r.verdictId);
     const packets = floorVerdicts.length ? await this.prisma.sentinelVerdict.findMany({ where: { id: { in: floorVerdicts } }, select: { id: true, packet: true } }) : [];
     const latched = new Set(packets.filter((p) => obj(obj(obj(p.packet).money).spike).latched === true).map((p) => p.id));
-    const inst = await this.instruments(rows.map((r) => ({ exchange: r.exchange, token: r.token })));
+    const inst = await this.instruments(rows, from);
     return rows.map((r) => {
       const i = inst.get(refKey(r.exchange, r.token));
       return {
@@ -88,7 +89,7 @@ export class DecisionSourcesRepository {
   async trackers(ids: string[]): Promise<TrackerSrc[]> {
     if (ids.length === 0) return [];
     const rows = await this.prisma.tradeTracker.findMany({ where: { id: { in: ids } }, select: { id: true, symbol: true, exchange: true, token: true, qty: true } });
-    const inst = await this.instruments(rows);
+    const inst = await this.instruments(rows, new Date());
     return rows.map((r) => {
       const i = inst.get(refKey(r.exchange, r.token));
       return { ...r, lotQty: i?.lotSize ?? null, underlying: i?.name ?? null };
@@ -123,7 +124,7 @@ export class DecisionSourcesRepository {
       },
       take: READ_MAX,
     });
-    const inst = await this.instruments(rows);
+    const inst = await this.instruments(rows, from);
     return rows.map((r) => {
       const i = inst.get(refKey(r.exchange, r.token));
       return { ...r, lotQty: i?.lotSize ?? null, underlying: i?.name ?? null };
@@ -143,7 +144,7 @@ export class DecisionSourcesRepository {
     if (rows.length === 0) return [];
     const trackers = await this.prisma.tradeTracker.findMany({ where: { id: { in: rows.map((r) => r.trackerId) } }, select: { id: true, symbol: true, exchange: true, token: true, entryTime: true } });
     const tOf = new Map(trackers.map((t) => [t.id, t]));
-    const inst = await this.instruments(trackers);
+    const inst = await this.instruments(trackers, from);
     const out: ThesisSrc[] = [];
     for (const r of rows) {
       const t = tOf.get(r.trackerId);
@@ -190,7 +191,7 @@ export class DecisionSourcesRepository {
     const hi = Math.max(...bars.map((b) => b.high));
     const lo = Math.min(...bars.map((b) => b.low));
     const open = bars[0].close;
-    const inst = await this.prisma.instrument.findFirst({ where: { token: ref.token, exchange: ref.exchange }, select: { id: true } });
+    const inst = await contractByToken(this.prisma, ref.exchange, ref.token, { at: from });
     if (!inst || !(open > 0)) return null;
     const daily = await this.prisma.candle.findMany({ where: { instrumentId: inst.id, timeframe: '1d', timestamp: { lt: from } }, select: { high: true, low: true, close: true }, orderBy: { timestamp: 'desc' }, take: 14 });
     const ranges = daily.filter((b) => b.close > 0 && b.high >= b.low).map((b) => ((b.high - b.low) / b.close) * 1e4);
@@ -222,10 +223,19 @@ export class DecisionSourcesRepository {
     return best ? { exchange: 'NSE', token: best.token } : null;
   }
 
-  private async instruments(refs: ReadonlyArray<{ exchange: string | null; token: string | null }>): Promise<Map<string, { lotSize: number; name: string | null }>> {
-    const uniq = [...new Map(refs.filter((r) => r.exchange && r.token).map((r) => [refKey(r.exchange, r.token), { exchange: r.exchange as string, token: r.token as string }])).values()];
+  /**
+   * Lot size and underlying per (exchange, token), through contractsByTokens: a re-used token also names an
+   * expired contract of another underlying, so the row's own symbol is the hint and its session the instant.
+   */
+  private async instruments(refs: ReadonlyArray<{ exchange: string | null; token: string | null; symbol?: string | null }>, at: Date): Promise<Map<string, { lotSize: number; name: string | null }>> {
+    const uniq = [...new Map(refs.filter((r) => r.exchange && r.token).map((r) => [refKey(r.exchange, r.token), { exchange: r.exchange as string, token: r.token as string, symbol: r.symbol ?? null, at }])).values()];
     if (uniq.length === 0) return new Map();
-    const rows = await this.prisma.instrument.findMany({ where: { OR: uniq.map((r) => ({ exchange: r.exchange, token: r.token })) }, select: { exchange: true, token: true, lotSize: true, name: true } });
-    return new Map(rows.map((r) => [refKey(r.exchange, r.token), { lotSize: r.lotSize, name: r.name ?? null }]));
+    const rows = await contractsByTokens(this.prisma, uniq);
+    const out = new Map<string, { lotSize: number; name: string | null }>();
+    uniq.forEach((r, i) => {
+      const c = rows[i];
+      if (c) out.set(refKey(r.exchange, r.token), { lotSize: c.lotSize, name: c.name ?? null });
+    });
+    return out;
   }
 }

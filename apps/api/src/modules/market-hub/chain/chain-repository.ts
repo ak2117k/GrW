@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import type { OptionsChainEntry } from '@td/shared/types';
+import { contractsByTokens } from '../../../common/instruments/contract-by-token';
 import type { PrismaService } from '../../../common/prisma/prisma.service';
 import type { HubExchange, InstrumentRef } from '../hub.types';
 import { INDEX_UNDERLYINGS } from '../underlying';
@@ -123,13 +124,12 @@ export class PrismaChainRepo implements ChainRepo, OiCaptureRepo {
   async describe(refs: readonly InstrumentRef[]): Promise<Array<{ name: string; expiry: string }>> {
     const derivatives = refs.filter((r) => CHAIN_EXCHANGES.includes(r.exchange));
     if (derivatives.length === 0) return [];
-    const rows = await this.prisma.instrument.findMany({
-      where: { OR: derivatives.map((r) => ({ exchange: r.exchange, token: r.token })) },
-      select: { name: true, expiry: true },
-    });
+    // Through contractsByTokens (symbol hint): a re-used token also names an expired contract of another
+    // underlying, which would add a dead (name, expiry) chain to capture.
+    const rows = await contractsByTokens(this.prisma, derivatives.map((r) => ({ exchange: r.exchange, token: r.token, symbol: r.symbol })));
     const out = new Map<string, { name: string; expiry: string }>();
     for (const r of rows) {
-      if (!r.name || !r.expiry) continue;
+      if (!r || !r.name || !r.expiry) continue;
       const e = { name: r.name.toUpperCase(), expiry: ymdLocal(r.expiry) };
       out.set(`${e.name}:${e.expiry}`, e);
     }
@@ -188,7 +188,7 @@ export class PrismaChainRepo implements ChainRepo, OiCaptureRepo {
     const [signals, trades] = await Promise.all([
       this.prisma.telegramSignal.findMany({
         where: { createdAt: { gte: since }, exchange: 'NFO', token: { not: null } },
-        select: { token: true },
+        select: { token: true, symbol: true, createdAt: true },
         orderBy: { createdAt: 'asc' },
       }),
       this.prisma.trade.findMany({
@@ -197,17 +197,12 @@ export class PrismaChainRepo implements ChainRepo, OiCaptureRepo {
         orderBy: { createdAt: 'asc' },
       }),
     ]);
-    const tokens = [...new Set(signals.map((s) => s.token as string))];
-    const byToken = new Map<string, string>();
-    if (tokens.length > 0) {
-      const rows = await this.prisma.instrument.findMany({
-        where: { exchange: 'NFO', token: { in: tokens }, optionType: { in: ['CE', 'PE'] } },
-        select: { token: true, name: true },
-      });
-      for (const r of rows) if (r.name) byToken.set(r.token, r.name.toUpperCase());
-    }
+    // Through contractsByTokens (symbol hint, call time): a re-used token also names an expired contract of
+    // another underlying, whose chain would then be captured instead of the called one.
+    const calls = [...new Map(signals.map((s) => [s.token as string, s])).values()];
+    const rows = calls.length > 0 ? await contractsByTokens(this.prisma, calls.map((s) => ({ exchange: 'NFO', token: s.token as string, symbol: s.symbol, at: s.createdAt }))) : [];
     const names = [
-      ...tokens.map((t) => byToken.get(t)),
+      ...rows.map((r) => (r && r.name && (r.optionType === 'CE' || r.optionType === 'PE') ? r.name.toUpperCase() : undefined)),
       ...trades.map((t) => t.instrument?.name?.toUpperCase()),
     ].filter((n): n is string => !!n);
     return [...new Set(names)];

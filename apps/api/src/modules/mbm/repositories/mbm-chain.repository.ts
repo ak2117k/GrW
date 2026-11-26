@@ -1,6 +1,7 @@
 // apps/api/src/modules/mbm/repositories/mbm-chain.repository.ts
 import { Injectable } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
+import { contractsByTokens } from '../../../common/instruments/contract-by-token';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { localMidnight } from '../../market-hub/chain/chain-dates';
 import { PrismaChainRepo } from '../../market-hub/chain/chain-repository';
@@ -107,15 +108,11 @@ export class MbmChainRepository {
       select: { symbol: true, token: true },
     });
     if (open.length === 0) return [];
-    const master = await this.prisma.instrument.findMany({
-      where: { exchange: 'NFO', token: { in: open.map((t) => t.token) } },
-      select: { token: true, name: true },
-    });
-    const byToken = new Map<string, string>();
-    for (const m of master) if (m.name) byToken.set(m.token, m.name.trim().toUpperCase());
+    // Through contractsByTokens (symbol hint): a re-used token also names an expired contract of another underlying.
+    const master = await contractsByTokens(this.prisma, open.map((t) => ({ exchange: 'NFO', token: t.token, symbol: t.symbol })));
     const out = new Set<string>();
-    for (const t of open) {
-      const name = byToken.get(t.token) || derivativeUnderlying(t.symbol);
+    for (const [k, t] of open.entries()) {
+      const name = master[k]?.name?.trim().toUpperCase() || derivativeUnderlying(t.symbol);
       if (name) out.add(name);
     }
     return [...out];

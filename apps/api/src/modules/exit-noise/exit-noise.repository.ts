@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import { Injectable } from '@nestjs/common';
+import { contractByToken } from '../../common/instruments/contract-by-token';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { sessionMinuteFilter } from '../market-hub/candles/session-sql';
 import type { OiRow } from '../signal-trader/domain/oi-check';
@@ -78,10 +79,13 @@ export interface UnfollowedRow {
 export class ExitNoiseRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** The contract's master row (name = the underlying). */
-  async contract(exchange: string, token: string, symbol: string): Promise<{ name: string | null; expiry: string | null; optionType: string | null } | null> {
+  /**
+   * The contract's master row (name = the underlying) as of `at`, through contractByToken with the symbol as
+   * hint: a re-used token also names an expired contract of another underlying (2026-11-26: BHEL read as BDL).
+   */
+  async contract(exchange: string, token: string, symbol: string, at: Date = new Date()): Promise<{ name: string | null; expiry: string | null; optionType: string | null } | null> {
     const r =
-      (await this.prisma.instrument.findFirst({ where: { exchange, token }, select: { name: true, expiry: true, optionType: true } })) ??
+      (await contractByToken(this.prisma, exchange, token, { at, symbol })) ??
       (await this.prisma.instrument.findFirst({ where: { symbol }, select: { name: true, expiry: true, optionType: true } }));
     return r ? { name: r.name ?? null, expiry: ymdIst(r.expiry), optionType: r.optionType ?? null } : null;
   }

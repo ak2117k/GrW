@@ -435,14 +435,6 @@ export class MarketDataRepository {
     });
   }
 
-  /**
-   * Get instruments by a list of tokens.
-   */
-  async getInstrumentsByTokens(tokens: string[]) {
-    return this.prisma.instrument.findMany({
-      where: { token: { in: tokens }, isActive: true },
-    });
-  }
 
   /**
    * When the instrument master was last written, or null for an empty table.

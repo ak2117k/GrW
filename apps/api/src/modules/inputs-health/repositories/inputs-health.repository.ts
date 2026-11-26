@@ -38,7 +38,7 @@ export class InputsHealthRepository {
     const rows = await this.prisma.$queryRaw<Array<{ symbol: string; exchange: string; token: string; name: string | null }>>`
       SELECT DISTINCT t.symbol, t.exchange, t.token, i.name
       FROM "trade_trackers" t
-      LEFT JOIN "instruments" i ON i.token = t.token AND i.exchange::text = t.exchange
+      LEFT JOIN "instruments" i ON i.token = t.token AND i.exchange::text = t.exchange AND i.symbol = t.symbol
       WHERE t.status = 'OPEN' AND t.kind = 'POSITION'`;
     const out = new Map<string, OpenUnderlying>();
     for (const r of rows) {

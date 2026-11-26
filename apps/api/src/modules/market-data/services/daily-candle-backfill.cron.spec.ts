@@ -63,6 +63,12 @@ function makeHarness(opts: {
         }
         return null;
       }),
+      // contractsByTokens: where.OR of (exchange, token) pairs.
+      findMany: jest.fn(async ({ where }: any) =>
+        instruments
+          .filter((i) => (where.OR ?? []).some((w: any) => w.token === i.token && w.exchange === i.exchange))
+          .map((i) => ({ isActive: true, lotSize: 1, tickSize: 0.05, strike: null, optionType: null, createdAt: new Date(0), updatedAt: new Date(0), ...i })),
+      ),
     },
     tradeTracker: {
       findMany: jest.fn(async () => opts.openTrackers ?? []),

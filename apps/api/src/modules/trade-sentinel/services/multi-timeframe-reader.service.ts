@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { contractByToken } from '../../../common/instruments/contract-by-token';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { sessionMinuteFilter } from '../../market-hub/candles/session-sql';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
@@ -169,7 +170,8 @@ export class MultiTimeframeReaderService {
   private async resolve(sym: string, ex: string): Promise<Inst | null> {
     const idx = INDEX_UNDERLYINGS[sym];
     if (idx) {
-      return this.prisma.instrument.findFirst({ where: { token: idx.token, exchange: idx.exchange }, select: { id: true, exchange: true, token: true } });
+      const c = await contractByToken(this.prisma, idx.exchange, idx.token);
+      return c ? { id: c.id, exchange: c.exchange, token: c.token } : null;
     }
     if (ex === 'MCX') return this.mcxFuture(sym);
     const rows = await this.prisma.instrument.findMany({

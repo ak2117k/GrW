@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { contractByToken } from '../../../common/instruments/contract-by-token';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { channelSentiment, type ChannelInfoAccuracy } from '../../signal-intake/domain/sentiment';
 import type { ClusterView, EntryType, InstrumentKind, SignalView } from '../domain/signal.types';
@@ -746,7 +747,7 @@ export class SignalTraderRepository {
 
   /** Newest `limit` persisted 15m bars of the instrument (`candles`, the scorecard's backfill) before `before`, oldest first. */
   async stored15mBars(exchange: string, token: string, limit: number, before: Date): Promise<Array<{ ts: number; open: number; high: number; low: number; close: number }>> {
-    const inst = await this.prisma.instrument.findFirst({ where: { token, exchange }, select: { id: true } });
+    const inst = await contractByToken(this.prisma, exchange, token, { at: before });
     if (!inst) return [];
     const rows = await this.prisma.candle.findMany({
       where: { instrumentId: inst.id, timeframe: '15m', timestamp: { lt: before } },

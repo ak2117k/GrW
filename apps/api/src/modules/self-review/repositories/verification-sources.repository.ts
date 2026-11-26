@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { contractByToken, contractsByTokens } from '../../../common/instruments/contract-by-token';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { visibleNewsWhere } from '../../news-events/filter/news-relevance';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
@@ -119,15 +120,15 @@ export class VerificationSourcesRepository {
       reads = [];
     }
     const readOf = new Map(reads.map((r) => [String(r.ref_id), r]));
-    const insts = await this.prisma.instrument.findMany({ where: { OR: outcomes.map((o) => ({ exchange: o.exchange, token: o.token })) }, select: { exchange: true, token: true, name: true } });
-    const nameOf = new Map(insts.map((i) => [`${i.exchange}:${i.token}`, i.name ?? null]));
+    // Through contractsByTokens: a re-used token also names an expired contract of another underlying.
+    const insts = await contractsByTokens(this.prisma, outcomes.map((o) => ({ exchange: o.exchange, token: o.token, symbol: o.symbol, at: o.decisionAt })));
     const trackers = await this.prisma.tradeTracker.findMany({ where: { id: { in: [...new Set(outcomes.map((o) => o.trackerId))] } }, select: { id: true, entryTime: true } });
     const entryOf = new Map(trackers.map((t) => [t.id, t.entryTime]));
-    return outcomes.map((o) => {
+    return outcomes.map((o, k) => {
       const r = readOf.get(o.verdictId);
       return {
         ...o,
-        underlying: nameOf.get(`${o.exchange}:${o.token}`) ?? null,
+        underlying: insts[k]?.name ?? null,
         entryAt: entryOf.get(o.trackerId) ?? null,
         readComponents: r ? componentsOfRecord(r.read) : null,
         readVerdict: r ? String(r.verdict) : null,
@@ -169,7 +170,7 @@ export class VerificationSourcesRepository {
   async dailyRangeBp(name: string, before: Date, n = 14): Promise<number | null> {
     const idx = INDEX_UNDERLYINGS[name];
     const inst = idx
-      ? await this.prisma.instrument.findFirst({ where: { token: idx.token, exchange: idx.exchange }, select: { id: true } })
+      ? await contractByToken(this.prisma, idx.exchange, idx.token, { at: before })
       : (await this.prisma.instrument.findMany({ where: { exchange: 'NSE', symbol: { in: [`${name}-EQ`, name] } }, select: { id: true, symbol: true } }))
           .sort((a, b) => (a.symbol === `${name}-EQ` ? -1 : b.symbol === `${name}-EQ` ? 1 : 0))[0];
     if (!inst) return null;

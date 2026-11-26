@@ -272,6 +272,14 @@ describe('SignalTraderRepository.claimOrder — source / reentry_watch_key', () 
     expect(await new SignalTraderRepository(dup.prisma as never).claimOrder({ ...claim, source: 'reentry', reentryWatchKey: 'k' })).toBeNull();
   });
 
+  it('a desk-manager claim is the same atomic INSERT with source manager and no watch key', async () => {
+    const { prisma, calls } = fakePrisma([['INSERT INTO "signal_orders"', (c: RawCall) => [{ id: c.values[0] }]]]);
+    const id = await new SignalTraderRepository(prisma as never).claimOrder({ ...claim, source: 'manager' });
+    expect(typeof id).toBe('string');
+    expect(prisma.signalOrder.create).not.toHaveBeenCalled();
+    expect(calls[0].values).toEqual(expect.arrayContaining(['d1', 'manager', null]));
+  });
+
   it('a re-entry claim with no watch key throws and writes nothing', async () => {
     const { prisma } = fakePrisma();
     await expect(new SignalTraderRepository(prisma as never).claimOrder({ ...claim, source: 'reentry' })).rejects.toThrow(/reentryWatchKey/);

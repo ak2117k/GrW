@@ -11,7 +11,7 @@ const plan: EntryPlan = {
 };
 const input: PlaceInput = { decisionId: 'dec_1', ownerUserId: 'owner', plan, product: 'INTRADAY', qtyUnit: 'units', channel: 'Chan', signalSummary: 'BUY NIFTY 25000 CE', fillWaitSec: 10 };
 
-function make(opts: { placement?: any; book?: unknown[][] } = {}) {
+function make(opts: { placement?: any; book?: unknown[][]; guard?: { check: jest.Mock } } = {}) {
   const orders = new Map<string, Record<string, any>>();
   const repo = {
     claimOrder: jest.fn(async (o: Record<string, any>) => {
@@ -33,7 +33,7 @@ function make(opts: { placement?: any; book?: unknown[][] } = {}) {
   };
   const sessions = { withOwnerSession: jest.fn(async (_u: string, fn: (s: any) => any) => fn(session)) };
   const trackers = { backfill: jest.fn(async () => ({ opened: 1, closed: 0, skipped: false })) };
-  const svc = new SignalExecutorService(repo as never, sessions as never, trackers as never, async () => undefined);
+  const svc = new SignalExecutorService(repo as never, sessions as never, trackers as never, async () => undefined, opts.guard as never);
   return { svc, repo, session, sessions, trackers, orders };
 }
 
@@ -131,5 +131,45 @@ describe('SignalExecutorService', () => {
     await real('o1', 'B1', 'sgdec1', { ...input, onRejected: later });
     expect(later).toHaveBeenCalledWith('Insufficient Funds');
     expect(t2.orders.get('o1')?.status).toBe('REJECTED');
+  });
+
+  describe('desk guard', () => {
+    const blocked = { blocked: true, reasons: ['3 losers in a row ≥ 3'], path: {}, pausedUntil: null, pauseScope: null };
+
+    it('guard blocked → BLOCKED with DESK_GUARD reason and no broker call', async () => {
+      const guard = { check: jest.fn(async () => blocked) };
+      const t = make({ guard });
+      const r = await t.svc.place({ ...input, source: 'manager', underlying: 'NIFTY' });
+      expect(r).toEqual({ kind: 'BLOCKED', orderRowId: 'o1', reason: 'DESK_GUARD: 3 losers in a row ≥ 3' });
+      expect(guard.check).toHaveBeenCalledWith('owner', 'manager', 'NIFTY', expect.any(Date));
+      expect(t.sessions.withOwnerSession).not.toHaveBeenCalled();
+      expect(t.session.placeOrderClassified).not.toHaveBeenCalled();
+      expect(t.orders.get('o1')).toMatchObject({ status: 'FAILED', statusReason: 'BLOCKED: DESK_GUARD: 3 losers in a row ≥ 3', source: 'manager' });
+      expect(t.repo.claimOrder.mock.invocationCallOrder[0]).toBeLessThan(guard.check.mock.invocationCallOrder[0]);
+    });
+
+    it('a guard that throws fails closed', async () => {
+      const guard = { check: jest.fn(async () => { throw new Error('db down'); }) };
+      const t = make({ guard });
+      const r = await t.svc.place(input);
+      expect(r).toMatchObject({ kind: 'BLOCKED', reason: 'DESK_GUARD: DESK_GUARD_UNAVAILABLE: db down' });
+      expect(guard.check).toHaveBeenCalledWith('owner', 'signal', null, expect.any(Date));
+      expect(t.session.placeOrderClassified).not.toHaveBeenCalled();
+    });
+
+    it('guard allows → sends as before', async () => {
+      const guard = { check: jest.fn(async () => ({ ...blocked, blocked: false, reasons: [] })) };
+      const t = make({ guard });
+      t.svc.followUp = jest.fn(async () => undefined);
+      expect(await t.svc.place(input)).toMatchObject({ kind: 'PLACED' });
+      expect(t.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    });
+
+    it('no guard provider → unchanged', async () => {
+      const t = make();
+      t.svc.followUp = jest.fn(async () => undefined);
+      expect(await t.svc.place(input)).toMatchObject({ kind: 'PLACED', brokerOrderId: 'B1' });
+      expect(t.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    });
   });
 });

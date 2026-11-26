@@ -14,6 +14,7 @@ import { buildEntryOrder, signalOrderTag, slExitTrigger } from '../domain/execut
 import { fillAlert, rejectAlert } from '../domain/alerts';
 import type { EntryPlan } from '../domain/gate';
 import type { SignalProduct } from '../domain/signal-trader.config';
+import { DESK_GUARD, type DeskGuardPort } from '../../desk-manager/services/desk-guard.service';
 
 export const SIGNAL_SLEEP = Symbol('SIGNAL_SLEEP');
 export type SignalSleep = (ms: number) => Promise<void>;
@@ -49,9 +50,12 @@ export interface PlaceInput {
    * Re-entry watch LIVE mode (2026-11-23, §6a.8): who places the order. Absent (every signal-trader call) = the
    * claim is exactly as before. 'reentry' stores source + the watch key on the claimed signal_orders row (the
    * ordertag keeps the signal executor's 20-char form) so the re-entry caps count it while it is in flight.
+   * 'manager' = a desk-manager entry (stored as source 'manager', no watch key).
    */
-  source?: 'signal' | 'reentry';
+  source?: 'signal' | 'reentry' | 'manager';
   reentryWatchKey?: string | null;
+  /** The contract's underlying ('NIFTY', 'BSE'), for an underlying-scoped desk guard pause; null/absent = unknown. */
+  underlying?: string | null;
 }
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -79,6 +83,7 @@ export class SignalExecutorService {
     private readonly sessions: OwnerBrokerSessionProvider,
     private readonly trackers: TradeTrackerService,
     @Optional() @Inject(SIGNAL_SLEEP) sleep?: SignalSleep,
+    @Optional() @Inject(DESK_GUARD) private readonly guard?: DeskGuardPort,
   ) {
     this.sleep = sleep ?? defaultSleep;
   }
@@ -107,6 +112,23 @@ export class SignalExecutorService {
     if (!rowId) {
       this.logger.warn(`[signal-exec] decision ${i.decisionId} already has an order — nothing sent`);
       return { kind: 'DUPLICATE' };
+    }
+
+    // Desk guard (desk-manager plan Task 1): every automatic live entry, after the claim, before the broker.
+    // Fails closed — a guard that throws blocks the entry. Absent provider = unchanged behaviour.
+    if (this.guard) {
+      let block: string | null;
+      try {
+        const g = await this.guard.check(i.ownerUserId, i.source ?? 'signal', i.underlying ?? null, new Date());
+        block = g.blocked ? `DESK_GUARD: ${g.reasons.join('; ') || 'blocked'}` : null;
+      } catch (err) {
+        block = `DESK_GUARD: DESK_GUARD_UNAVAILABLE: ${errText(err)}`;
+      }
+      if (block) {
+        await this.repo.updateOrder(rowId, { status: 'FAILED', statusReason: `BLOCKED: ${block}` });
+        this.logger.warn(`[signal-exec] decision ${i.decisionId} ${i.plan.tradingsymbol} not sent — ${block}`);
+        return { kind: 'BLOCKED', orderRowId: rowId, reason: block };
+      }
     }
 
     let sent = false;

@@ -185,8 +185,9 @@ export interface OrderClaim {
   /**
    * Who places the order (re-entry watch LIVE mode, 2026-11-23). Absent / 'signal' = the signal trader, stored exactly
    * as before. 'reentry' = a live re-entry: needs `reentryWatchKey` (the per-watch cap and the no-chain rule read it).
+   * 'manager' = a desk-manager entry (2026-11-26): stored via the same raw-SQL claim, no watch key needed.
    */
-  source?: 'signal' | 'reentry';
+  source?: 'signal' | 'reentry' | 'manager';
   reentryWatchKey?: string | null;
 }
 
@@ -475,7 +476,7 @@ export class SignalTraderRepository {
   /** Claim-before-send: one CLAIMED order per decision. null = already claimed (never a second order). */
   async claimOrder(o: OrderClaim): Promise<string | null> {
     const { source, reentryWatchKey, ...base } = o;
-    if (source === 'reentry' || (reentryWatchKey !== undefined && reentryWatchKey !== null)) {
+    if (source === 'reentry' || source === 'manager' || (reentryWatchKey !== undefined && reentryWatchKey !== null)) {
       return this.claimReentryOrder(base, source ?? 'reentry', reentryWatchKey ?? null);
     }
     try {
@@ -495,7 +496,7 @@ export class SignalTraderRepository {
    * INSERT (raw SQL: the columns are newer than some generated clients). A row with this decision id already there
    * ⇒ null (never a second order). A 'reentry' claim without a watch key throws BEFORE anything is sent.
    */
-  private async claimReentryOrder(o: Omit<OrderClaim, 'source' | 'reentryWatchKey'>, source: 'signal' | 'reentry', watchKey: string | null): Promise<string | null> {
+  private async claimReentryOrder(o: Omit<OrderClaim, 'source' | 'reentryWatchKey'>, source: 'signal' | 'reentry' | 'manager', watchKey: string | null): Promise<string | null> {
     if (source === 'reentry' && !(typeof watchKey === 'string' && watchKey.trim() !== '')) {
       throw new Error('claimOrder: a re-entry order needs its reentryWatchKey — nothing claimed, nothing sent');
     }

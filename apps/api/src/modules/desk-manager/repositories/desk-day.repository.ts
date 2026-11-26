@@ -1,0 +1,117 @@
+import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { PrismaService } from '../../../common/prisma/prisma.service';
+import { istDayStart } from '../../signal-trader/domain/execution';
+import { istDay, underlyingOf } from '../../portfolio-review/domain/symbols';
+import type { ClosedTrade, DayPnlPath, TradeOrigin } from '../domain/desk.types';
+
+/** The guard's stored day state, already scoped to today (a row from another IST day reads as empty). */
+export interface GuardDayState {
+  pausedUntil: Date | null;
+  pauseScope: string | null;
+  resetAt: Date | null;
+}
+
+const EMPTY: GuardDayState = { pausedUntil: null, pauseScope: null, resetAt: null };
+
+/** signal_orders.source → the trade's origin. No order row = the owner's own (manual) trade. */
+function originOf(source: string | null | undefined): TradeOrigin {
+  if (source === 'signal' || source === 'reentry' || source === 'manager') return source;
+  return source == null ? 'manual' : 'unknown';
+}
+
+/**
+ * The desk guard's reads and writes (plan Task 1). Counts EVERY live position tracker the owner closed today
+ * (IST, NSE + MCX) whatever placed it — a manual loser counts exactly like a signal loser. Not counted:
+ * paper trades (`paper:` ids live in `trades`, never here), delivery HOLDING rows (not day trades), and
+ * anything closed before the owner's reset today.
+ */
+@Injectable()
+export class DeskDayRepository {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async closedToday(userId: string, now: Date): Promise<ClosedTrade[]> {
+    const dayStart = istDayStart(now);
+    const { resetAt } = await this.guardDay(userId, now);
+    const from = resetAt && resetAt.getTime() > dayStart.getTime() ? resetAt : dayStart;
+    const rows = await this.prisma.tradeTracker.findMany({
+      where: {
+        userId,
+        kind: 'POSITION',
+        status: 'CLOSED',
+        exitTime: { gte: from, lte: now },
+        NOT: { id: { startsWith: 'paper:' } },
+      },
+      select: { id: true, symbol: true, entryPrice: true, exitPrice: true, qty: true, exitTime: true, pnl: true },
+      orderBy: { exitTime: 'asc' },
+    });
+    if (rows.length === 0) return [];
+    const orders = await this.prisma.signalOrder.findMany({
+      where: { trackerId: { in: rows.map((r) => r.id) } },
+      select: { trackerId: true, source: true },
+    });
+    const sourceBy = new Map<string, string | null>();
+    for (const o of orders) if (o.trackerId && !sourceBy.has(o.trackerId)) sourceBy.set(o.trackerId, o.source ?? 'signal');
+    return rows.map((r) => ({
+      trackerId: r.id,
+      symbol: r.symbol,
+      underlying: underlyingOf(r.symbol) || null,
+      exitAt: r.exitTime as Date,
+      // A closed row without a stored pnl is priced from its exit (value factor 1) — never silently 0, which
+      // would end a loss streak.
+      pnl: Number.isFinite(r.pnl) ? (r.pnl as number) : r.exitPrice != null ? (r.exitPrice - r.entryPrice) * r.qty : 0,
+      origin: originOf(sourceBy.has(r.id) ? sourceBy.get(r.id) : undefined),
+    }));
+  }
+
+  /** The live P&L of the owner's open position trackers now (the tracker's own marked pnl). */
+  async openPnl(userId: string, _now: Date): Promise<number> {
+    const agg = await this.prisma.tradeTracker.aggregate({
+      where: { userId, kind: 'POSITION', status: 'OPEN', NOT: { id: { startsWith: 'paper:' } } },
+      _sum: { pnl: true },
+    });
+    const v = agg._sum.pnl;
+    return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+  }
+
+  /** Today's pause / reset (a row left from an earlier IST day is ignored). */
+  async guardDay(userId: string, now: Date): Promise<GuardDayState> {
+    const row = await this.prisma.deskGuardState.findUnique({ where: { userId } });
+    if (!row || row.day !== istDay(now)) return { ...EMPTY };
+    return { pausedUntil: row.pausedUntil ?? null, pauseScope: row.pauseScope ?? null, resetAt: row.resetAt ?? null };
+  }
+
+  /** Writes today's pause; a new day starts clean (no reset carried over). */
+  async savePause(userId: string, now: Date, until: Date | null, scope: string | null): Promise<void> {
+    const day = istDay(now);
+    const prev = await this.guardDay(userId, now);
+    await this.prisma.deskGuardState.upsert({
+      where: { userId },
+      create: { userId, day, pausedUntil: until, pauseScope: scope, resetAt: null },
+      update: { day, pausedUntil: until, pauseScope: scope, resetAt: prev.resetAt },
+    });
+  }
+
+  /** The owner's reset: trades closed before `now` stop counting today, and any pause is cleared. */
+  async saveReset(userId: string, now: Date): Promise<void> {
+    const day = istDay(now);
+    await this.prisma.deskGuardState.upsert({
+      where: { userId },
+      create: { userId, day, pausedUntil: null, pauseScope: null, resetAt: now },
+      update: { day, pausedUntil: null, pauseScope: null, resetAt: now },
+    });
+  }
+
+  async recordEvent(e: { userId: string; at: Date; source: string; blocked: boolean; reasons: string[]; path: DayPnlPath | null }): Promise<void> {
+    await this.prisma.deskGuardEvent.create({
+      data: {
+        userId: e.userId,
+        at: e.at,
+        source: e.source,
+        blocked: e.blocked,
+        reasons: e.reasons as Prisma.InputJsonValue,
+        path: (e.path ?? {}) as unknown as Prisma.InputJsonValue,
+      },
+    });
+  }
+}

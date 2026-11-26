@@ -52,7 +52,7 @@ export interface AgentRegistry {
 export const SENTINEL_GATED_JOBS: readonly string[] = ['sentinel.judge', 'sentinel.thesis', 'sentinel.overnight'];
 
 /** The design's trading-group jobs (§4.2); the global limiter's trading reserve is theirs (§4.5a). */
-export const TRADING_JOBS: readonly string[] = ['sentinel.judge', 'sentinel.thesis', 'entry.judge', 'signal.judge'];
+export const TRADING_JOBS: readonly string[] = ['sentinel.judge', 'sentinel.thesis', 'entry.judge', 'signal.judge', 'desk.manager'];
 
 /** The sentinel judge cap with agents off (today's hard-coded `JUDGE_CONCURRENCY`). */
 const SENTINEL_JUDGE_CONCURRENCY_OFF = 2;

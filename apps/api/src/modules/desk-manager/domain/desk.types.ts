@@ -151,7 +151,7 @@ export type ManagerDecision =
   | ({ action: 'RESUME' } & Why)
   | ({ action: 'WATCH'; underlying: string; note: string; recheckMin: number } & Why)
   | ({ action: 'FLAG_DATA_HOLE'; what: string; impact: string } & Why)
-  | ({ action: 'NO_ACTION' } & Why);
+  | ({ action: 'NO_ACTION'; proposalRef?: string } & Why);
 
 export type ManagerAction = ManagerDecision['action'];
 export const MANAGER_ACTIONS: readonly ManagerAction[] = ['OPEN', 'EXIT', 'BOOK', 'TIGHTEN', 'PAUSE_ENTRIES', 'RESUME', 'WATCH', 'FLAG_DATA_HOLE', 'NO_ACTION'];

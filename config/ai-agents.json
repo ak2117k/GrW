@@ -4,6 +4,7 @@
   "sentinel.thesis":      { "agent": "trading",    "concurrency": 3, "timeoutMs": 300000, "model": null, "effort": null, "maxTokens": null },
   "entry.judge":          { "agent": "trading",    "concurrency": 3, "timeoutMs": 150000, "model": null, "effort": null, "maxTokens": null },
   "signal.judge":         { "agent": "trading",    "concurrency": 3, "timeoutMs": 300000, "model": null, "effort": null, "maxTokens": null },
+  "desk.manager":         { "agent": "trading",    "concurrency": 1, "timeoutMs": 120000, "model": null, "effort": null, "maxTokens": null },
   "signal.vision":        { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
   "signal.parse":         { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
   "signal.info":          { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },

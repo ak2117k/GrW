@@ -76,6 +76,16 @@ describe('parseManagerReply', () => {
     expect(r.ok).toBe(true);
   });
 
+  it('NO_ACTION keeps the declined proposalRef; null or absent means none; a non-string is rejected', () => {
+    const r = parseManagerReply({ summary: 's', decisions: [{ action: 'NO_ACTION', proposalRef: 'reading:42', reason: 'stale', evidence: ['ltp 1'] }, { action: 'NO_ACTION', proposalRef: null, reason: 'quiet', evidence: [] }] });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.reply.decisions[0]).toEqual({ action: 'NO_ACTION', proposalRef: 'reading:42', reason: 'stale', evidence: ['ltp 1'] });
+      expect('proposalRef' in r.reply.decisions[1]).toBe(false);
+    }
+    expect(parseManagerReply({ summary: 's', decisions: [{ action: 'NO_ACTION', proposalRef: 7, reason: 'r', evidence: [] }] }).ok).toBe(false);
+  });
+
   it('the schema lists every action', () => {
     const actions = (MANAGER_REPLY_SCHEMA.properties.decisions.items.anyOf as unknown as Array<{ properties: { action: { enum: string[] } } }>).flatMap((s) => s.properties.action.enum);
     expect(actions.sort()).toEqual(['BOOK', 'EXIT', 'FLAG_DATA_HOLE', 'NO_ACTION', 'OPEN', 'PAUSE_ENTRIES', 'RESUME', 'TIGHTEN', 'WATCH']);

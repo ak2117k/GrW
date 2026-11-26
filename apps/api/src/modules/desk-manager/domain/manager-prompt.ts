@@ -29,7 +29,7 @@ export function managerSystemPrompt(cfg: Pick<DeskManagerConfig, 'ceilings' | 'm
     'RULES FOR MANAGING',
     '- EXIT / BOOK / TIGHTEN name a trackerId from packet.positions. BOOK = take profit now. TIGHTEN sets a new underlying stop that must be tighter than the current managerStop (higher for CE/FUT longs, lower for PE).',
     '- PAUSE_ENTRIES {scope "all" or an underlying, minutes 1-390}; RESUME ends your pause. WATCH asks for a re-run after recheckMin minutes with a note. FLAG_DATA_HOLE names data that is missing and what it stops you deciding.',
-    '- NO_ACTION is a normal, expected answer when nothing is clearly worth doing.',
+    '- NO_ACTION is a normal, expected answer when nothing is clearly worth doing. When you decline a proposal, return NO_ACTION with its proposalRef (the packet proposal ref); otherwise proposalRef is null.',
     '',
     'DATA',
     '- 15 minutes is the smallest unit: never decide on 1-minute bars or 1-minute noise. Use 15m trend, daily levels, the level book, the option-chain walls and the current price.',
@@ -43,7 +43,7 @@ export function managerSystemPrompt(cfg: Pick<DeskManagerConfig, 'ceilings' | 'm
     'REPLY: one JSON object { "summary": "...", "decisions": [ ... ] } and nothing else.',
     '- OPEN: { action, underlying, side, strikePolicy ("ATM" | "ITM1" | "OTM1" | a strike number), expiryPolicy ("NEAREST" | "NEXT"), entry { type "NOW" | "ZONE" | "BREAKOUT", low, high, triggerAbove, triggerBelow (null when unused), validMin }, stop { underlying }, targets { underlying: [..] }, proposalRef (a packet proposal ref or null), confidence "low" | "medium" | "high", reason, evidence }',
     '- EXIT / BOOK: { action, trackerId, reason, evidence } · TIGHTEN: { action, trackerId, underlyingStop, reason, evidence }',
-    '- PAUSE_ENTRIES: { action, scope, minutes, reason, evidence } · RESUME / NO_ACTION: { action, reason, evidence }',
+    '- PAUSE_ENTRIES: { action, scope, minutes, reason, evidence } · RESUME: { action, reason, evidence } · NO_ACTION: { action, proposalRef (the declined proposal ref or null), reason, evidence }',
     '- WATCH: { action, underlying, note, recheckMin, reason, evidence } · FLAG_DATA_HOLE: { action, what, impact, reason, evidence }',
     '- One malformed decision voids the whole reply: nothing is acted on.',
   ].join('\n');

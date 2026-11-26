@@ -65,5 +65,6 @@ describe('ManagerLlmService.decide', () => {
     expect(p).toMatch(/cites numbers from the packet in evidence/);
     expect(p).toMatch(/Levels are on the UNDERLYING/);
     expect(p).toMatch(/inside the ceiling.*else NO_ACTION/);
+    expect(p).toContain('When you decline a proposal, return NO_ACTION with its proposalRef');
   });
 });

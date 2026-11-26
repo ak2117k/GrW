@@ -51,7 +51,7 @@ export const MANAGER_REPLY_SCHEMA = {
           obj('RESUME', {}),
           obj('WATCH', { underlying: str, note: str, recheckMin: num }),
           obj('FLAG_DATA_HOLE', { what: str, impact: str }),
-          obj('NO_ACTION', {}),
+          obj('NO_ACTION', { proposalRef: { anyOf: [{ type: 'null' }, str] } }),
         ],
       },
     },
@@ -131,8 +131,13 @@ function parseDecision(x: unknown): { d: ManagerDecision } | { error: string } {
       if (!nonEmpty(x.what) || typeof x.impact !== 'string') return { error: 'FLAG_DATA_HOLE needs what and impact' };
       return { d: { action, what: x.what, impact: x.impact, ...w } };
     case 'RESUME':
-    case 'NO_ACTION':
       return { d: { action, ...w } };
+    case 'NO_ACTION': {
+      if (!(x.proposalRef === undefined || x.proposalRef === null || typeof x.proposalRef === 'string')) return { error: 'bad proposalRef' };
+      const d: Extract<ManagerDecision, { action: 'NO_ACTION' }> = { action, ...w };
+      if (nonEmpty(x.proposalRef)) d.proposalRef = x.proposalRef.trim();
+      return { d };
+    }
   }
   return { error: `unknown action ${String(action)}` };
 }

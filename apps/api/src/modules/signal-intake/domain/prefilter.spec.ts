@@ -39,4 +39,12 @@ describe('pre-filter: ambiguous symbols beside a price-level phrase (2026-11-26 
   it('the contract rule still holds: "BEL 300 CE" names BEL', () => {
     expect(instrumentHits(normalise('BEL 300 CE buy 5 sl 3', vocab).tokens, vocab).map((h) => h.name)).toEqual(['BEL']);
   });
+
+  it('everyday-word symbols (STAR, GLOBAL) keep the strict rule: "star pick BUY 450" names nothing, "STAR 450 CE" names STAR', () => {
+    const v = buildVocabulary(['STAR-EQ', 'GLOBAL-EQ']);
+    const hits = (s: string) => instrumentHits(normalise(s, v).tokens, v).map((h) => h.name);
+    expect(hits('STAR pick BUY 450 target 480')).toEqual([]);
+    expect(hits('GLOBAL cues BUY above 200')).toEqual([]);
+    expect(hits('STAR 450 CE buy 12 sl 8')).toEqual(['STAR']);
+  });
 });

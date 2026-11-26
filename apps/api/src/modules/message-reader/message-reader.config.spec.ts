@@ -19,6 +19,7 @@ describe('parseMessageReaderConfig', () => {
       mode: 'off',
       model: 'claude-sonnet-5',
       packetMs: 3000,
+      breadthMs: 6000,
       timeoutMs: 25000,
       maxAgeMin: 30,
       retryMaxAgeMin: 5,

@@ -19,6 +19,22 @@ const reply = (claims: unknown[], over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+describe('validateReading: reasonCode (2026-11-26)', () => {
+  it('keeps a listed reasonCode on NOT_CHECKABLE only; null / off-list / other verdicts carry none', () => {
+    const r = validateReading(
+      reply([
+        claim({ verdict: 'NOT_CHECKABLE', evidence: [], reasonCode: 'FORWARD_LOOKING' }),
+        claim({ verdict: 'NOT_CHECKABLE', evidence: [], reasonCode: null }),
+        claim({ verdict: 'NOT_CHECKABLE', evidence: [], reasonCode: 'BECAUSE' }),
+        claim({ verdict: 'UNCLEAR', evidence: [], reasonCode: 'STALE' }),
+      ]),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.reply.claims.map((c) => c.reasonCode)).toEqual(['FORWARD_LOOKING', undefined, undefined, undefined]);
+  });
+});
+
 describe('validateReading', () => {
   it('downgrades a CONFIRMED claim with no evidence to UNCLEAR', () => {
     const r = validateReading(reply([claim({ verdict: 'CONFIRMED', evidence: [] })]));

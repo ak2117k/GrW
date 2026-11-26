@@ -34,6 +34,8 @@ const UNAVAILABLE_CACHE_MS = 10_000;
 /** Default reader instrument builds in flight at once (MESSAGE_READER_MAX_INSTRUMENT_BUILDS). */
 const DEFAULT_MAX_INSTRUMENT_BUILDS = 2;
 const MAX_INSTRUMENTS = 3;
+/** Default breadth time box (MESSAGE_READER_BREADTH_MS). */
+const DEFAULT_BREADTH_MS = 6_000;
 /** A named instrument's context is shared the same way (concurrent posts on one underlying build it once). */
 const INSTRUMENT_CACHE_MS = 60_000;
 /** The whole-instrument race sits this far past the per-block deadline, as a safety net only. */
@@ -166,17 +168,31 @@ export class ReaderPacketService {
     const owner = this.traderCfg.ownerUserId;
     const [marketPulse, instruments, channelRecent, todayNotes] = await Promise.all([
       this.marketPulse(owner),
-      Promise.all(
-        names.map(async (u) => {
-          const [ctx, quote] = await Promise.all([this.instrument(u, owner, i.now, started), this.quote(u, owner, i.now, started)]);
-          return [u, { ...ctx, quote }] as const;
-        }),
-      ),
+      Promise.all(names.map((u) => this.instrumentEntry(u, owner, i.now, started))),
       this.block(SRC.channel, async () => (await this.sources.recentChannelPosts(i.channelId, new Date(i.now.getTime() - CHANNEL_WINDOW_MS))).slice(0, MAX_ROWS)),
       this.block(SRC.notes, async () => (await this.sources.todayMarketNotes(istYmd(i.now))).slice(0, MAX_ROWS)),
     ]);
     const packet: ReaderPacket = { at: i.now.toISOString(), marketPulse, instruments: Object.fromEntries(instruments), channelRecent, todayNotes };
     return { packet, ms: Date.now() - started };
+  }
+
+  /**
+   * The reader's second pass: blocks for instruments the AI named that the packet does not carry (the
+   * pre-filter missed them), at most 3, under the same time box and broker caps as `build`. Returns the
+   * packet with those instruments added; the rest of the packet is unchanged.
+   */
+  async addInstruments(packet: ReaderPacket, underlyings: string[], now: Date): Promise<{ packet: ReaderPacket; ms: number }> {
+    const started = Date.now();
+    const have = new Set(Object.keys(packet.instruments ?? {}));
+    const names = [...new Set(underlyings.map((u) => u.trim().toUpperCase()).filter((u) => u && !have.has(u)))].slice(0, MAX_INSTRUMENTS);
+    const owner = this.traderCfg.ownerUserId;
+    const added = await Promise.all(names.map((u) => this.instrumentEntry(u, owner, now, started)));
+    return { packet: { ...packet, instruments: { ...packet.instruments, ...Object.fromEntries(added) } }, ms: Date.now() - started };
+  }
+
+  private async instrumentEntry(u: string, owner: string | null, now: Date, started: number): Promise<readonly [string, Record<string, unknown>]> {
+    const [ctx, quote] = await Promise.all([this.instrument(u, owner, now, started), this.quote(u, owner, now, started)]);
+    return [u, { ...ctx, quote }] as const;
   }
 
   private marketPulse(owner: string | null): Promise<MarketPulse> {
@@ -207,7 +223,8 @@ export class ReaderPacketService {
         if (Object.keys(out).length === 0) throw new Error('no index quote returned');
         return out;
       })),
-      this.block(SRC.breadth, need((u) => this.breadth.getBreadth(u))),
+      // Breadth has its own, longer box (MESSAGE_READER_BREADTH_MS); the pulse is cached, so posts rarely wait on it.
+      this.block(SRC.breadth, need((u) => this.breadth.getBreadth(u)), this.cfg.breadthMs ?? DEFAULT_BREADTH_MS),
       this.block(SRC.sectors, need((u) => this.breadth.getSectorPerformance(u))),
     ]);
     return { indices, breadth, sectors };

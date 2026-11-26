@@ -8,6 +8,11 @@ export interface MessageReaderConfig {
   model: string;
   /** MESSAGE_READER_PACKET_MS — time box for building the market-data packet. */
   packetMs: number;
+  /**
+   * MESSAGE_READER_BREADTH_MS — the breadth (advance / decline) block's own time box (default 6000), separate
+   * from packetMs: breadth reads a whole quote batch and a timed-out breadth leaves MARKET claims uncheckable.
+   */
+  breadthMs: number;
   /** MESSAGE_READER_TIMEOUT_MS — the AI call timeout. */
   timeoutMs: number;
   /** MESSAGE_READER_MAX_AGE_MIN — posts older than this at dequeue are stored STALE, not read. */
@@ -53,6 +58,7 @@ export function parseMessageReaderConfig(env: Record<string, string | undefined>
     mode: MODES.includes(raw) ? raw : 'off',
     model: (env.MESSAGE_READER_MODEL ?? '').trim() || MESSAGE_READER_DEFAULT_MODEL,
     packetMs: int(env.MESSAGE_READER_PACKET_MS, 3_000, 100, 60_000),
+    breadthMs: int(env.MESSAGE_READER_BREADTH_MS, 6_000, 100, 60_000),
     timeoutMs: int(env.MESSAGE_READER_TIMEOUT_MS, 25_000, 1_000, 600_000),
     maxAgeMin: int(env.MESSAGE_READER_MAX_AGE_MIN, 30, 1, 24 * 60),
     retryMaxAgeMin: 5,

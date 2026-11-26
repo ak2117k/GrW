@@ -1,7 +1,7 @@
 import { ReaderPacketService } from './reader-packet.service';
 import { SignalContextService } from '../../signal-trader/services/signal-context.service';
 import type { ReaderPacketSources } from './reader-packet.sources';
-import type { MessageReaderConfig } from '../message-reader.config';
+import { parseMessageReaderConfig, type MessageReaderConfig } from '../message-reader.config';
 
 const NOW = new Date('2026-11-25T05:00:00Z'); // 10:30 IST
 
@@ -85,8 +85,40 @@ describe('ReaderPacketService', () => {
     jest.useRealTimers();
   });
 
+  it('breadth gets its own 6000 ms box (MESSAGE_READER_BREADTH_MS), separate from packetMs', async () => {
+    expect(parseMessageReaderConfig({}).breadthMs).toBe(6_000);
+    expect(parseMessageReaderConfig({}).packetMs).toBe(3_000);
+    expect(parseMessageReaderConfig({ MESSAGE_READER_BREADTH_MS: '8000' }).breadthMs).toBe(8_000);
+    expect(parseMessageReaderConfig({ MESSAGE_READER_BREADTH_MS: 'x' }).breadthMs).toBe(6_000);
+    let settle!: (v: unknown) => void;
+    const slow = new Promise((r) => (settle = r));
+    const { svc } = setup({ getBreadth: jest.fn(() => slow), cfg: { breadthMs: 6_000 } });
+    const p = svc.build(input());
+    await jest.advanceTimersByTimeAsync(4_000); // past the 3 s packet box: breadth still waits
+    settle({ advances: 31, declines: 19, unchanged: 0, adRatio: 1.63, total: 50 });
+    const { packet } = await p;
+    expect(packet.marketPulse.breadth).toMatchObject({ status: 'present', value: { advances: 31 } });
+    // A breadth that never answers is cut at 6 s, not 3 s.
+    const hung = setup({ getBreadth: jest.fn(() => new Promise(() => undefined)), cfg: { breadthMs: 6_000 } });
+    const q = hung.svc.build(input());
+    await jest.advanceTimersByTimeAsync(6_000);
+    expect((await q).packet.marketPulse.breadth).toEqual({ status: 'unavailable', source: expect.any(String), reason: expect.stringMatching(/timed out after 6000/) });
+  });
+
+  it('addInstruments quotes AI-named instruments the packet lacks (at most 3, existing ones untouched)', async () => {
+    const { svc, context } = setup();
+    const { packet } = await svc.build(input(['NIFTY']));
+    context.build.mockClear();
+    const more = await svc.addInstruments(packet, ['nifty', 'BANKNIFTY', 'CRUDEOIL', 'FINNIFTY', 'SENSEX'], NOW);
+    expect(Object.keys(more.packet.instruments)).toEqual(['NIFTY', 'BANKNIFTY', 'CRUDEOIL', 'FINNIFTY']);
+    expect(context.build).toHaveBeenCalledTimes(3);
+    expect(more.packet.instruments.NIFTY).toBe(packet.instruments.NIFTY);
+    expect(more.packet.marketPulse).toBe(packet.marketPulse);
+    expect(more.packet.instruments.BANKNIFTY).toHaveProperty('quote');
+  });
+
   it('time-boxes a hanging source', async () => {
-    const { svc } = setup({ getBreadth: jest.fn(() => new Promise(() => undefined)) });
+    const { svc } = setup({ getBreadth: jest.fn(() => new Promise(() => undefined)), cfg: { breadthMs: 3_000 } });
     let done = false;
     const p = svc.build(input()).then((r) => {
       done = true;

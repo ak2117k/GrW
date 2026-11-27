@@ -124,6 +124,8 @@ export interface SentinelPromptOptions {
   anchors?: boolean;
   /** F2/F3: SENTINEL_MARKET_READ exactly 'true': the flow.oiRead / indicators lines (the packet carries the keys only then). */
   marketRead?: boolean;
+  /** Trade agent exit authority live (AUTHORITY_STATE.isLive()): the +x1 "ALARMS AND BRIEF" section (packet alarm / brief). */
+  authority?: boolean;
 }
 
 const VERSIONS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noCues: string }> = {
@@ -145,7 +147,7 @@ const VERSIONS_NEWS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noC
 export function sentinelPromptVersion(o: SentinelPromptOptions): string {
   const key = o.discipline ? (o.triggers ? 'ed+trg' : 'ed') : o.triggers ? 'trg' : 'off';
   const table = o.news ? VERSIONS_NEWS : VERSIONS;
-  return `${o.cues ? table[key].cues : table[key].noCues}${o.lessons ? LESSONS_VERSION_SUFFIX : ''}${o.delta ? DELTA_VERSION_SUFFIX : ''}${o.equity ? EQUITY_VERSION_SUFFIX : ''}${o.squareOff ? SQUARE_OFF_VERSION_SUFFIX : ''}${o.anchors && o.discipline ? ANCHORS_VERSION_SUFFIX : ''}`;
+  return `${o.cues ? table[key].cues : table[key].noCues}${o.lessons ? LESSONS_VERSION_SUFFIX : ''}${o.delta ? DELTA_VERSION_SUFFIX : ''}${o.equity ? EQUITY_VERSION_SUFFIX : ''}${o.squareOff ? SQUARE_OFF_VERSION_SUFFIX : ''}${o.anchors && o.discipline ? ANCHORS_VERSION_SUFFIX : ''}${o.authority ? AUTHORITY_VERSION_SUFFIX : ''}`;
 }
 
 /** {@link sentinelPromptVersion} composed with the thesis prompt — what goes on the verdict row. */
@@ -510,6 +512,34 @@ const V2_MACRO_LINE =
  * silently if those lines move.
  */
 export function sentinelSystemPrompt(o: SentinelPromptOptions): string {
+  return withAuthority(renderCues(o), !!o.authority);
+}
+
+/**
+ * The stamp suffix for the trade agent exit authority (TRADE_AGENT_AUTHORITY=live and its boot check passed;
+ * docs/superpowers/specs/2026-11-27-trade-agent-exit-authority-design.md): `…+a2` becomes `…+a2+x1`. The
+ * packet then carries `alarm` and `brief`. Off, every text and stamp is byte-identical.
+ */
+export const AUTHORITY_VERSION_SUFFIX = '+x1';
+
+/** The +x1 section, appended after the answer rules. Starts with a blank line; no trailing newline (like the base). */
+export const AUTHORITY_SECTION = [
+  '',
+  '',
+  'ALARMS AND BRIEF:',
+  '- On a live trade the packet has two more top-level fields, alarm and brief; either may be null. When they are absent, ignore this section.',
+  '- alarm, when not null, is a code rule that would have sold this trade by itself (alarm.rule, alarm.reason, alarm.urgency, alarm.deadline, alarm.raisedAt). The rule no longer sells it: you decide. Verify the alarm on the 5-minute and 15-minute chart, on closed bars, from what this packet shows (position, structure, flow, money and its anchors), then answer HOLD, TIGHTEN (EXIT_ARMED with the exact level that sells it, as invalidationPoint and, when your answer has one, exitTrigger) or EXIT_NOW. Your reason must address the alarm directly: why it is right, or why it is noise.',
+  '- alarm.urgency urgent is a hard-loss alarm: the owner is alerted within a minute if you do not answer. deadline means the trade must be decided before alarm.deadline; left unanswered close to it, code exits the position.',
+  '- brief, when not null, is the supreme agent\'s plan and skills for this trade: why it was opened, what it expects, and how it wants it managed. Read it on every look and follow it unless this packet shows it no longer fits; when you depart from it, say why in reason. A null brief means none was written.',
+].join('\n');
+
+/** The +x1 section into a rendered prompt. */
+function withAuthority(text: string, on: boolean): string {
+  return on ? `${text}${AUTHORITY_SECTION}` : text;
+}
+
+/** {@link sentinelSystemPrompt} before the +x1 section: the cues-on text, or the cues-off one. */
+function renderCues(o: SentinelPromptOptions): string {
   const text = renderPrompt(o);
   if (o.cues) return text;
   const v3MacroLines = text.slice(text.indexOf('- macro.fiiDii is the latest published'), text.indexOf('- news.freshCount counts'));

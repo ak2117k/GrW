@@ -40,6 +40,7 @@ import { LESSONS_READER, type InjectedLesson, type InjectionScope, type LessonsR
 import { ConfigService } from '@nestjs/config';
 import { CASH_OI_WALLS_REASON, equityBlockEnabled, equityBlocks, isCashSegment, parseSquareOffIst, type EquityBlock, type EquityTickInputs } from './equity-blocks';
 import type { SquareOffDecision } from './square-off-look';
+import type { PacketAlarm } from './alarm-look';
 import { OiReadService } from './oi-read.service';
 import { MultiTimeframeReaderService } from './multi-timeframe-reader.service';
 
@@ -679,6 +680,14 @@ export type ContextPacket = {
    * otherwise, so every other packet is byte-identical to before.
    */
   squareOffDecision?: SquareOffDecision;
+  /**
+   * Trade agent exit authority (TRADE_AGENT_AUTHORITY=live, live trackers only): the open alarm — a code rule
+   * that would have sold this trade and now asks the agent instead — or null when none. Absent key ⇒ the
+   * authority is off (or a paper trade), so every other packet is byte-identical to before.
+   */
+  alarm?: PacketAlarm | null;
+  /** Trade agent exit authority: the supreme's brief (plan and skills) for this trade, or null. Absent key as for `alarm`. */
+  brief?: string | null;
 };
 
 /** A move of the underlying AGAINST the position (+ = against), in its points and in its noise units (null: N unknown). */
@@ -740,6 +749,8 @@ export interface PacketReview {
   held?: boolean;
   /** Inside the hard-risk window before the position's deadline: the packet's squareOffDecision. */
   deadline?: SquareOffDecision;
+  /** Trade agent exit authority (live trackers, authority live): the packet's `alarm` and `brief`. Absent ⇒ neither key. */
+  authority?: { alarm: PacketAlarm | null; brief: string | null };
   since?: {
     verdict: string;
     at: Date;
@@ -1704,6 +1715,7 @@ export class ContextPacketService {
         : {}),
       ...(review?.held ? { ownerHold: true as const } : {}),
       ...(review?.deadline ? { squareOffDecision: { ...review.deadline } } : {}),
+      ...(review?.authority ? { alarm: review.authority.alarm ? { ...review.authority.alarm } : null, brief: review.authority.brief } : {}),
     };
   }
 

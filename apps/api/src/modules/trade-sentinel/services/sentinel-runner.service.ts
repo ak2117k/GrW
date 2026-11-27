@@ -9,6 +9,8 @@ import { SENTINEL_BLIND_ALERT_MS } from './blind-watch';
 import { isExchangeOpen } from '../market-sessions';
 import type { SessionClock } from '../../market-hub/session-clock';
 import { isAnyHeldVenueOpen, isAnyVenueOpen, makeSentinelClock } from '../overnight/overnight-calendar';
+import type { TrackerWakePort } from '../../exit-authority/exit-authority.tokens';
+import { TRACKER_WAKE_MIN_GAP_MS } from '../../exit-authority/domain/timings';
 
 /**
  * THE TICK CADENCE. Every-30-seconds, weekdays, 09:15–15:29 IST.
@@ -93,7 +95,7 @@ export function isWithinSession(now: Date = new Date()): boolean {
  * scheduler owns that the cycle deliberately does not.
  */
 @Injectable()
-export class SentinelRunnerService {
+export class SentinelRunnerService implements TrackerWakePort {
   private readonly logger = new Logger(SentinelRunnerService.name);
 
   /**
@@ -273,6 +275,39 @@ export class SentinelRunnerService {
     if (this.inFlight.has(userId)) return;
     this.logger.log(`[sentinel-tick] waking ${userId}: ${why}`);
     void this.runForUser(userId);
+  }
+
+  /** Exit authority: when each tracker was last woken by an alarm (TRACKER_WAKE_MIN_GAP_MS apart). */
+  private readonly trackerWokenAt = new Map<string, number>();
+
+  /**
+   * TRADE AGENT EXIT AUTHORITY (TrackerWakePort, exit-authority.tokens.ts): an alarm was raised on this tracker,
+   * so run its user's ordinary sensor pass now — where the open alarm forces the agent's look — instead of at
+   * the next 30-s tick. Marks the tracker (logged with the forced look), then the same path as
+   * {@link wakeForTick}: the same session gate on the tracker's exchange, and nothing while that user's pass
+   * is in flight (the next tick reads the alarm from the database anyway). At most one wake per tracker per
+   * TRACKER_WAKE_MIN_GAP_MS. Never throws.
+   */
+  wakeTracker(userId: string, trackerId: string, why: string, now: Date = new Date()): void {
+    if (!this.enabled) return;
+    const last = this.trackerWokenAt.get(trackerId);
+    if (last !== undefined && now.getTime() - last < TRACKER_WAKE_MIN_GAP_MS) return;
+    void this.trackerExchange(trackerId)
+      .then((exchange) => {
+        if (!exchange || !isAnyHeldVenueOpen(this.clock, [exchange], now)) return;
+        if (this.inFlight.has(userId)) return;
+        this.trackerWokenAt.set(trackerId, now.getTime());
+        this.cycle.markAlarmWake(trackerId, why);
+        this.logger.log(`[exit-authority] waking ${userId} for tracker ${trackerId}: ${why}`);
+        void this.runForUser(userId);
+      })
+      .catch((err) => this.logger.warn(`[exit-authority] tracker wake failed for ${trackerId}: ${describe(err)}`));
+  }
+
+  /** The tracker's exchange (for the session gate), or null when it is unknown. */
+  private async trackerExchange(trackerId: string): Promise<string | null> {
+    const row = await this.prisma.tradeTracker.findUnique({ where: { id: trackerId }, select: { exchange: true } });
+    return row?.exchange ?? null;
   }
 
   /**

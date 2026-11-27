@@ -23,6 +23,7 @@ import {
 } from '../prompts/sentinel-overnight-prompt';
 import type { OvernightPacket } from '../overnight/overnight-packet.types';
 import { parseExitTriggerProposal, type ExitTriggerProposal } from './exit-trigger-proposal';
+import { AUTHORITY_STATE, type AuthorityStatePort } from '../../exit-authority/exit-authority.tokens';
 
 /**
  * The effort values the API accepts. Narrowed here rather than left as `string`
@@ -240,6 +241,9 @@ export class SentinelAgentService {
     // argument keeps working, and so a container without ConfigModule still
     // boots — the compiled defaults are then used, which are the correct tiers.
     @Optional() private readonly config?: ConfigService,
+    // Trade agent exit authority (exit-authority.tokens.ts): live ⇒ the +x1 "ALARMS AND BRIEF" section and stamp.
+    // Read per call (the boot check can turn it live after construction). Absent ⇒ off, byte-identical.
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
   ) {}
 
   /**
@@ -290,6 +294,8 @@ export class SentinelAgentService {
       anchors: !!this.config && parseExitDisciplineConfig({
         FLOOR_HARD_EXIT: this.config.get<string>('FLOOR_HARD_EXIT') ?? undefined,
       }).floorHardExit,
+      // Trade agent exit authority: spread only when live, so with it off the options object is exactly as before.
+      ...(this.authority?.isLive() === true ? { authority: true } : {}),
     };
   }
 

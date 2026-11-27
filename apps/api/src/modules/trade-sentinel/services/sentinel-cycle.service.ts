@@ -37,6 +37,17 @@ import {
   type JudgeGateConfig,
 } from './judge-gate';
 import { squareOffLook, type SquareOffDecision, type SquareOffLook } from './square-off-look';
+import { ALARM_FIRE, alarmLookFire, lastAgentVerdictMs, leadAlarm, packetAlarm, type AlarmFire } from './alarm-look';
+import {
+  AUTHORITY_STATE,
+  TRADE_ALARMS,
+  TRADE_BRIEFS,
+  type AlarmRow,
+  type AuthorityStatePort,
+  type RaiseAlarm,
+  type TradeAlarmsPort,
+  type TradeBriefsPort,
+} from '../../exit-authority/exit-authority.tokens';
 import { OWNER_ALERTS, type OwnerAlert, type OwnerAlertPort } from '../ports/owner-alerts.port';
 import { CLOSE_PRODUCTS, NO_CLOSE_CONTEXT, type CloseContext, type CloseProductLookup } from '../ports/close-products.port';
 import { MANAGER_TRACKERS, type ManagerTrackerLookup } from '../ports/manager-trackers.port';
@@ -582,6 +593,8 @@ interface TrackerState {
   g2r?: { peak: number; red: boolean; giveback: boolean };
   /** Owner alerts: epoch ms (cycle clock) of the last observe-only EXIT_NOW alert — at most one per 30 min. */
   ownerExitAlertAt?: number;
+  /** Exit authority: cycle-clock ms the last forced alarm look was dispatched (TRACKER_WAKE_MIN_GAP_MS apart). Memory only. */
+  alarmLookAt?: number;
 }
 
 /** TARGET_LADDER: the per-position memory (see `TrackerState.ladder`). */
@@ -634,8 +647,8 @@ export const OWNER_EXIT_ALERT_EVERY_MS = 30 * 60_000;
 
 /** Judge gate: no new judgement on a position this soon after its latest recorded verdict (see evaluateOne). */
 export const MIN_REJUDGE_GAP_MS = 60_000;
-/** The looks {@link MIN_REJUDGE_GAP_MS} never delays: the EXIT_NOW confirmation and the deadline look. */
-const GAP_EXEMPT_FIRES: ReadonlySet<string> = new Set(['exit-confirm', SQUARE_OFF_DUE]);
+/** The looks {@link MIN_REJUDGE_GAP_MS} never delays: the EXIT_NOW confirmation, the deadline look and the alarm look. */
+const GAP_EXEMPT_FIRES: ReadonlySet<string> = new Set(['exit-confirm', SQUARE_OFF_DUE, ALARM_FIRE]);
 
 /** FLOOR_HARD_EXIT: the rule's fire name (packet trigger, verdict triggeredBy). */
 export const FLOOR_HARD_EXIT_FIRE = 'floor-hard-exit';
@@ -803,7 +816,76 @@ export class SentinelCycleService {
     // Desk manager (2026-11-26, ports/manager-trackers.port.ts): its positions skip the flat ₹ hard-loss exit,
     // never the class ceiling. Optional: absent ⇒ every position exactly as before.
     @Optional() @Inject(MANAGER_TRACKERS) private readonly managerTrackers?: ManagerTrackerLookup | null,
+    // Trade agent exit authority (2026-11-27, exit-authority.tokens.ts): with the authority live, a code rule that would
+    // have sold a LIVE trade raises an alarm instead of an EXIT_NOW, the alarm forces the agent's look, and the packet
+    // carries the alarm and the supreme's brief. Optional: absent (the paper cycle) or not live ⇒ exactly as before.
+    @Optional() @Inject(TRADE_ALARMS) private readonly alarms?: TradeAlarmsPort | null,
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
+    @Optional() @Inject(TRADE_BRIEFS) private readonly briefs?: TradeBriefsPort | null,
   ) {}
+
+  /** Trade agent exit authority applies to this trade: ports bound, the authority live, a LIVE (never paper) tracker. */
+  private authorityLive(entry: { trackerId: string }): boolean {
+    return !!this.alarms && !isPaperTracker(entry.trackerId) && this.authority?.isLive() === true;
+  }
+
+  /**
+   * Trade agent exit authority: the ONE place a code rule's sell is decided. Not live (or paper) ⇒ `recordToday`,
+   * the rule's EXIT_NOW exactly as before. Live ⇒ the alarm instead: no EXIT_NOW is written, the trade's agent is
+   * woken and must look (the forced alarm look). Every confirmation and exec-confirm check runs BEFORE this call,
+   * unchanged. A rejection is the caller's to handle, exactly like a failed verdict write.
+   */
+  private async ruleExit(
+    entry: RosterEntry,
+    kind: RaiseAlarm['rule'],
+    recordToday: () => Promise<unknown>,
+    alarm: () => RaiseAlarm,
+  ): Promise<'recorded' | 'alarmed'> {
+    if (!this.authorityLive(entry)) {
+      await recordToday();
+      return 'recorded';
+    }
+    const a = alarm();
+    const row = await this.alarms!.raise(a);
+    this.logger.warn(
+      `[exit-authority] ${kind} alarm ${row ? `raised (${row.id})` : 'deduped (an open alarm already covers it)'} — ${entry.symbol} ` +
+        `(tracker ${entry.trackerId}): no EXIT_NOW written, the trade agent decides; would have: ${a.wouldHave.slice(0, 200)}`,
+    );
+    return 'alarmed';
+  }
+
+  /** Exit authority: this pass's open alarms for the user's LIVE trackers — ONE read per pass. Never throws (a failed read is none). */
+  private async openAlarmsFor(entries: readonly RosterEntry[]): Promise<Map<string, AlarmRow[]>> {
+    const out = new Map<string, AlarmRow[]>();
+    if (!this.alarms || this.authority?.isLive() !== true) return out;
+    const ids = entries.filter((e) => e.watched && !isPaperTracker(e.trackerId)).map((e) => e.trackerId);
+    if (ids.length === 0) return out;
+    try {
+      for (const a of await this.alarms.openForTrackers(ids)) out.set(a.trackerId, [...(out.get(a.trackerId) ?? []), a]);
+    } catch (err) {
+      this.logger.warn(`[exit-authority] open-alarm read failed — no forced alarm look this pass: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return out;
+  }
+
+  /** Exit authority: the supreme's brief for this trade, or null. Never throws (a failed read is "no brief"). */
+  private async briefFor(entry: RosterEntry): Promise<string | null> {
+    if (!this.briefs) return null;
+    try {
+      return (await this.briefs.briefFor(entry.trackerId)) ?? null;
+    } catch (err) {
+      this.logger.warn(`[exit-authority] brief read failed for ${entry.symbol} (tracker ${entry.trackerId}) — judged without it: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
+  /** Woken trackers (SentinelRunnerService.wakeTracker): logged on their next pass. Memory only. */
+  private readonly alarmWakes = new Map<string, string>();
+
+  /** Exit authority (TrackerWakePort, via the runner): mark a tracker woken by an alarm; its next pass forces the look if owed. */
+  markAlarmWake(trackerId: string, why: string): void {
+    this.alarmWakes.set(trackerId, why);
+  }
 
   /**
    * Which of this pass's real positions the desk manager opened. Never throws: a failed lookup is an empty
@@ -882,6 +964,8 @@ export class SentinelCycleService {
     const candidates: JudgeCandidate[] = [];
     const suppressed: Record<string, number> = {};
     const futile: FutilePass = { attempts: await this.exitAttemptsFor(entries, now), tally: {} };
+    // Exit authority: the open alarms for this pass (an empty map when the authority is off — no read at all).
+    const openAlarms = await this.openAlarmsFor(entries);
 
     for (const [index, entry] of entries.entries()) {
       if (!entry.watched) {
@@ -910,7 +994,7 @@ export class SentinelCycleService {
         const started = Date.now();
         this.sensorRunning.set(entry.trackerId, started);
         // Live positions: their broker history calls go ahead of background work (historical-priority).
-        const run = () => this.evaluateOne(entry, index, now, report, suppressed, futile, jobs);
+        const run = () => this.evaluateOne(entry, index, now, report, suppressed, futile, jobs, openAlarms);
         const pass = isPaperTracker(entry.trackerId) ? run() : asLive(run);
         void pass.then(
           () => this.sensorRunning.get(entry.trackerId) === started && this.sensorRunning.delete(entry.trackerId),
@@ -967,9 +1051,10 @@ export class SentinelCycleService {
     // broken level outranks a routine look — and within each group never judged
     // first, then the oldest last verdict, then whoever has been refused a slot
     // the longest; roster order only breaks a full tie.
-    // The deadline look first of all: it is the one judgement that cannot wait for a later tick.
+    // The deadline look first of all: it is the one judgement that cannot wait for a later tick (the forced
+    // alarm look ranks with it: a code rule wanted this trade sold and nothing sells it without the agent).
     const fired = (c: JudgeCandidate) =>
-      c.decision.fires.some((f) => f.name === SQUARE_OFF_DUE) ? 0 : c.decision.fires.length > 0 ? 1 : 2;
+      c.decision.fires.some((f) => f.name === SQUARE_OFF_DUE || f.name === ALARM_FIRE) ? 0 : c.decision.fires.length > 0 ? 1 : 2;
     candidates.sort(
       (a, b) =>
         fired(a) - fired(b) ||
@@ -1023,6 +1108,7 @@ export class SentinelCycleService {
     suppressedTally: Record<string, number> = {},
     futile: FutilePass = { attempts: new Map(), tally: {} },
     ruleJobs: Array<Promise<JudgeOutcome>> = [],
+    openAlarms: ReadonlyMap<string, AlarmRow[]> = NO_ALARMS,
   ): Promise<JudgeCandidate | null> {
     const raw = await this.ticks.tickFor(entry.trackerId);
     const tick = withCashUnderlying(raw);
@@ -1239,8 +1325,10 @@ export class SentinelCycleService {
     // opened (or due its one final re-look) ⇒ a `square-off-due` fire, merged like a carried fire —
     // a NEW-risk fire the futile rule passes and a cap bypass. Null outside the window / when off.
     const sq = this.deadlineLookFor(entry, tick, last, now);
+    // Exit authority: an alarm fire is never carried — whether the forced look is owed is re-read every pass.
+    const carried = state.carriedFires.filter((f) => f.name !== ALARM_FIRE);
     const futiled = suppressFutileJudgements(
-      withCarriedFires(rejudged.decision, sq?.fire ? mergeFires(state.carriedFires, [sq.fire]) : state.carriedFires),
+      withCarriedFires(rejudged.decision, sq?.fire ? mergeFires(carried, [sq.fire]) : carried),
       confirm,
       cause,
       this.futileCfg,
@@ -1281,7 +1369,8 @@ export class SentinelCycleService {
           (gate?.facts.greenToRed ? '; greenToRed (peak was net-green, now at or below breakeven)' : ''),
       );
     }
-    const decision = gated ? gated.decision : futiled.decision;
+    // `let` only for the exit authority's forced alarm look below; otherwise assigned once, exactly as before.
+    let decision = gated ? gated.decision : futiled.decision;
 
     // FLOOR_HARD_EXIT (hard-floor.ts): a broken armed floor that has turned red, or with the underlying
     // K·N against the position from its best point, is an exit the judge is not asked about. Read on
@@ -1304,6 +1393,27 @@ export class SentinelCycleService {
     if (hard) {
       ruleJobs.push(this.recordHardFloorExit(entry, state, tickF, walls, capture.at, greenFloorArmedLatched, hard, now));
       return null;
+    }
+
+    // Exit authority — the FORCED ALARM LOOK (alarm-look.ts), modelled on the deadline look but injected AFTER
+    // every wake gate (re-judge, futile, the judge gate's rate cap), so none of them can drop it. Owed when the
+    // trade's lead open alarm was raised after the agent's last verdict, at most once per TRACKER_WAKE_MIN_GAP_MS
+    // (and one judgement in flight per position, below). The agent backoff still applies. The owner's hold list
+    // is untouched. Off / paper / no open alarm ⇒ no alarm row, and `decision` is exactly as before.
+    const alarmRow = this.authorityLive(entry) ? leadAlarm(openAlarms.get(entry.trackerId), now.getTime()) : null;
+    const holdList = this.gateCfg?.hold ?? this.futileCfg?.hold;
+    const alarmFire =
+      alarmRow && !(holdList && isHeldPosition(holdList, entry))
+        ? alarmLookFire(alarmRow, lastAgentVerdictMs(recent), state.alarmLookAt ?? null, now.getTime())
+        : null;
+    if (alarmFire) {
+      decision = withAlarmFire(decision, alarmFire);
+      const woke = this.alarmWakes.get(entry.trackerId);
+      this.alarmWakes.delete(entry.trackerId);
+      this.logger.log(
+        `[exit-authority] forced look owed — ${entry.symbol} (tracker ${entry.trackerId}): ${alarmFire.rule} alarm ${alarmFire.alarmId} is unanswered` +
+          (woke ? ` (woken: ${woke})` : ''),
+      );
     }
 
     if (!decision.shouldEvaluate) {
@@ -1360,6 +1470,9 @@ export class SentinelCycleService {
       return null;
     }
 
+    const authorityReview: Pick<PacketReview, 'authority'> | null = this.authorityLive(entry)
+      ? { authority: { alarm: alarmRow ? packetAlarm(alarmRow) : null, brief: null } }
+      : null;
     return {
       index,
       entry,
@@ -1373,8 +1486,11 @@ export class SentinelCycleService {
       lastJudgedAt: last ? new Date(last.createdAt).getTime() : null,
       rejudgeSnap,
       ...(gate ? { newsIds: gate.newsIds, g2r: gate.g2r } : {}),
-      // The packet's held marker / delta (gate on) and the deadline framing (inside the window).
-      ...(gate?.review || sq ? { review: { ...(gate?.review ?? {}), ...(sq ? { deadline: sq.decision } : {}) } } : {}),
+      // The packet's held marker / delta (gate on) and the deadline framing (inside the window); with the exit
+      // authority live, the alarm (or null) — the brief is read at judgement time (judgeAndRecord).
+      ...(gate?.review || sq || authorityReview
+        ? { review: { ...(gate?.review ?? {}), ...(sq ? { deadline: sq.decision } : {}), ...(authorityReview ?? {}) } }
+        : {}),
     };
   }
 
@@ -1471,25 +1587,43 @@ export class SentinelCycleService {
       if (!c.fire) return;
       const floor = loss.band === 'CAP' && cfg.cap !== null ? -cfg.cap : -cfg.limit;
       const detail = `net ₹${Math.round(green.netPnl)} reached the hard loss exit of ₹${-floor} at LTP ${q.ltp} — fast guard: the full look was stuck on a slow data call, so the underlying's move is unmeasured and the plain rule applies`;
-      await this.verdicts.record({
-        userId: entry.userId,
-        trackerId: entry.trackerId,
-        symbol: entry.symbol,
-        verdict: 'EXIT_NOW',
-        confidence: 'high',
-        thesisStatus: 'WEAKENING',
-        recoveryAvailable: true,
-        reason: `${FLOOR_HARD_EXIT_REASON_PREFIX} MAX_LOSS: ${detail}`.slice(0, 500),
-        evidence: ['position.ltp', 'money.netPnl'],
-        invalidationPoint: null,
-        reviewInSec: FLOOR_HARD_REFIRE_SEC,
-        packet: { fastGuard: { ltp: q.ltp, priceSource: q.source, entryPrice: q.entryPrice, qty: q.qty, side: q.side, netPnl: green.netPnl, limit: cfg.limit, at: now.toISOString() } } as never,
-        promptVersion: FLOOR_HARD_EXIT_STAMP,
-        triggeredBy: [FLOOR_HARD_EXIT_FIRE],
-        netPnl: green.netPnl,
-        greenFloor: null,
-      });
-      this.logger.warn(`[floor-hard-exit] EXIT_NOW recorded (fast guard) — ${entry.symbol} (tracker ${entry.trackerId}): MAX_LOSS: ${detail}`);
+      const reason = `${FLOOR_HARD_EXIT_REASON_PREFIX} MAX_LOSS: ${detail}`.slice(0, 500);
+      const outcome = await this.ruleExit(
+        entry,
+        'HARD_LOSS_FAST',
+        () =>
+          this.verdicts.record({
+            userId: entry.userId,
+            trackerId: entry.trackerId,
+            symbol: entry.symbol,
+            verdict: 'EXIT_NOW',
+            confidence: 'high',
+            thesisStatus: 'WEAKENING',
+            recoveryAvailable: true,
+            reason,
+            evidence: ['position.ltp', 'money.netPnl'],
+            invalidationPoint: null,
+            reviewInSec: FLOOR_HARD_REFIRE_SEC,
+            packet: { fastGuard: { ltp: q.ltp, priceSource: q.source, entryPrice: q.entryPrice, qty: q.qty, side: q.side, netPnl: green.netPnl, limit: cfg.limit, at: now.toISOString() } } as never,
+            promptVersion: FLOOR_HARD_EXIT_STAMP,
+            triggeredBy: [FLOOR_HARD_EXIT_FIRE],
+            netPnl: green.netPnl,
+            greenFloor: null,
+          }),
+        () => ({
+          userId: entry.userId,
+          trackerId: entry.trackerId,
+          symbol: entry.symbol,
+          rule: 'HARD_LOSS_FAST',
+          urgency: 'urgent',
+          reason: `MAX_LOSS: ${detail}`.slice(0, 500),
+          wouldHave: `EXIT_NOW ${reason}`.slice(0, 500),
+          severityN: null,
+          sourceRef: null,
+          payload: { limit: -floor, netPnl: green.netPnl, ltp: q.ltp, priceSource: q.source, band: loss.band ?? null },
+        }),
+      );
+      if (outcome === 'recorded') this.logger.warn(`[floor-hard-exit] EXIT_NOW recorded (fast guard) — ${entry.symbol} (tracker ${entry.trackerId}): MAX_LOSS: ${detail}`);
     } catch (err) {
       this.logger.error(`[hard-loss/fast] ${entry.symbol}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1631,25 +1765,51 @@ export class SentinelCycleService {
       }
       // Observe: a hold it WOULD have made is written on the verdict (the durable record); otherwise the reason is unchanged.
       const observed = check && !check.fire ? ` [exec-confirm observe: WOULD HOLD — ${execNote}]` : '';
-      await this.verdicts.record({
-        userId: entry.userId,
-        trackerId: entry.trackerId,
-        symbol: entry.symbol,
-        verdict: 'EXIT_NOW',
-        confidence: 'high',
-        thesisStatus: 'WEAKENING',
-        recoveryAvailable: true,
-        reason: `${FLOOR_HARD_EXIT_REASON_PREFIX} ${r.rule}: ${detail}${observed}`.slice(0, 500),
-        evidence: ['position.ltp', 'money.greenFloorPrice', 'money.greenFloorArmed', 'money.netPnl', 'money.anchors'],
-        invalidationPoint: null,
-        reviewInSec: FLOOR_HARD_REFIRE_SEC,
-        packet: packetAsJson(packet),
-        promptVersion: FLOOR_HARD_EXIT_STAMP,
-        triggeredBy: [FLOOR_HARD_EXIT_FIRE],
-        netPnl: packet.money.netPnl,
-        greenFloor: packet.money.greenFloorPrice,
-      });
-      this.logger.warn(`[floor-hard-exit] EXIT_NOW recorded — ${entry.symbol} (tracker ${entry.trackerId}): ${r.rule}: ${detail}`);
+      const reason = `${FLOOR_HARD_EXIT_REASON_PREFIX} ${r.rule}: ${detail}${observed}`.slice(0, 500);
+      // Exit authority: MAX_LOSS is the hard loss (urgent); every other floor rule is FLOOR (normal).
+      const hardLoss = r.rule === 'MAX_LOSS';
+      const outcome = await this.ruleExit(
+        entry,
+        hardLoss ? 'HARD_LOSS' : 'FLOOR',
+        () =>
+          this.verdicts.record({
+            userId: entry.userId,
+            trackerId: entry.trackerId,
+            symbol: entry.symbol,
+            verdict: 'EXIT_NOW',
+            confidence: 'high',
+            thesisStatus: 'WEAKENING',
+            recoveryAvailable: true,
+            reason,
+            evidence: ['position.ltp', 'money.greenFloorPrice', 'money.greenFloorArmed', 'money.netPnl', 'money.anchors'],
+            invalidationPoint: null,
+            reviewInSec: FLOOR_HARD_REFIRE_SEC,
+            packet: packetAsJson(packet),
+            promptVersion: FLOOR_HARD_EXIT_STAMP,
+            triggeredBy: [FLOOR_HARD_EXIT_FIRE],
+            netPnl: packet.money.netPnl,
+            greenFloor: packet.money.greenFloorPrice,
+          }),
+        () => ({
+          userId: entry.userId,
+          trackerId: entry.trackerId,
+          symbol: entry.symbol,
+          rule: hardLoss ? 'HARD_LOSS' : 'FLOOR',
+          urgency: hardLoss ? 'urgent' : 'normal',
+          reason: `${r.rule}: ${detail}${observed}`.slice(0, 500),
+          wouldHave: `EXIT_NOW ${reason}`.slice(0, 500),
+          severityN: finiteOrNull(hardLoss ? loss?.adverseN : r.adverseFromBestN),
+          sourceRef: null,
+          payload: {
+            ruleDetail: r.rule,
+            netPnl: hard.netPnl,
+            ...(hardLoss ? { limit: -hard.floor, band: loss?.band ?? null } : { floor: hard.floor }),
+            ltp: tick.ltp,
+            underlyingLtp: tick.underlyingLtp,
+          },
+        }),
+      );
+      if (outcome === 'recorded') this.logger.warn(`[floor-hard-exit] EXIT_NOW recorded — ${entry.symbol} (tracker ${entry.trackerId}): ${r.rule}: ${detail}`);
       return 'evaluated';
     } catch (err) {
       if (state.hardFloor) state.hardFloor = { ...state.hardFloor, firedAt: null };
@@ -1830,25 +1990,43 @@ export class SentinelCycleService {
         );
       }
       const observed = check && !check.fire ? ` [exec-confirm observe: WOULD HOLD — ${execNote}]` : '';
-      await this.verdicts.record({
-        userId: entry.userId,
-        trackerId: entry.trackerId,
-        symbol: entry.symbol,
-        verdict: 'EXIT_NOW',
-        confidence: 'high',
-        thesisStatus: 'INTACT',
-        recoveryAvailable: false,
-        reason: `${TARGET_LADDER_REASON_PREFIX} ${rule}: ${reading.detail}${observed}`.slice(0, 500),
-        evidence: ['position.ltp', 'money.ladder'],
-        invalidationPoint: null,
-        reviewInSec: FLOOR_HARD_REFIRE_SEC,
-        packet: packetAsJson(packet),
-        promptVersion: TARGET_LADDER_STAMP,
-        triggeredBy: [TARGET_LADDER_FIRE],
-        netPnl: packet.money.netPnl,
-        greenFloor: packet.money.greenFloorPrice,
-      });
-      this.logger.warn(`[target-ladder] EXIT_NOW recorded — ${entry.symbol} (tracker ${entry.trackerId}): ${rule}: ${reading.detail}`);
+      const reason = `${TARGET_LADDER_REASON_PREFIX} ${rule}: ${reading.detail}${observed}`.slice(0, 500);
+      const outcome = await this.ruleExit(
+        entry,
+        'LADDER',
+        () =>
+          this.verdicts.record({
+            userId: entry.userId,
+            trackerId: entry.trackerId,
+            symbol: entry.symbol,
+            verdict: 'EXIT_NOW',
+            confidence: 'high',
+            thesisStatus: 'INTACT',
+            recoveryAvailable: false,
+            reason,
+            evidence: ['position.ltp', 'money.ladder'],
+            invalidationPoint: null,
+            reviewInSec: FLOOR_HARD_REFIRE_SEC,
+            packet: packetAsJson(packet),
+            promptVersion: TARGET_LADDER_STAMP,
+            triggeredBy: [TARGET_LADDER_FIRE],
+            netPnl: packet.money.netPnl,
+            greenFloor: packet.money.greenFloorPrice,
+          }),
+        () => ({
+          userId: entry.userId,
+          trackerId: entry.trackerId,
+          symbol: entry.symbol,
+          rule: 'LADDER',
+          urgency: 'normal',
+          reason: `${rule}: ${reading.detail}${observed}`.slice(0, 500),
+          wouldHave: `EXIT_NOW ${reason}`.slice(0, 500),
+          severityN: null,
+          sourceRef: null,
+          payload: { ruleDetail: rule, stop, stage: reading.stage, netPnl: packet.money.netPnl, ltp: tick.ltp },
+        }),
+      );
+      if (outcome === 'recorded') this.logger.warn(`[target-ladder] EXIT_NOW recorded — ${entry.symbol} (tracker ${entry.trackerId}): ${rule}: ${reading.detail}`);
       return 'evaluated';
     } catch (err) {
       if (state.ladder?.confirm) state.ladder.confirm = { ...state.ladder.confirm, firedAt: null };
@@ -2103,6 +2281,8 @@ export class SentinelCycleService {
     // Whatever was carried is in `c.decision.fires` now; it has been delivered.
     state.carriedFires = [];
     state.wantedSince = null;
+    // Exit authority: the forced alarm look is dispatched — the next one waits TRACKER_WAKE_MIN_GAP_MS.
+    if (c.decision.fires.some((f) => f.name === ALARM_FIRE)) state.alarmLookAt = now.getTime();
 
     const job = this.judgeDetached(
       entry,
@@ -2309,6 +2489,8 @@ export class SentinelCycleService {
   ): Promise<void> {
     const thesis = await this.thesisFor(entry, state, tick, now);
     progress.stage = 'packet';
+    // Exit authority (live trackers, authority live): the supreme's brief, read at judgement time. Never throws.
+    if (review?.authority) review = { ...review, authority: { ...review.authority, brief: await this.briefFor(entry) } };
 
     const packetTick = {
       ...tick,
@@ -2745,6 +2927,8 @@ type SentinelVerdictLike = {
   triggeredBy?: unknown;
   packet?: unknown;
   exitTrigger?: unknown;
+  /** Exit authority: tells the agent's own verdicts from `rule:` stamps (alarm-look.ts lastAgentVerdictMs). */
+  promptVersion?: string | null;
 };
 
 /** Cap bypasses worth one log line each when they let a wake through (2026-10-29 additions). */
@@ -2753,6 +2937,22 @@ const LOGGED_BYPASSES: ReadonlySet<CapBypass> = new Set<CapBypass>(['square-off-
 /** How one detached judgement ended, as the report bucket it lands in. */
 /** 'skipped': a rule exit held by the executable-price confirm (FLOOR_EXEC_PRICE_CONFIRM=act) — no verdict written. */
 type JudgeOutcome = 'evaluated' | 'failed' | 'skipped';
+
+/** Exit authority: no open alarms (the authority off, or nothing open). */
+const NO_ALARMS: ReadonlyMap<string, AlarmRow[]> = new Map();
+
+/** A finite number, else null. */
+const finiteOrNull = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null);
+
+/**
+ * Exit authority: the forced alarm look folded into this pass's decision — the `alarm` fire added (first, so it
+ * leads the packet's trigger list), a judgement wanted, at the FIRE tier. Applied after every wake gate, so
+ * none of them can drop it. `null` ⇒ the decision unchanged (the same object).
+ */
+export function withAlarmFire(decision: TripwireResult, fire: AlarmFire | null): TripwireResult {
+  if (!fire) return decision;
+  return { ...decision, fires: mergeFires([fire], decision.fires), shouldEvaluate: true, trigger: 'FIRE' };
+}
 
 /** `a` plus whichever of `b` it does not already name, first occurrence kept. */
 function mergeFires(a: TripwireFire[], b: TripwireFire[]): TripwireFire[] {

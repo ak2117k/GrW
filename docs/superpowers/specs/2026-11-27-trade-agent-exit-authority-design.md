@@ -183,3 +183,56 @@ alert (trade, P&L, the resting order, the agent's reason) with **Exit** (owner p
 ## 8. Left to the builder
 Alarm table shape, the per-tracker wake mechanics, prompt wording for alarms/brief/confirm, Telegram
 bot transport (webhook vs polling), how alarms map onto existing verdict/execution rows, test layout.
+
+## 9. Runbook (switch on, verify, roll back)
+
+Push = deploy. Push only with the owner's OK, and never while an open-position decision is pending.
+The deploy applies the migration `202611272000_trade_agent_authority` (tables `trade_alarms` and
+`trade_briefs`), which is expand-only. With the flag `off`, the new code changes nothing.
+
+### 9.1 Before switching on
+1. **Recreate the agent containers with the new image** (`grw-agents-trading/reading/background`). API deploys
+   do not recreate them. `config/ai-agents.json` now routes job `desk.confirm` to the trading agent (30 s).
+   An old agent image routes it to background and answers `WrongAgent`. Every supreme confirm would then come
+   back `ERROR`, and the agent's EXIT would stand without the supreme's check.
+   `cd /opt/grw && GRW_API_TAG=$(cat state/current_sha) docker compose -f app/deploy/docker-compose.prod.yml --env-file env/compose.env --profile agents up -d --no-deps grw-agents-trading grw-agents-reading grw-agents-background`
+2. `FLOOR_BROKER_SL` must be `shadow` (prod today) or `off`. If it is `live` under authority live, it is
+   forced to shadow and the boot logs an ERROR.
+3. The backstops (hard loss, broker deadline) sell only for accounts in `AI_AUTO_EXIT_ENABLED=true` +
+   `AI_AUTO_EXIT_USER_IDS`, as the executor does today. For any other account they are refused, the owner is
+   told, and the exit is retried every 15 s. The owner's Telegram **Exit** and the supreme's exit are not
+   restricted, as today.
+4. Telegram: the alert bot must have no webhook and no other poller. The API long-polls `getUpdates` for
+   the buttons, and a second consumer gets HTTP 409.
+
+### 9.2 Env (`/opt/grw/env/api.env`, never in git, never logged)
+| Var | Value |
+|---|---|
+| `TRADE_AGENT_AUTHORITY` | `live` (anything else = off) |
+| `TELEGRAM_ALERT_BOT_TOKEN` | the alert bot token (required for live) |
+| `TELEGRAM_ALERT_CHAT_ID` | the owner's chat id (required for live; taps from any other chat are refused) |
+| `TELEGRAM_ALERT_OWNER_USER_ID` | optional. The owner's Telegram user id. Set it if the chat is a group; unset, taps are obeyed only in a private chat |
+| `ANTHROPIC_API_KEY` | optional. Adds the paid API as the last failover route (`vertex → cli → api`) |
+| `AI_FAILOVER` / `AI_FAILOVER_CHAIN` | optional. Failover defaults to on when the authority is live, with chain `vertex,cli` (+`api` with a key) |
+
+Then recreate the API so it picks up the env:
+`cd /opt/grw && GRW_API_TAG=$(cat state/current_sha) docker compose -f app/deploy/docker-compose.prod.yml --env-file env/compose.env up -d --no-deps api`
+
+### 9.3 Verify on prod
+1. Boot log (`docker logs grw-api 2>&1 | grep exit-authority`):
+   - `[exit-authority] authority live: Telegram test message sent; trade agents hold live exit authority`
+   - `[exit-authority] ports bound: TRACKER_WAKE, SUPREME_CONFIRM, HARD_LOSS_PROBE, OWNER_EXIT, AI_HEALTH`
+   - none of: `TRADE_AGENT_AUTHORITY=live refused: …`, `… is not bound in this process`, an
+     `ExecutorAuthorityBootCheck` ERROR.
+2. The owner's Telegram chat received the boot check message: "GrW exit authority: TRADE_AGENT_AUTHORITY=live boot
+   check. …".
+3. When a code rule fires on a live trade, `trade_alarms` gets rows and no rule EXIT_NOW is written:
+   `SELECT rule, urgency, status, symbol, raised_at, answer FROM trade_alarms ORDER BY raised_at DESC LIMIT 20;`
+   Each alarm is answered by an agent verdict (`status ANSWERED`, `answer`). An alarm left unanswered reaches
+   Telegram with **Exit / Hold** after 2 min (60 s urgent). Agent exits show the supreme's
+   `desk_manager_decisions` row (action `CONFIRM`) before the executor row.
+
+### 9.4 Roll back
+Set `TRADE_AGENT_AUTHORITY=off` in `api.env` and recreate the API (the command in 9.2). Off restores today's
+behaviour: rule sellers act as before, no alarms are raised, nothing escalates, and the legacy close paths are
+unchanged. The tables stay and are inert. The agent containers can stay on the new image.

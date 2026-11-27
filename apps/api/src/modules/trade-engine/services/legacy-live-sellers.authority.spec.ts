@@ -30,6 +30,7 @@ function harness(authority: AuthorityStatePort | undefined, isPaperTrade = false
   const broker = {
     placeOrder: jest.fn(async () => ({ orderId: 'o-close', status: 'COMPLETE' })),
     getLiveQuote: jest.fn(async () => ({ ltp: 95 })),
+    getPositions: jest.fn(async (): Promise<unknown[]> => [{ symbol: 'NIFTY27NOV24000CE', exchange: 'NFO', side: 'BUY', quantity: 50, averagePrice: 100, ltp: 95, pnl: -250 }]),
   };
   const paper = { simulateOrder: jest.fn(async () => ({ orderId: 'p1', status: 'FILLED', fillPrice: 95, message: 'ok' })), applyExitAccounting: jest.fn() };
   const risk = { activateKillSwitch: jest.fn(), getDailyRiskStatus: jest.fn(async () => ({})) };
@@ -75,10 +76,46 @@ describe('legacy live closeTrade under TRADE_AGENT_AUTHORITY', () => {
     expect(h.trades.t1.status).toBe('CLOSED');
   });
 
-  it('live: the kill switch still closes every live trade', async () => {
+  it('live: the kill switch still closes every live trade whose broker position is open', async () => {
     const h = harness(LIVE);
     const r = await h.svc.closeAllPositions('max daily loss');
     expect(r.closed).toBe(1);
+    expect(h.broker.getPositions).toHaveBeenCalledTimes(1);
+    expect(h.broker.placeOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it('live: the kill switch SKIPS a stale live trades row whose broker position is flat (never sells an already-flat position)', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const h = harness(LIVE);
+    h.broker.getPositions.mockResolvedValueOnce([{ symbol: 'NIFTY27NOV24000CE', exchange: 'NFO', side: 'BUY', quantity: 0, averagePrice: 100, ltp: 95, pnl: 0 }]);
+    const r = await h.svc.closeAllPositions('max daily loss');
+    expect(r.closed).toBe(0);
+    expect(h.broker.placeOrder).not.toHaveBeenCalled();
+    expect(h.trades.t1.status).toBe('OPEN');
+    expect(warn.mock.calls.some(([m]) => String(m).includes('flat at the broker'))).toBe(true);
+  });
+
+  it('live: the broker position check failing → the live row is skipped with an ERROR, not sold blind', async () => {
+    const h = harness(LIVE);
+    h.broker.getPositions.mockRejectedValueOnce(new Error('AG8001 Invalid Token'));
+    const r = await h.svc.closeAllPositions('max daily loss');
+    expect(r.closed).toBe(0);
+    expect(h.broker.placeOrder).not.toHaveBeenCalled();
+    expect(errors.mock.calls.some(([m]) => String(m).includes('SKIPPED, not sold blind'))).toBe(true);
+  });
+
+  it('live: a PAPER trade is closed by the kill switch with no broker read', async () => {
+    const h = harness(LIVE, true);
+    const r = await h.svc.closeAllPositions('max daily loss');
+    expect(r.closed).toBe(1);
+    expect(h.broker.getPositions).not.toHaveBeenCalled();
+  });
+
+  it.each([['off', OFF], ['port absent', undefined]] as const)('%s: the kill switch closes the live trade as today (no broker position read)', async (_n, authority) => {
+    const h = harness(authority);
+    const r = await h.svc.closeAllPositions('max daily loss');
+    expect(r.closed).toBe(1);
+    expect(h.broker.getPositions).not.toHaveBeenCalled();
     expect(h.broker.placeOrder).toHaveBeenCalledTimes(1);
   });
 

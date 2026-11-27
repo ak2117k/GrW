@@ -40,6 +40,9 @@ import { AUTHORITY_STATE, type AuthorityStatePort } from '../../exit-authority/e
 /** The log line (and error text) of a legacy live close refused under TRADE_AGENT_AUTHORITY=live. */
 export const LEGACY_LIVE_CLOSE_REFUSED = '[exit-authority] legacy live close refused';
 
+const positionKey = (exchange: string | null | undefined, symbol: string | null | undefined): string =>
+  `${String(exchange ?? '').trim().toUpperCase()}:${String(symbol ?? '').trim().toUpperCase()}`;
+
 /**
  * Strip an option/futures suffix to recover the underlying symbol.
  * "NIFTY24APR22500CE" → "NIFTY", "BANKNIFTY24APR45000PE" → "BANKNIFTY".
@@ -80,6 +83,14 @@ export class TradeExecutionService {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * TRADE_AGENT_AUTHORITY=live: closeTrade refuses a non-owner close of a LIVE trade (LEGACY_LIVE_CLOSE_REFUSED). Legacy
+   * callers (watch-monitor) ask first so they keep their own state open instead of marking a still-open position closed.
+   */
+  legacyLiveCloseRefused(): boolean {
+    return this.authorityLive();
   }
 
   /**
@@ -730,9 +741,27 @@ export class TradeExecutionService {
     // Close every open trade
     const openTrades = await this.tradeRepository.getOpenTrades();
     let closed = 0;
+    // TRADE_AGENT_AUTHORITY=live: a LIVE trades row may be stale (its position already closed by the trade agent's
+    // exit, which does not close the legacy row), and a blind MARKET close would then OPEN a reverse position. The
+    // broker position is checked first; a row whose position is flat is skipped, and if the check fails the row is
+    // skipped with an ERROR (never sold blind). Off: exactly as before (no broker read).
+    let brokerOpen: Set<string> | null | undefined;
 
     for (const trade of openTrades) {
       try {
+        if (!trade.isPaperTrade && this.authorityLive()) {
+          if (brokerOpen === undefined) brokerOpen = await this.brokerOpenPositions();
+          const inst = (trade as { instrument?: { symbol?: string; exchange?: string } }).instrument;
+          const key = positionKey(inst?.exchange, inst?.symbol);
+          if (brokerOpen === null) {
+            this.logger.error(`[exit-authority] kill switch: broker positions unreadable — live trade ${trade.id} (${inst?.symbol ?? '?'}) SKIPPED, not sold blind; check it at the broker`);
+            continue;
+          }
+          if (!brokerOpen.has(key)) {
+            this.logger.warn(`[exit-authority] kill switch: live trade ${trade.id} (${inst?.symbol ?? '?'}) is flat at the broker — skipped (stale row), nothing sold`);
+            continue;
+          }
+        }
         await this.closeTrade(trade.id, { reason: `Kill switch: ${reason}`, ownerAction: true });
         closed++;
       } catch (error) {
@@ -751,6 +780,19 @@ export class TradeExecutionService {
     this.tradeGateway.emitRiskStatus(riskStatus);
 
     return { closed };
+  }
+
+  /** `EXCHANGE:SYMBOL` of every non-zero broker position, or null when the read fails / no broker is configured. */
+  private async brokerOpenPositions(): Promise<Set<string> | null> {
+    if (!this.brokerAdapter) return null;
+    try {
+      const rows = await this.brokerAdapter.getPositions();
+      if (!Array.isArray(rows)) return null;
+      return new Set(rows.filter((p) => Number(p?.quantity) !== 0 && Number.isFinite(Number(p?.quantity))).map((p) => positionKey(p.exchange, p.symbol)));
+    } catch (err) {
+      this.logger.error(`[exit-authority] kill switch: broker positions read failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
   }
 
   /**

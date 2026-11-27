@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
+import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { parseAuthorityMode } from '../exit-authority.config';
 import type { AuthorityStatePort } from '../exit-authority.tokens';
 import { TelegramBotClient } from '../telegram/telegram-bot.client';
@@ -47,6 +48,14 @@ export class AuthorityStateService implements AuthorityStatePort, OnModuleInit {
     if (mode !== 'live') {
       this.live = false;
       this.log.log(`${LOG_PREFIX} TRADE_AGENT_AUTHORITY=off: rule sellers act as today, no alarms, no owner escalation`);
+      return;
+    }
+    // A BOOT_JOBS=false process (a one-shot script booting the Nest context) never holds the authority: no Telegram
+    // test message on every script run, and isLive() stays false (the escalation runner and button poller do not run
+    // there either). Only the serving API process (boot jobs on) can go live.
+    if (!bootJobsEnabled()) {
+      this.live = false;
+      this.log.log(`${LOG_PREFIX} TRADE_AGENT_AUTHORITY=live requested, but BOOT_JOBS=false (script process): authority off here, no boot check sent`);
       return;
     }
     if (!(env.TELEGRAM_ALERT_BOT_TOKEN ?? '').trim()) return this.refuse('TELEGRAM_ALERT_BOT_TOKEN missing');

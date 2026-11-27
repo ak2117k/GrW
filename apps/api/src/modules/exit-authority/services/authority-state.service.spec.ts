@@ -59,6 +59,33 @@ describe('AuthorityStateService (boot check)', () => {
     expect(String(errorSpy.mock.calls[0][0])).toMatch(/TRADE_AGENT_AUTHORITY=live refused: Telegram test message failed/);
   });
 
+  describe('BOOT_JOBS=false (a script booting the Nest context)', () => {
+    const prev = process.env.BOOT_JOBS;
+    afterEach(() => {
+      if (prev === undefined) delete process.env.BOOT_JOBS;
+      else process.env.BOOT_JOBS = prev;
+    });
+
+    it('live fully configured → never sends the Telegram test message and isLive() stays false', async () => {
+      process.env.BOOT_JOBS = 'false';
+      const { svc, send } = setup(FULL);
+      svc.onModuleInit();
+      await svc.ready;
+      expect(send).not.toHaveBeenCalled();
+      expect(svc.isLive()).toBe(false);
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('BOOT_JOBS unset (the API server) → the boot check runs as before', async () => {
+      delete process.env.BOOT_JOBS;
+      const { svc, send } = setup(FULL);
+      svc.onModuleInit();
+      await svc.ready;
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(svc.isLive()).toBe(true);
+    });
+  });
+
   it.each([{}, { TRADE_AGENT_AUTHORITY: 'off' }, { TRADE_AGENT_AUTHORITY: 'yes' }])(
     'off (%j) → false, and no send is attempted',
     async (env) => {

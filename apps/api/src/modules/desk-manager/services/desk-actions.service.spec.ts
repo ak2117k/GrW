@@ -144,10 +144,21 @@ describe('DeskActionsService OPEN', () => {
     expect(t.moduleRef.get).toHaveBeenCalledWith(DESK_RUNNER_HEALTH, { strict: false });
   });
 
-  it('refuses a HOLD-list underlying', async () => {
+  it('refuses an underlying the owner put on the HOLD list by name', async () => {
     const t = setup();
-    const svc = new DeskActionsService(t.cfg, parseSignalTraderConfig({}), t.store as never, t.market, { place: t.place } as never, t.paper as never, { ltp: async () => 100 }, undefined, t.guard, t.exits, undefined, undefined, { ...ENV, AI_AUTO_EXIT_HOLD: 'NIFTY02DEC2626000PE' });
+    const svc = new DeskActionsService(t.cfg, parseSignalTraderConfig({}), t.store as never, t.market, { place: t.place } as never, t.paper as never, { ltp: async () => 100 }, undefined, t.guard, t.exits, undefined, undefined, { ...ENV, AI_AUTO_EXIT_HOLD: 'BSE,NIFTY' });
     expect((await svc.execute(open(), t.ctx())).detail).toContain('hold list');
+  });
+
+  it('a held CONTRACT blocks only while it is an open position (2026-11-27: expired NIFTY09NOV2624300CE blocked every NIFTY open)', async () => {
+    const env = { ...ENV, AI_AUTO_EXIT_HOLD: 'NIFTY09NOV2624300CE,MAZDOCK29DEC261760PE' };
+    const closed = setup();
+    const svc = new DeskActionsService(closed.cfg, parseSignalTraderConfig({}), closed.store as never, closed.market, { place: closed.place } as never, closed.paper as never, { ltp: async () => 100 }, undefined, closed.guard, closed.exits, undefined, undefined, env);
+    expect((await svc.execute(open(), closed.ctx())).detail ?? '').not.toContain('hold list');
+    // Still open → the open-position rule refuses it (one position per underlying).
+    const held = setup({ busy: new Map([['NIFTY', 'open position NIFTY02DEC2626000PE (tracker k9)']]) });
+    const svc2 = new DeskActionsService(held.cfg, parseSignalTraderConfig({}), held.store as never, held.market, { place: held.place } as never, held.paper as never, { ltp: async () => 100 }, undefined, held.guard, held.exits, undefined, undefined, env);
+    expect((await svc2.execute(open(), held.ctx())).detail).toContain('already has open position');
   });
 
   it('refuses when the 1-lot loss is above the class ceiling (never shrunk)', async () => {

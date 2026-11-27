@@ -74,13 +74,16 @@ function holdList(env: Env): string[] {
     .filter(Boolean);
 }
 
-/** A hold-list entry names this underlying: the name itself, or a contract symbol that starts with it and a digit. */
+/**
+ * The hold-list entry that bars NEW entries on this underlying: only the bare underlying name ("NIFTY"), the
+ * owner's explicit "do not trade it". A held CONTRACT protects that one position; while it is open the
+ * one-position-per-underlying rule (busyUnderlyings) already refuses the OPEN, and once it is closed or expired it
+ * must not bar the underlying forever (2026-11-27: NIFTY09NOV2624300CE, expired 18 days earlier, refused every
+ * manager NIFTY open).
+ */
 function holdNames(hold: readonly string[], underlying: string): string | null {
   const u = up(underlying);
-  for (const h of hold) {
-    if (h === u) return h;
-    if (h.startsWith(u) && /\d/.test(h.charAt(u.length))) return h;
-  }
+  for (const h of hold) if (h === u) return h;
   return null;
 }
 

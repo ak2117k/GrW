@@ -49,11 +49,11 @@ function harness(rows: DecisionRow[], opts: { tracker?: Record<string, unknown> 
     },
     trade: { findUnique: jest.fn(async () => null) },
     deskManagerRun: { findUnique: jest.fn(async () => null) },
-    deskGuardEvent: { findMany: jest.fn(async () => []) },
+    deskGuardEvent: { findMany: jest.fn(async (_args?: unknown) => [] as unknown[]) },
   };
   const market: jest.Mocked<DeskGradeMarket> = {
-    underlyingRef: jest.fn(async () => ({ exchange: 'NSE', token: '99926000', symbol: 'Nifty 50' })),
-    bars15m: jest.fn(async () => {
+    underlyingRef: jest.fn(async (_u: string, _n: Date) => ({ exchange: 'NSE', token: '99926000', symbol: 'Nifty 50' })),
+    bars15m: jest.fn(async (_r: Parameters<DeskGradeMarket['bars15m']>[0], _f: Date, _n: Date) => {
       if (opts.bars instanceof Error) throw opts.bars;
       return opts.bars ?? [...flat('10:00', '10:30', 24040), ...flat('10:30', '10:45', 24105), ...flat('10:45', '12:00', 24080)];
     }),
@@ -148,7 +148,7 @@ describe('DeskGradeCron', () => {
     const h = harness([decision({ id: 'p1', action: 'PAUSE_ENTRIES', orderRowId: null, payload: { action: 'PAUSE_ENTRIES', scope: 'all', minutes: 30 }, createdAt: IST('11:00') })]);
     h.prisma.deskGuardEvent.findMany.mockResolvedValueOnce([{ at: IST('11:10'), reasons: ['paused all'] }] as never);
     await h.cron.grade(NIGHT);
-    expect(h.prisma.deskGuardEvent.findMany.mock.calls[0][0]).toMatchObject({ where: { userId: 'u1', blocked: true, at: { gte: IST('11:00'), lt: IST('11:30') } } });
+    expect((h.prisma.deskGuardEvent.findMany.mock.calls[0] as unknown[])[0]).toMatchObject({ where: { userId: 'u1', blocked: true, at: { gte: IST('11:00'), lt: IST('11:30') } } });
     expect(h.rows[0].grade).toMatchObject({ kind: 'PAUSE', blocked: 1 });
   });
 });

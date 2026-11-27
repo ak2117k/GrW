@@ -1,5 +1,5 @@
 import type { Bar15m } from '../../ai-setups/domain/setup-watch';
-import { DeskMarketAdapter, nextBarReadyAt } from './desk-market.adapter';
+import { DeskMarketAdapter, liveFeedGate, nextBarReadyAt } from './desk-market.adapter';
 
 const MIN = 60_000;
 // 2026-11-27 11:10:00 IST = 05:40:00Z (a 15m close was 11:00 IST, the next is 11:15 IST).
@@ -97,5 +97,83 @@ describe('DeskMarketAdapter 15m bars (straight from Angel, one fetch per closed 
     const day = await a.day('NIFTY', new Date(T0));
     expect(day?.high).toBe(101);
     expect(await a.trend15m('NIFTY', new Date(T0))).not.toContain('999');
+  });
+});
+
+/** Session 1-minute bars (NSE 09:15–15:30 IST) every minute from 11-26 09:15 IST up to (not including) `until`. */
+function onesUntil(until: number, close = (i: number) => 25600 + i * 0.05) {
+  const out: Array<{ ts: number; open: number; high: number; low: number; close: number }> = [];
+  let i = 0;
+  for (let ts = Date.parse('2026-11-26T03:45:00Z'); ts < until; ts += MIN) {
+    const m = ((((ts + 330 * MIN) % 86_400_000) + 86_400_000) % 86_400_000) / MIN;
+    if (m < 555 || m >= 930) continue;
+    const c = close(i++);
+    out.push({ ts, open: c, high: c + 1, low: c - 1, close: c });
+  }
+  return out;
+}
+
+describe('liveFeedGate (Angel live-feed bars, trusted only when they check out)', () => {
+  const ones = onesUntil(T0);
+  const ltp = ones[ones.length - 1].close;
+
+  it('passes fresh, complete bars that agree with the live price', () => {
+    const v = liveFeedGate(ones, 'NSE', T0, ltp);
+    expect(v.ok).toBe(true);
+    if (v.ok) expect(v.bars.every((b) => (b.ts - Date.parse('2026-11-26T03:45:00Z')) % (15 * MIN) === 0)).toBe(true);
+  });
+
+  it('rejects a frozen line while the venue is open (newest bar > 3 min old)', () => {
+    const v = liveFeedGate(onesUntil(T0 - 10 * MIN), 'NSE', T0, ltp);
+    expect(v).toMatchObject({ ok: false, reason: 'live feed stale' });
+  });
+
+  it('rejects when the bars disagree with the live price or there is no live price', () => {
+    expect(liveFeedGate(ones, 'NSE', T0, ltp * 1.01)).toMatchObject({ ok: false });
+    expect(liveFeedGate(ones, 'NSE', T0, null)).toMatchObject({ ok: false, reason: 'no live price to verify against' });
+  });
+
+  it('rejects a last 15m bar built from a gappy minute record', () => {
+    // At 11:10 IST the last closed NSE bucket is 10:45–11:00; drop 10:40–10:50 so it holds only 10 minutes.
+    const gappy = ones.filter((b) => !(b.ts >= Date.parse('2026-11-27T05:10:00Z') && b.ts < Date.parse('2026-11-27T05:20:00Z')));
+    expect(liveFeedGate(gappy, 'NSE', T0, ltp)).toMatchObject({ ok: false, reason: 'last 15m bar built from 10/15 minutes' });
+  });
+
+  it('rejects when there are too few closed 15m bars for the trend', () => {
+    const recent = ones.filter((b) => b.ts >= Date.parse('2026-11-27T03:45:00Z'));
+    expect(liveFeedGate(recent, 'NSE', T0, ltp)).toMatchObject({ ok: false, reason: expect.stringMatching(/closed 15m bars/) });
+  });
+});
+
+describe('DeskMarketAdapter prefers the live feed over the historical API', () => {
+  function makeLive(rows: ReturnType<typeof onesUntil>, ltp: number | null) {
+    const market = {
+      underlyingRef: jest.fn(async () => ref),
+      ltps: jest.fn(async () => new Map<string, number>(ltp === null ? [] : [[`NSE:${ref.token}`, ltp]])),
+      bars15m: jest.fn(async () => barsUntil(T0)),
+      master: jest.fn(async () => null),
+      isOpen: jest.fn(() => true),
+      minutesToClose: jest.fn(() => 60),
+    };
+    const prisma = { $queryRaw: jest.fn(async () => rows.map((r) => ({ ...r, ts: new Date(r.ts), volume: 0 }))) };
+    const a = new DeskMarketAdapter(market as never, { getLevels: () => null } as never, prisma as never);
+    a.clock = () => T0;
+    return { a, market, prisma };
+  }
+
+  it('good live-feed bars → no historical call; trend and day come from the feed', async () => {
+    const rows = onesUntil(T0);
+    const { a, market } = makeLive(rows, rows[rows.length - 1].close);
+    expect(await a.trend15m('NIFTY', new Date(T0))).toMatch(/^UP \(15m close/);
+    const day = await a.day('NIFTY', new Date(T0));
+    expect(day?.open).toBe(rows.find((r) => r.ts >= Date.parse('2026-11-27T03:45:00Z'))!.open);
+    expect(market.bars15m).not.toHaveBeenCalled();
+  });
+
+  it('live-feed bars that fail the gate → the Angel historical API, as before', async () => {
+    const rows = onesUntil(T0);
+    const { a, market } = makeLive(rows, null);
+    await a.trend15m('NIFTY', new Date(T0));
+    expect(market.bars15m).toHaveBeenCalledTimes(1);
   });
 });

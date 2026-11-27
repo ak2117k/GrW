@@ -4,6 +4,7 @@ import { SETUP_WATCH_MARKET, type SetupWatchMarket, type WatchRef } from '../../
 import type { Bar15m } from '../../ai-setups/domain/setup-watch';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import type { DeskMarketPort } from '../services/desk-state.service';
+import { inVenueSession, rollToSessionBuckets, sessionOnlyBars, type OhlcBar } from '../../exit-discipline/session-bars';
 
 const MIN = 60_000;
 const BAR_MS = 15 * MIN;
@@ -56,6 +57,40 @@ const RETRY_EMPTY_MS = 60_000;
  */
 export function nextBarReadyAt(t: number): number {
   return Math.floor((t - PUBLISH_GRACE_MS) / BAR_MS) * BAR_MS + BAR_MS + PUBLISH_GRACE_MS;
+}
+
+/** Live-feed bars are trusted only while the newest 1m bar ENDED within this of now (venue open). */
+const LIVE_STALE_MS = 3 * MIN;
+/** …and its close is within this fraction of Angel's live price. */
+const LIVE_LTP_TOLERANCE = 0.005;
+/** …and the last closed 15m bucket holds at least this many of its 15 minutes. */
+const LIVE_MIN_MINUTES = 12;
+
+/**
+ * Should the desk trust the live-feed 15m bars? Every check must pass, else the caller asks Angel's historical
+ * API: (1) the newest session bar is fresh while the venue is open (a frozen line = 11-03 crude stuck at 9218);
+ * (2) its close agrees with Angel's live price (no live price = cannot verify = no); (3) the last closed 15m
+ * bucket is near complete (no gap-built bars); (4) at least EMA_LEN closed buckets, enough for the trend.
+ * `ones` are SESSION 1-minute bars; the returned 15m bars include the forming one (callers keep closed only).
+ */
+export function liveFeedGate(
+  ones: readonly OhlcBar[],
+  exchange: string,
+  t: number,
+  ltp: number | null,
+): { ok: true; bars: Bar15m[] } | { ok: false; reason: string } {
+  if (ones.length === 0) return { ok: false, reason: 'no live-feed bars' };
+  const newest = ones.reduce((a, b) => (b.ts > a.ts ? b : a));
+  if (inVenueSession(t, exchange) && t - (newest.ts + MIN) > LIVE_STALE_MS) return { ok: false, reason: 'live feed stale' };
+  if (ltp === null || !(ltp > 0)) return { ok: false, reason: 'no live price to verify against' };
+  if (Math.abs(newest.close - ltp) / ltp > LIVE_LTP_TOLERANCE) return { ok: false, reason: `live-feed close ${newest.close} vs live price ${ltp}` };
+  const buckets = rollToSessionBuckets(ones, exchange, 15);
+  const closed = buckets.filter((b) => b.ts + BAR_MS <= t);
+  if (closed.length < EMA_LEN) return { ok: false, reason: `only ${closed.length} closed 15m bars` };
+  const last = closed[closed.length - 1];
+  const minutes = ones.filter((b) => b.ts >= last.ts && b.ts < last.ts + BAR_MS).length;
+  if (minutes < LIVE_MIN_MINUTES) return { ok: false, reason: `last 15m bar built from ${minutes}/15 minutes` };
+  return { ok: true, bars: buckets.map((b) => ({ ts: b.ts, open: b.open, high: b.high, low: b.low, close: b.close })) };
 }
 
 /** Closed bars only (a bar counts once its 15 minutes are over). */
@@ -111,6 +146,13 @@ export class DeskMarketAdapter implements DeskMarketPort {
     if (hit?.inflight) return hit.bars.length ? hit.bars : hit.inflight;
     const ref = await this.ref(key, new Date(t));
     if (!ref) return [];
+    // 1) Angel's live feed (the hub's tick bars): instant, outside the throttled historical gate — used only
+    //    when it passes liveFeedGate. 2) Otherwise Angel's historical API, as before.
+    const live = await this.liveFeedBars(ref, t).catch(() => null);
+    if (live) {
+      this.barCache.set(key, { bars: live, validUntil: nextBarReadyAt(t), inflight: null });
+      return live;
+    }
     const inflight = this.market
       .bars15m(ref, new Date(t - TREND_LOOKBACK_MS), new Date(t))
       .catch(() => [] as Bar15m[])
@@ -122,6 +164,33 @@ export class DeskMarketAdapter implements DeskMarketPort {
       });
     this.barCache.set(key, { bars: hit?.bars ?? [], validUntil: 0, inflight });
     return hit?.bars.length ? hit.bars : inflight;
+  }
+
+  /**
+   * The underlying's 15m bars built from Angel's LIVE feed: the market hub writes every tick into 1-minute bars
+   * (candles_1m), so this is the same Angel data with no historical-API call (2026-11-27: AB1021 "Too many
+   * requests" app-wide starved the historical path). Session minutes only; null unless liveFeedGate passes.
+   */
+  private async liveFeedBars(ref: WatchRef, t: number): Promise<Bar15m[] | null> {
+    const rows = await this.prisma.$queryRaw<Array<{ ts: Date; open: number; high: number; low: number; close: number; volume: bigint | number | null }>>`
+      SELECT ts, open, high, low, close, volume FROM candles_1m
+      WHERE exchange = ${ref.exchange} AND token = ${ref.token} AND ts >= ${new Date(t - TREND_LOOKBACK_MS)} AND ts <= ${new Date(t)}
+      ORDER BY ts`;
+    const ones: OhlcBar[] = sessionOnlyBars(
+      (rows ?? []).map((r) => ({
+        ts: (r.ts instanceof Date ? r.ts : new Date(r.ts)).getTime(),
+        open: Number(r.open),
+        high: Number(r.high),
+        low: Number(r.low),
+        close: Number(r.close),
+        volume: r.volume == null ? null : Number(r.volume),
+      })),
+      ref.exchange,
+    );
+    const ltps = await this.market.ltps([ref], new Date(t)).catch(() => new Map<string, number>());
+    const ltp = ltps.get(`${ref.exchange.toUpperCase()}:${ref.token}`) ?? null;
+    const verdict = liveFeedGate(ones, ref.exchange, t, ltp);
+    return verdict.ok ? verdict.bars : null;
   }
 
   private async bars(underlying: string, from: Date, now: Date): Promise<Bar15m[]> {

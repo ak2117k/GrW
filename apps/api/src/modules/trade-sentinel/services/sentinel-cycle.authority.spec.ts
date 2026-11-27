@@ -53,7 +53,23 @@ interface Opts {
   open?: AlarmRow[];
   recent?: unknown[];
   brief?: string | null;
+  /** The alarm chart reader: undefined ⇒ none bound. */
+  chart?: { read: jest.Mock };
 }
+
+/** 20 closed 15m bars trending up from 9500 and 6 closed 5m bars with volume, ending 21:15 IST. */
+const chartData = () => {
+  const end = ist('21:15:00').getTime();
+  const bars15 = Array.from({ length: 20 }, (_, i) => {
+    const c = 9500 + i * 3;
+    return { ts: end - (20 - i) * 15 * 60_000, open: c - 2, high: c + 4, low: c - 4, close: c, volume: null };
+  });
+  const bars5 = Array.from({ length: 6 }, (_, i) => {
+    const c = 9550 + i;
+    return { ts: end - (6 - i) * 5 * 60_000, open: c, high: c + 2, low: c - 2, close: c, volume: 100 };
+  });
+  return { ref: { exchange: 'MCX', token: '1', symbol: 'CRUDEOILM19NOVFUT' }, bars5, bars15, n15: 8 };
+};
 
 function makeSvc(o: Opts = {}) {
   const build = jest.fn().mockResolvedValue(o.entries ?? [entry()]);
@@ -67,7 +83,7 @@ function makeSvc(o: Opts = {}) {
   const record = jest.fn().mockResolvedValue({ id: 'v-new' });
   const recentForTracker = jest.fn().mockResolvedValue(o.recent ?? []);
   const tickFor = jest.fn();
-  const raise = jest.fn(async (a: RaiseAlarm) => ({ id: 'al-1', ...a }) as unknown as AlarmRow);
+  const raise = jest.fn(async (a: RaiseAlarm, _now?: Date) => ({ id: 'al-1', ...a }) as unknown as AlarmRow);
   const openForTrackers = jest.fn(async () => o.open ?? []);
   const alarms = { raise, openForTrackers, openFor: jest.fn(), answer: jest.fn() };
   const authority = { isLive: jest.fn(() => o.live !== false) };
@@ -80,6 +96,7 @@ function makeSvc(o: Opts = {}) {
     { captureAndCompare: jest.fn().mockResolvedValue({ now: null, prev: null }) } as never, { tickFor } as never,
     undefined, o.discipline, undefined, undefined, undefined, undefined, undefined, undefined, o.gate, undefined, o.reader ?? undefined, undefined, undefined,
     ports ? (alarms as never) : undefined, ports ? (authority as never) : undefined, ports ? ({ briefFor, write: jest.fn() } as never) : undefined,
+    (o.chart as never) ?? undefined,
   );
   const pass = async (hms: string, t: TickReading) => {
     tickFor.mockResolvedValueOnce(t);
@@ -289,10 +306,62 @@ describe('exit authority — the forced alarm look', () => {
     const [, , , fires, review] = t.buildPacket.mock.calls[0];
     expect(fires).toEqual(expect.arrayContaining([expect.objectContaining({ name: ALARM_FIRE, kind: 'alarm', alarmId: 'al-7', rule: 'FLOOR' })]));
     expect(review.authority).toEqual({
-      alarm: { rule: 'FLOOR', reason: alarm().reason, urgency: 'normal', deadline: null, raisedAt: ist('21:19:50').toISOString() },
+      alarm: {
+        rule: 'FLOOR', reason: alarm().reason, urgency: 'normal', deadline: null, raisedAt: ist('21:19:50').toISOString(),
+        chart: { unavailable: 'no chart reader is bound in this process' },
+      },
       brief: 'plan: ride the breakdown to 9480',
     });
     expect(t.record.mock.calls[0][0].triggeredBy).toContain(ALARM_FIRE);
+  });
+
+  it('live alarm look: alarm.chart is a fresh read — closes, VWAP, N15, the 15m Supertrend and readChart\'s verdict', async () => {
+    const read = jest.fn().mockResolvedValue(chartData());
+    const t = makeSvc({ open: [alarm()], recent: [lastHold], chart: { read } });
+    await t.pass('21:20:00', tick(370, 9540));
+    expect(read).toHaveBeenCalledWith('t-pe', ist('21:20:00'));
+    const chart = t.buildPacket.mock.calls[0][4].authority.alarm.chart;
+    expect(chart).toMatchObject({
+      underlying: 'CRUDEOILM19NOVFUT',
+      closes5: [9553, 9554, 9555],
+      closes15: [9551, 9554, 9557],
+      vwap: 9552.5,
+      n15: 8,
+      supertrend15: 'UP',
+      known: true,
+    });
+    // A long PUT is bearish: an UP 15m Supertrend is against it, and the reasons say so.
+    expect(chart.against).toBe(true);
+    expect(chart.reasons.join(' ')).toMatch(/15m Supertrend is UP/);
+  });
+
+  it('the chart reader throws or returns nothing: alarm.chart is unavailable with why, the look still runs', async () => {
+    for (const read of [jest.fn().mockRejectedValue(new Error('db down')), jest.fn().mockResolvedValue(null)]) {
+      const t = makeSvc({ open: [alarm()], recent: [lastHold], chart: { read } });
+      await t.pass('21:20:00', tick(370, 9540));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      const chart = t.buildPacket.mock.calls[0][4].authority.alarm.chart;
+      expect(chart.unavailable).toEqual(expect.any(String));
+    }
+  });
+
+  it('no alarm on the packet (live) or authority off: the chart is never read', async () => {
+    const read = jest.fn().mockResolvedValue(chartData());
+    const live = makeSvc({ open: [], recent: [lastHold], chart: { read } });
+    live.evaluate.mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'HEARTBEAT' });
+    await live.pass('21:21:00', tick(370, 9540));
+    expect(live.judge).toHaveBeenCalledTimes(1);
+    const off = makeSvc({ open: [alarm()], recent: [lastHold], chart: { read }, live: false });
+    off.evaluate.mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'HEARTBEAT' });
+    await off.pass('21:21:00', tick(370, 9540));
+    expect(off.judge).toHaveBeenCalledTimes(1);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('raise() is given the cycle clock', async () => {
+    const t = makeSvc({ discipline: parseExitDisciplineConfig({}) });
+    await greenToRed(t);
+    expect(t.raise.mock.calls[0][1]).toEqual(ist('21:20:30'));
   });
 
   it('two passes 5 s apart judge it once (TRACKER_WAKE_MIN_GAP_MS)', async () => {

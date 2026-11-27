@@ -1,6 +1,7 @@
 import type { AlarmRow, AlarmRule, AlarmUrgency } from '../../exit-authority/exit-authority.tokens';
 import { TRACKER_WAKE_MIN_GAP_MS } from '../../exit-authority/domain/timings';
 import type { TripwireFire } from '../tripwires/types';
+import type { PacketAlarmChart } from './alarm-chart';
 
 /**
  * TRADE AGENT EXIT AUTHORITY (docs/superpowers/specs/2026-11-27-trade-agent-exit-authority-design.md), the
@@ -30,6 +31,11 @@ export type PacketAlarm = {
   deadline: string | null;
   /** ISO time the alarm was (last) raised. */
   raisedAt: string;
+  /**
+   * The fresh chart read of the underlying (alarm-chart.ts: closed 5m / 15m closes, VWAP, N15, the 15m Supertrend,
+   * readChart's verdict), or `{ unavailable }` with why. Set at judgement time; absent only before that.
+   */
+  chart?: PacketAlarmChart;
 };
 
 const URGENCY_RANK: Record<AlarmUrgency, number> = { urgent: 0, deadline: 1, normal: 2 };

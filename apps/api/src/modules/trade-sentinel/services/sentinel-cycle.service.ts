@@ -38,6 +38,8 @@ import {
 } from './judge-gate';
 import { squareOffLook, type SquareOffDecision, type SquareOffLook } from './square-off-look';
 import { ALARM_FIRE, alarmLookFire, lastAgentVerdictMs, leadAlarm, packetAlarm, type AlarmFire } from './alarm-look';
+import { ALARM_CHART_READER, ALARM_CHART_TIMEOUT_MS, alarmChartBlock, type AlarmChartReader, type PacketAlarmChart } from './alarm-chart';
+import { cutLossK15 } from '../../exit-discipline/cut-loss-yardstick';
 import {
   AUTHORITY_STATE,
   TRADE_ALARMS,
@@ -822,7 +824,37 @@ export class SentinelCycleService {
     @Optional() @Inject(TRADE_ALARMS) private readonly alarms?: TradeAlarmsPort | null,
     @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
     @Optional() @Inject(TRADE_BRIEFS) private readonly briefs?: TradeBriefsPort | null,
+    // The alarm look's fresh chart read (alarm-chart.ts): closed 5m / 15m bars + N15 of the underlying, a DB read.
+    // Absent ⇒ the packet's alarm.chart says unavailable; never read with the authority off.
+    @Optional() @Inject(ALARM_CHART_READER) private readonly alarmChart?: AlarmChartReader | null,
   ) {}
+
+  /**
+   * Exit authority: `alarm.chart` for a live alarm look — readChart on the underlying's closed bars, bounded by
+   * ALARM_CHART_TIMEOUT_MS. Never throws: any failure is `{ unavailable: '<why>' }`.
+   */
+  private async alarmChartFor(entry: RosterEntry, tick: TickReading, thesis: EnsuredThesis | null, now: Date): Promise<PacketAlarmChart> {
+    if (!this.alarmChart) return { unavailable: 'no chart reader is bound in this process' };
+    try {
+      const data = await withTimeout(
+        this.alarmChart.read(entry.trackerId, now),
+        ALARM_CHART_TIMEOUT_MS,
+        () => new Error(`the chart read timed out after ${ALARM_CHART_TIMEOUT_MS / 1000} s`),
+      );
+      if (!data) return { unavailable: "the position's underlying could not be resolved or its bars could not be read" };
+      if (data.bars5.length === 0 && data.bars15.length === 0) return { unavailable: `no closed 5m / 15m session bars stored for ${data.ref.symbol}` };
+      return alarmChartBlock(data, {
+        bull: exposureOf(entry.symbol, tick.side) === 'BULLISH',
+        underlyingNow: tick.underlyingLtp,
+        invalidation: thesis?.invalidation ?? null,
+        bestUnderlying: tick.anchors?.best?.underlying ?? null,
+        k15: cutLossK15(process.env) ?? 1.5,
+        now,
+      });
+    } catch (err) {
+      return { unavailable: `chart read failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300) };
+    }
+  }
 
   /** Trade agent exit authority applies to this trade: ports bound, the authority live, a LIVE (never paper) tracker. */
   private authorityLive(entry: { trackerId: string }): boolean {
@@ -840,13 +872,14 @@ export class SentinelCycleService {
     kind: RaiseAlarm['rule'],
     recordToday: () => Promise<unknown>,
     alarm: () => RaiseAlarm,
+    now: Date,
   ): Promise<'recorded' | 'alarmed'> {
     if (!this.authorityLive(entry)) {
       await recordToday();
       return 'recorded';
     }
     const a = alarm();
-    const row = await this.alarms!.raise(a);
+    const row = await this.alarms!.raise(a, now);
     this.logger.warn(
       `[exit-authority] ${kind} alarm ${row ? `raised (${row.id})` : 'deduped (an open alarm already covers it)'} — ${entry.symbol} ` +
         `(tracker ${entry.trackerId}): no EXIT_NOW written, the trade agent decides; would have: ${a.wouldHave.slice(0, 200)}`,
@@ -1622,6 +1655,7 @@ export class SentinelCycleService {
           sourceRef: null,
           payload: { limit: -floor, netPnl: green.netPnl, ltp: q.ltp, priceSource: q.source, band: loss.band ?? null },
         }),
+        now,
       );
       if (outcome === 'recorded') this.logger.warn(`[floor-hard-exit] EXIT_NOW recorded (fast guard) — ${entry.symbol} (tracker ${entry.trackerId}): MAX_LOSS: ${detail}`);
     } catch (err) {
@@ -1808,6 +1842,7 @@ export class SentinelCycleService {
             underlyingLtp: tick.underlyingLtp,
           },
         }),
+        now,
       );
       if (outcome === 'recorded') this.logger.warn(`[floor-hard-exit] EXIT_NOW recorded — ${entry.symbol} (tracker ${entry.trackerId}): ${r.rule}: ${detail}`);
       return 'evaluated';
@@ -2025,6 +2060,7 @@ export class SentinelCycleService {
           sourceRef: null,
           payload: { ruleDetail: rule, stop, stage: reading.stage, netPnl: packet.money.netPnl, ltp: tick.ltp },
         }),
+        now,
       );
       if (outcome === 'recorded') this.logger.warn(`[target-ladder] EXIT_NOW recorded — ${entry.symbol} (tracker ${entry.trackerId}): ${rule}: ${reading.detail}`);
       return 'evaluated';
@@ -2489,8 +2525,13 @@ export class SentinelCycleService {
   ): Promise<void> {
     const thesis = await this.thesisFor(entry, state, tick, now);
     progress.stage = 'packet';
-    // Exit authority (live trackers, authority live): the supreme's brief, read at judgement time. Never throws.
-    if (review?.authority) review = { ...review, authority: { ...review.authority, brief: await this.briefFor(entry) } };
+    // Exit authority (live trackers, authority live): the supreme's brief, and — when the packet shows an alarm — a
+    // FRESH chart read of the underlying on alarm.chart, both read at judgement time. Never throw.
+    if (review?.authority) {
+      const a = review.authority.alarm;
+      const [brief, chart] = await Promise.all([this.briefFor(entry), a ? this.alarmChartFor(entry, tick, thesis, now) : Promise.resolve(null)]);
+      review = { ...review, authority: { alarm: a ? { ...a, chart: chart! } : null, brief } };
+    }
 
     const packetTick = {
       ...tick,
@@ -2571,7 +2612,8 @@ export class SentinelCycleService {
       // Stamped from the agent, never hardcoded: Task 13's replay attributes a
       // behaviour change to a prompt change by diffing this field, and a stale
       // literal here would make a prompt edit look like a model regression.
-      promptVersion: this.agent.promptVersion,
+      // Exit authority: the stamp of the prompt THIS packet was judged with (+x1 only on a live packet with alarm/brief).
+      promptVersion: this.agent.promptVersionFor?.(packet) ?? this.agent.promptVersion,
       triggeredBy:
         decision.fires.length > 0 ? decision.fires.map((f) => f.name) : ['heartbeat'],
       netPnl: packet.money.netPnl,

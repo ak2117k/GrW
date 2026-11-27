@@ -100,7 +100,7 @@ describe('prompt: ALARMS AND BRIEF (+x1)', () => {
   it('authority on: the section is appended, nothing else changes, and the stamp gains +x1', () => {
     const on = sentinelSystemPrompt({ ...base, authority: true });
     expect(on).toContain('ALARMS AND BRIEF:');
-    expect(on).toContain('Verify the alarm on the 5-minute and 15-minute chart');
+    expect(on).toContain('Verify it on alarm.chart');
     expect(on).toContain('HOLD, TIGHTEN (EXIT_ARMED');
     expect(on).toContain('EXIT_NOW. Your reason must address the alarm directly');
     expect(on).toContain("brief, when not null, is the supreme agent's plan and skills for this trade");
@@ -114,12 +114,48 @@ describe('prompt: ALARMS AND BRIEF (+x1)', () => {
     expect(sentinelPromptVersion({ ...base, authority: false })).toBe(sentinelPromptVersion(base));
   });
 
-  it('the agent renders it only while AUTHORITY_STATE is live (read per call)', () => {
+  const junk = () => jest.fn().mockResolvedValue({ stop_reason: 'end_turn', content: [{ type: 'text', text: '{}' }] });
+  const agentWith = (authority?: { isLive: () => boolean }) => {
+    const create = junk();
+    return { create, agent: new SentinelAgentService({ messages: { create } } as never, { get: () => undefined } as never, authority) };
+  };
+  /** The system text the agent sent for `packet` (the reply is junk; only the request matters). */
+  const systemFor = async (a: ReturnType<typeof agentWith>, packet: object) => {
+    a.create.mockClear();
+    await a.agent.judge(packet as never).catch(() => undefined);
+    return a.create.mock.calls[0][0].system[0].text as string;
+  };
+  const livePacket = { position: {}, money: {}, alarm: null, brief: 'plan' };
+  const paperPacket = { position: {}, money: {} };
+
+  it('the agent renders it only for a live packet (alarm / brief keys) while AUTHORITY_STATE is live — read per call', async () => {
     const live = { isLive: jest.fn(() => false) };
-    const agent = new SentinelAgentService({ messages: { create: jest.fn() } } as never, { get: () => undefined } as never, live);
-    const without = new SentinelAgentService({ messages: { create: jest.fn() } } as never, { get: () => undefined } as never);
-    expect(agent.promptVersion).toBe(without.promptVersion);
+    const a = agentWith(live);
+    const base = agentWith().agent.promptVersion;
+    const plus = `${base.replace(`/${THESIS_PROMPT_VERSION}`, '')}${AUTHORITY_VERSION_SUFFIX}/${THESIS_PROMPT_VERSION}`;
+    expect(a.agent.promptVersionFor(livePacket as never)).toBe(base);
+    expect(await systemFor(a, livePacket)).not.toContain('ALARMS AND BRIEF');
     live.isLive.mockReturnValue(true);
-    expect(agent.promptVersion).toBe(`${without.promptVersion.replace(`/${THESIS_PROMPT_VERSION}`, '')}${AUTHORITY_VERSION_SUFFIX}/${THESIS_PROMPT_VERSION}`);
+    expect(a.agent.promptVersionFor(livePacket as never)).toBe(plus);
+    expect(await systemFor(a, livePacket)).toContain('ALARMS AND BRIEF');
+    // The process-wide stamp never carries +x1 (it has no packet to judge by).
+    expect(a.agent.promptVersion).toBe(base);
+  });
+
+  it('a PAPER judgement under live (no alarm / brief keys): no section, the original stamp and text', async () => {
+    const a = agentWith({ isLive: () => true });
+    const off = agentWith();
+    expect(a.agent.promptVersionFor(paperPacket as never)).toBe(off.agent.promptVersion);
+    const text = await systemFor(a, paperPacket);
+    expect(text).not.toContain('ALARMS AND BRIEF');
+    expect(text).toBe(await systemFor(off, paperPacket));
+  });
+
+  it('the section names only fields the packet has, and says what to do when the chart is unavailable', () => {
+    expect(AUTHORITY_SECTION).toContain('If alarm.chart is unavailable (alarm.chart.unavailable says why), say so in the reason and judge on what the packet has');
+    for (const f of ['closes5', 'closes15', 'vwap', 'n15', 'supertrend15', 'supertrendLine15', 'adverseFromBest', 'needPts', 'known', 'against', 'reasons']) {
+      expect(AUTHORITY_SECTION).toContain(f);
+    }
+    expect(AUTHORITY_SECTION).not.toMatch(/money and its anchors|readChart/);
   });
 });

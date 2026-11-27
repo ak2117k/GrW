@@ -35,6 +35,10 @@ import {
 } from '../dto/trade.dto';
 import { Trade, Prisma, TradeEventType } from '@prisma/client';
 import { computeOrderCharges } from './trade-charges';
+import { AUTHORITY_STATE, type AuthorityStatePort } from '../../exit-authority/exit-authority.tokens';
+
+/** The log line (and error text) of a legacy live close refused under TRADE_AGENT_AUTHORITY=live. */
+export const LEGACY_LIVE_CLOSE_REFUSED = '[exit-authority] legacy live close refused';
 
 /**
  * Strip an option/futures suffix to recover the underlying symbol.
@@ -66,7 +70,17 @@ export class TradeExecutionService {
     private readonly settingsService: SettingsService,
     private readonly marketFeedService: MarketFeedService,
     private readonly marketContextService: MarketContextService,
+    // Trade agent exit authority: live ⇒ only the owner (controller close, kill switch) may close a LIVE trade here.
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
   ) {}
+
+  private authorityLive(): boolean {
+    try {
+      return this.authority?.isLive() === true;
+    } catch {
+      return false;
+    }
+  }
 
   /**
    * Execute a trade. This is the SINGLE entry point for ALL trade execution.
@@ -396,9 +410,23 @@ export class TradeExecutionService {
            * Ignored for live trades — the broker is authoritative there.
            */
           exitPrice?: number;
+          /**
+           * The OWNER's own close (the trades controller, the kill switch). Under TRADE_AGENT_AUTHORITY=live a LIVE
+           * (non-paper) trade is closed here ONLY for an owner action: every other caller — the legacy
+           * watch-monitor target/SL/trail/EOD, the signal-review REJECT — is refused (trade agent exit authority
+           * spec §3 #9: the trade agent decides every live exit). Paper trades and authority off: unchanged.
+           */
+          ownerAction?: boolean;
         },
   ): Promise<Trade> {
-    const opts =
+    const opts: {
+      exitReasonTag?: ExitReasonTag | string | null;
+      exitNotes?: string | null;
+      reason?: string | null;
+      quantity?: number;
+      exitPrice?: number;
+      ownerAction?: boolean;
+    } =
       typeof reasonOrOpts === 'string'
         ? { reason: reasonOrOpts }
         : reasonOrOpts ?? {};
@@ -413,6 +441,12 @@ export class TradeExecutionService {
         `Cannot close trade with status: ${trade.status}`,
         HttpStatus.BAD_REQUEST,
       );
+    }
+
+    if (!trade.isPaperTrade && opts.ownerAction !== true && this.authorityLive()) {
+      const line = `${LEGACY_LIVE_CLOSE_REFUSED}: trade ${tradeId} (${(trade as any).instrument?.symbol ?? '?'}) — ${opts.reason ?? opts.exitReasonTag ?? 'no reason'}; the trade agent decides live exits (TRADE_AGENT_AUTHORITY=live)`;
+      this.logger.error(line);
+      throw new HttpException(line, HttpStatus.CONFLICT);
     }
 
     // Quantity to close: an explicit `quantity` closes only that slice
@@ -699,7 +733,7 @@ export class TradeExecutionService {
 
     for (const trade of openTrades) {
       try {
-        await this.closeTrade(trade.id, `Kill switch: ${reason}`);
+        await this.closeTrade(trade.id, { reason: `Kill switch: ${reason}`, ownerAction: true });
         closed++;
       } catch (error) {
         this.logger.error(

@@ -12,6 +12,7 @@ import {
 import { BROKER_ADAPTER_TOKEN } from '../../market-data/services/market-feed.service';
 import { TradeRepository } from '../repositories/trade.repository';
 import { TradeGateway } from '../gateways/trade.gateway';
+import { AUTHORITY_STATE, type AuthorityStatePort } from '../../exit-authority/exit-authority.tokens';
 import {
   isSurveillanceRejection,
   cautionaryHint,
@@ -56,6 +57,8 @@ export class OrderTrackerService implements OnModuleDestroy {
     private readonly brokerAdapter: BrokerAdapter | null,
     private readonly tradeRepository: TradeRepository,
     private readonly tradeGateway: TradeGateway,
+    // Trade agent exit authority: live ⇒ no automatic STOPLOSS_MARKET at entry (a code seller outside the agent).
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
   ) {}
 
   onModuleDestroy(): void {
@@ -330,6 +333,20 @@ export class OrderTrackerService implements OnModuleDestroy {
 
   private async placeAutoStoploss(tracked: TrackedOrder): Promise<void> {
     if (!this.brokerAdapter || !tracked.originalRequest || !tracked.autoStoploss) {
+      return;
+    }
+    // Only LIVE orders are tracked here (paper fills never reach the tracker). Under TRADE_AGENT_AUTHORITY=live the
+    // trade agent decides every live exit, so the legacy resting SL at entry is not placed (spec §3 #10).
+    let authorityLive = false;
+    try {
+      authorityLive = this.authority?.isLive() === true;
+    } catch {
+      authorityLive = false;
+    }
+    if (authorityLive) {
+      this.logger.warn(
+        `[exit-authority] legacy auto STOPLOSS at entry not placed for trade ${tracked.tradeId} (SL ${tracked.autoStoploss}): TRADE_AGENT_AUTHORITY=live`,
+      );
       return;
     }
 

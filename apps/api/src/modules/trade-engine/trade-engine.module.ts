@@ -5,6 +5,7 @@ import { MarketDataModule } from '../market-data/market-data.module';
 import { SettingsModule } from '../settings/settings.module';
 import { InsightsModule } from '../insights/insights.module';
 import { OptionsChainModule } from '../options-chain/options-chain.module';
+import { ExitAuthorityModule } from '../exit-authority/exit-authority.module';
 
 // Controller
 import { TradeEngineController } from './controllers/trade-engine.controller';
@@ -34,6 +35,9 @@ import { TradeGateway } from './gateways/trade.gateway';
     InsightsModule,
     OptionsChainModule,
     BullModule.registerQueue({ name: 'signal-review' }),
+    // Trade agent exit authority (2026-11-27): AUTHORITY_STATE. Live ⇒ the legacy live sellers here (closeTrade from
+    // watch-monitor / signal-review, the order tracker's auto STOPLOSS at entry) are refused; owner closes stay.
+    ExitAuthorityModule,
   ],
   controllers: [TradeEngineController],
   providers: [

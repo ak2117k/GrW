@@ -3,7 +3,7 @@ import { Interval } from '@nestjs/schedule';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { AI_HEALTH, type AiHealthPort } from '../../ai-gateway/audit/failover-transport';
 import { isExitAnswer } from '../domain/agent-verdict';
-import { backstopDue, escalationDue, isSnoozed } from '../domain/alarm';
+import { backstopDue, deadlinePassed, escalationDue, isSnoozed } from '../domain/alarm';
 import { REALERT_EVERY_MS, SUPREME_EXIT_AGENT_LOOK_MS } from '../domain/timings';
 import {
   SUPREME_CONFIRM,
@@ -158,6 +158,7 @@ export class EscalationRunner {
         try {
           if (!open.has(a.trackerId)) await this.closeGone(a);
           else if (a.rule === 'SUPREME_EXIT') await this.supremeExit(a, now);
+          else if (deadlinePassed(a, now)) await this.closePastDeadline(a);
           else if (a.status !== 'ANSWERED') await this.openAlarm(a, now, aiDown);
           else if (a.urgency === 'deadline') await this.answeredDeadline(a, now);
         } catch (err) {
@@ -279,6 +280,20 @@ export class EscalationRunner {
    */
   private async answeredDeadline(a: AlarmRow, now: Date): Promise<void> {
     if (backstopDue(a, { aiDown: false, stillPastLimit: false }, now) === 'DEADLINE') await this.deadlineBackstop(a, now);
+  }
+
+  /**
+   * A `deadline` alarm more than DEADLINE_BACKSTOP_GRACE_MS past its deadline (e.g. a past session's alarm, a process
+   * that was down at the deadline): CLOSED, never sold — the owner may have converted the position by hand — and told.
+   */
+  private async closePastDeadline(a: AlarmRow): Promise<void> {
+    const messageId = (await this.currentMessageId(a.trackerId)) ?? a.telegramMessageId;
+    await this.alarmRepo.update(a.id, { status: 'CLOSED' });
+    const when = a.deadline ? `${istTime(a.deadline)} IST` : 'unknown';
+    this.log.warn(`${LOG} alarm ${a.id} ${a.symbol} ${a.rule} CLOSED: deadline ${a.deadline?.toISOString()} passed — the backstop does not act after it`);
+    const line = `${a.symbol}: deadline passed (${when}) — not acting, check the position.\nAlarm ${a.rule}: ${a.reason}`;
+    if (messageId != null && !this.otherAlertedOpen(a)) await this.edit(messageId, line);
+    await this.send(line);
   }
 
   /** The broker-deadline backstop, unless the position was converted to carry-forward (then the alarm is moot). */

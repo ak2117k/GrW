@@ -1,7 +1,8 @@
 import type { AlarmRow, RaiseAlarm } from '../exit-authority.tokens';
-import { backstopDue, escalationDue, shouldReRaise } from './alarm';
+import { backstopDue, deadlinePassed, escalationDue, shouldReRaise } from './alarm';
 import {
   BACKSTOP_OWNER_SILENT_MS,
+  DEADLINE_BACKSTOP_GRACE_MS,
   DEADLINE_EXIT_LEAD_MS,
   DEADLINE_WARN_MS,
   ESCALATE_AFTER_MS,
@@ -176,6 +177,16 @@ describe('backstopDue', () => {
     it('a closed / backstopped alarm (tracker closed) → no backstop', () => {
       expect(backstopDue({ ...answered, status: 'CLOSED' }, quiet, at(10_000))).toBeNull();
       expect(backstopDue({ ...answered, status: 'BACKSTOPPED' }, quiet, at(10_000))).toBeNull();
+    });
+
+    it('never later than deadline + 5 min: up to it DEADLINE, after it null (answered or not) and deadlinePassed', () => {
+      const end = answered.deadline!.getTime() - T0.getTime() + DEADLINE_BACKSTOP_GRACE_MS;
+      expect(backstopDue(answered, quiet, at(end))).toBe('DEADLINE');
+      expect(deadlinePassed(answered, at(end))).toBe(false);
+      expect(backstopDue(answered, quiet, at(end + 1))).toBeNull();
+      expect(backstopDue({ ...answered, status: 'OPEN', answeredAt: null }, quiet, at(end + 1))).toBeNull();
+      expect(deadlinePassed(answered, at(end + 1))).toBe(true);
+      expect(deadlinePassed({ urgency: 'urgent', deadline: null }, at(end + 1))).toBe(false);
     });
 
     it('a running owner Hold snooze still holds it', () => {

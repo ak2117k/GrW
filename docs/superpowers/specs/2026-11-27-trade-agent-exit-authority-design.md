@@ -130,9 +130,11 @@ B. **Owner escalation** via Telegram, when:
    trade is past today's **hard-loss limit** (the existing per-trade limits: HARD_LOSS_EXIT_RUPEES ₹2,000,
    the per-underlying values and class ceilings, as configured today) → code exits. In normal operation
    the agent always decides; this path should almost never run, and each time it does the owner is told.
-2. **Broker deadline.** A `deadline` alarm (Angel intraday square-off ~15:20 / contract expiry) with no
-   agent decision by **deadline − 2 min** → code exits, so Angel's square-off at the bell never happens.
-   The 10-min-before Telegram warning stays.
+2. **Broker deadline.** A `deadline` alarm (Angel intraday square-off ~15:20 / contract expiry): an agent HOLD
+   does not disarm it; code exits at **deadline − 2 min** unless the position was converted to carry or the
+   trade is closed (owner ruling 27 Nov: Angel's square-off at the bell never happens). Code never acts later
+   than **deadline + 5 min**: after that the alarm is closed with a Telegram line ("deadline passed — not acting,
+   check the position") and nothing is sold. The 10-min-before Telegram warning stays.
 
 ### 4.5b Owner's resting order blocks a confirmed exit
 Never cancel the owner's order. A confirmed EXIT/BOOK that hits `OPEN_ORDER_EXISTS` → immediate Telegram

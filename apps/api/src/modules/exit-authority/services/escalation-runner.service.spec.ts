@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import type { AiHealthPort } from '../../ai-gateway/audit/failover-transport';
 import {
   BACKSTOP_OWNER_SILENT_MS,
+  DEADLINE_BACKSTOP_GRACE_MS,
   DEADLINE_EXIT_LEAD_MS,
   ESCALATE_AFTER_MS,
   ESCALATE_URGENT_AFTER_MS,
@@ -450,6 +451,27 @@ describe('EscalationRunner.pass', () => {
           await runner.pass(new Date(deadline.getTime() - DEADLINE_EXIT_LEAD_MS));
           expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(1);
         }
+      });
+
+      it.each([
+        ['answered HOLD', () => held()],
+        ['unanswered', () => alarm({ rule: 'CARRY', urgency: 'deadline', deadline, alertedAt: at(0), alertCount: 1 })],
+      ])('%s, more than 5 min past the deadline (e.g. a past session) → CLOSED, never sold, owner told', async (_n, make) => {
+        const { db, ownerExit, telegram, runner } = setup();
+        db.alarms.push(make());
+        await runner.pass(new Date(deadline.getTime() + DEADLINE_BACKSTOP_GRACE_MS + 1));
+        expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+        expect(db.alarms[0].status).toBe('CLOSED');
+        expect(String(telegram.sendMessage.mock.calls.at(-1)?.[0])).toMatch(/deadline passed .* not acting, check the position/);
+        await runner.pass(new Date(deadline.getTime() + DEADLINE_BACKSTOP_GRACE_MS + 60_000));
+        expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+      });
+
+      it('at deadline + 5 min exactly it still acts', async () => {
+        const { db, ownerExit, runner } = setup();
+        db.alarms.push(held());
+        await runner.pass(new Date(deadline.getTime() + DEADLINE_BACKSTOP_GRACE_MS));
+        expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(1);
       });
 
       it('the tracker closed → CLOSED, no backstop', async () => {

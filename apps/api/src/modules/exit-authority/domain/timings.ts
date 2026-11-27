@@ -27,3 +27,5 @@ export const REALARM_URGENT_EVERY_MS = 120_000;
 export const TRACKER_WAKE_MIN_GAP_MS = 20_000;
 /** A supreme exit request: the agent gets this long to look before the exit goes ahead. */
 export const SUPREME_EXIT_AGENT_LOOK_MS = 60_000;
+/** The DEADLINE backstop never acts later than deadline + this: after it the alarm is closed, never sold (a past session's alarm). */
+export const DEADLINE_BACKSTOP_GRACE_MS = 300_000;

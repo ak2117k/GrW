@@ -1,6 +1,7 @@
 import type { AlarmRow, AlarmUrgency, RaiseAlarm } from '../exit-authority.tokens';
 import {
   BACKSTOP_OWNER_SILENT_MS,
+  DEADLINE_BACKSTOP_GRACE_MS,
   DEADLINE_EXIT_LEAD_MS,
   DEADLINE_WARN_MS,
   ESCALATE_AFTER_MS,
@@ -61,6 +62,11 @@ export function escalationDue(a: AlarmRow, now: Date): 'ALERT' | 'REALERT' | 'DE
   return t - a.alertedAt.getTime() >= REALERT_EVERY_MS ? 'REALERT' : null;
 }
 
+/** A `deadline` alarm more than DEADLINE_BACKSTOP_GRACE_MS past its deadline: the backstop no longer acts on it. */
+export function deadlinePassed(a: Pick<AlarmRow, 'urgency' | 'deadline'>, now: Date): boolean {
+  return a.urgency === 'deadline' && a.deadline != null && now.getTime() > a.deadline.getTime() + DEADLINE_BACKSTOP_GRACE_MS;
+}
+
 /**
  * The only two code sells left (design §4.5a):
  * - DEADLINE: a `deadline` alarm still on the trade at deadline − DEADLINE_EXIT_LEAD_MS. Owner ruling 2026-11-27
@@ -78,6 +84,9 @@ export function backstopDue(
 ): 'DEADLINE' | 'HARD_LOSS' | null {
   const t = now.getTime();
   if (a.urgency === 'deadline' && a.deadline != null && t >= a.deadline.getTime() - DEADLINE_EXIT_LEAD_MS) {
+    // Never later than deadline + DEADLINE_BACKSTOP_GRACE_MS (a past session's alarm must not sell a position the owner
+    // may have converted by hand): the runner closes such an alarm instead (deadlinePassed).
+    if (deadlinePassed(a, now)) return null;
     const onTrade = isUnansweredActive(a, now) || a.status === 'ANSWERED';
     return onTrade && ctx.stillIntraday !== false ? 'DEADLINE' : null;
   }

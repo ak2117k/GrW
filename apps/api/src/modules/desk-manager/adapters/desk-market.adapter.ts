@@ -44,6 +44,20 @@ export function trendOf(bars: readonly Bar15m[]): TrendRead {
   return { tag, text: `${tag} (15m close ${r(last)} vs EMA20 ${r(eNow)}, EMA ${rising ? 'rising' : falling ? 'falling' : 'flat'})` };
 }
 
+/** Angel publishes a closed 15m bar a few seconds after the close; ask after this grace. */
+const PUBLISH_GRACE_MS = 20_000;
+/** An empty or failed fetch is retried after this (not held until the next bar). */
+const RETRY_EMPTY_MS = 60_000;
+
+/**
+ * When a fetch made at `t` can next return a NEW closed 15m bar: the next bar close after (t − grace), plus the
+ * grace. A fetch just after a close but before its publish grace is due again at that same close + grace.
+ * IST is UTC+5:30, so 15m bars on the epoch grid are the IST session grid (NSE 09:15, MCX 09:00).
+ */
+export function nextBarReadyAt(t: number): number {
+  return Math.floor((t - PUBLISH_GRACE_MS) / BAR_MS) * BAR_MS + BAR_MS + PUBLISH_GRACE_MS;
+}
+
 /** Closed bars only (a bar counts once its 15 minutes are over). */
 const closedBy = (bars: readonly Bar15m[], at: Date) => bars.filter((b) => b.ts + BAR_MS <= at.getTime());
 
@@ -78,11 +92,44 @@ export class DeskMarketAdapter implements DeskMarketPort {
     return ref;
   }
 
-  private async bars(underlying: string, from: Date, now: Date): Promise<Bar15m[]> {
-    const ref = await this.ref(underlying, now);
+  /** Wall clock for the bar cache (tests set it); `now` arguments stay the packet's own time. */
+  clock: () => number = () => Date.now();
+  private readonly barCache = new Map<string, { bars: Bar15m[]; validUntil: number; inflight: Promise<Bar15m[]> | null }>();
+
+  /**
+   * The underlying's 15m bars straight from Angel (the owner's historical API), ONE fetch shared by day(),
+   * trend15m() and priceAt(), asked again only once a new 15m bar has closed and been published
+   * (nextBarReadyAt). A finished bar never changes, so re-asking every 3-minute run only starved the shared
+   * 350 ms historical gate (2026-11-27: 16 calls a run, every day/trend read timed out). While a refresh is in
+   * flight the previous bars are served; a fetch slower than the packet's time box still lands in the cache.
+   */
+  private async loadBars(underlying: string): Promise<Bar15m[]> {
+    const key = underlying.toUpperCase();
+    const t = this.clock();
+    const hit = this.barCache.get(key);
+    if (hit && !hit.inflight && t < hit.validUntil) return hit.bars;
+    if (hit?.inflight) return hit.bars.length ? hit.bars : hit.inflight;
+    const ref = await this.ref(key, new Date(t));
     if (!ref) return [];
-    const bars = await this.market.bars15m(ref, from, now).catch(() => [] as Bar15m[]);
-    return closedBy(bars, now);
+    const inflight = this.market
+      .bars15m(ref, new Date(t - TREND_LOOKBACK_MS), new Date(t))
+      .catch(() => [] as Bar15m[])
+      .then((raw) => {
+        const bars = [...(raw ?? [])].filter((b) => Number.isFinite(b.ts) && Number.isFinite(b.close)).sort((a, b) => a.ts - b.ts);
+        const fresh = bars.length > 0 ? { bars, validUntil: nextBarReadyAt(t) } : { bars: hit?.bars ?? [], validUntil: t + RETRY_EMPTY_MS };
+        this.barCache.set(key, { ...fresh, inflight: null });
+        return fresh.bars;
+      });
+    this.barCache.set(key, { bars: hit?.bars ?? [], validUntil: 0, inflight });
+    return hit?.bars.length ? hit.bars : inflight;
+  }
+
+  private async bars(underlying: string, from: Date, now: Date): Promise<Bar15m[]> {
+    const bars = await this.loadBars(underlying);
+    return closedBy(
+      bars.filter((b) => b.ts >= from.getTime()),
+      now,
+    );
   }
 
   async ltp(underlying: string, now: Date): Promise<number | null> {

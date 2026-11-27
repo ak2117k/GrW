@@ -2,8 +2,11 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { sendOpsAlert } from '../../../common/utils/ops-alert';
-import { PAPER_TRACKER_PREFIX } from '../../trade-sentinel/paper/paper-tracker';
+import { AUTHORITY_STATE, TRADE_BRIEFS, type AuthorityStatePort, type TradeBriefsPort } from '../../exit-authority/exit-authority.tokens';
+import { PAPER_TRACKER_PREFIX, isPaperTracker } from '../../trade-sentinel/paper/paper-tracker';
 import { DESK_MANAGER_CONFIG, type DeskManagerConfig } from '../desk-manager.config';
+import { authorityLive } from '../domain/authority';
+import { openBrief, type OpenEntryFacts } from '../domain/trade-brief';
 import type { ActionResult } from '../domain/desk.types';
 import { DeskActionsRepository, type PendingEntryRow } from '../repositories/desk-actions.repository';
 import { DESK_EXIT_ACTIONS, DESK_MARKET, type DeskExitActionsPort, type DeskMarket, type DeskRef } from './desk-actions.ports';
@@ -42,6 +45,9 @@ export class PendingEntryWatchService {
     @Inject(DESK_MARKET) private readonly market: DeskMarket,
     @Inject(DeskActionsService) private readonly actions: Firer,
     @Optional() @Inject(DESK_EXIT_ACTIONS) private readonly exits?: DeskExitActionsPort,
+    // Trade agent exit authority (Task 7 wires): live ⇒ a filled live OPEN gets its trade brief. Absent ⇒ off.
+    @Optional() @Inject(TRADE_BRIEFS) private readonly briefs?: Pick<TradeBriefsPort, 'write'> | null,
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
   ) {}
 
   @Cron('*/5 * * * * *', { timeZone: 'Asia/Kolkata' })
@@ -130,10 +136,29 @@ export class PendingEntryWatchService {
         r = { status: 'FAILED', detail: errText(err) };
       }
       const armed = r.status === 'DONE' || r.status === 'RECORDED' || r.status === 'PENDING';
-      await this.store.setResult(row.id, { ...res, trackerId, stop: { ...stop, state: armed ? 'ARMED' : 'FAILED', detail: r.detail, ref: r.ref } });
+      const brief = await this.writeOpenBrief(row, trackerId);
+      await this.store.setResult(row.id, { ...res, trackerId, stop: { ...stop, state: armed ? 'ARMED' : 'FAILED', detail: r.detail, ref: r.ref }, ...(brief ? { brief } : {}) });
       if (!armed) {
         void sendOpsAlert(`desk-manager-stop:${row.id}`, `Desk manager: the stop ${stop.underlying} on ${row.underlying} (tracker ${trackerId}) was NOT armed — ${r.status}: ${r.detail}. The class catastrophe floor still applies.`);
       }
+    }
+  }
+
+  /**
+   * Trade agent exit authority: a live OPEN's position now has a tracker → its trade brief, composed from the OPEN
+   * decision (openBrief), written via TRADE_BRIEFS (by 'OPEN'). Off / not wired / paper ⇒ nothing (null). A failed
+   * write never blocks the stop; the manager is asked for a BRIEF next run (hasBrief false).
+   */
+  private async writeOpenBrief(row: PendingEntryRow, trackerId: string): Promise<{ state: 'WRITTEN' | 'FAILED'; detail?: string } | null> {
+    if (!this.briefs || !authorityLive(this.authority) || row.mode !== 'live' || isPaperTracker(trackerId)) return null;
+    const owner = this.cfg.ownerUserId ?? row.userId;
+    try {
+      const entry = ((row.result ?? {}) as Record<string, unknown>).entry as OpenEntryFacts | undefined;
+      await this.briefs.write(trackerId, owner, openBrief(row.decision as OpenDecision, row.decisionId, entry ?? null), 'OPEN');
+      return { state: 'WRITTEN' };
+    } catch (err) {
+      this.logger.warn(`[desk-manager] entry ${row.id}: trade brief for tracker ${trackerId} not written: ${errText(err)}`);
+      return { state: 'FAILED', detail: errText(err).slice(0, 200) };
     }
   }
 

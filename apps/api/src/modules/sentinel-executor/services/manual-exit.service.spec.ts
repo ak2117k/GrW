@@ -121,6 +121,19 @@ describe('ManualExitService', () => {
     expect(h.gate.decide).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['ownerInitiated: true (the app Exit button)', { ownerInitiated: true }, true],
+    ['ownerInitiated: false', { ownerInitiated: false }, false],
+    ['no flag (system callers: backstops, supreme exits, desk manager)', {}, false],
+  ])('%s is passed to the executor explicitly', async (_n, flag, expected) => {
+    const h = harness();
+    const execute = jest.spyOn(h.executor, 'execute');
+    const r = await h.svc.request(OWNER, 't1', { now: NOW, env: ENV, ...flag });
+    await r.done;
+    expect(execute.mock.calls[0][4]).toBe('MANUAL');
+    expect(execute.mock.calls[0][5]).toEqual({ ownerInitiated: expected });
+  });
+
   it('without a reason the row keeps the Portfolio wording', async () => {
     const h = harness();
     const r = await h.svc.request(OWNER, 't1', { now: NOW, env: ENV });

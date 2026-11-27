@@ -109,7 +109,8 @@ export class SentinelExecutorController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('trackerId') trackerId: string,
   ): Promise<AiExitExecutionDto> {
-    const r = await this.manual.request(user, trackerId);
+    // The owner's own Exit button: owner-initiated (under TRADE_AGENT_AUTHORITY=live it may cancel the owner's orders).
+    const r = await this.manual.request(user, trackerId, { ownerInitiated: true });
     r.done.catch((err) => this.logger.error(`[manual-exit] attempt ${r.row.id} errored: ${errText(err)} — row left for the sweep`));
     return toAiExitExecutionDto(r.row);
   }

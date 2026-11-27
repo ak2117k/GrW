@@ -35,6 +35,14 @@ import {
 } from '../dto/trade.dto';
 import { Trade, Prisma, TradeEventType } from '@prisma/client';
 import { computeOrderCharges } from './trade-charges';
+import { AUTHORITY_STATE, type AuthorityStatePort } from '../../exit-authority/exit-authority.tokens';
+import { sendOpsAlert } from '../../../common/utils/ops-alert';
+
+/** The log line (and error text) of a legacy live close refused under TRADE_AGENT_AUTHORITY=live. */
+export const LEGACY_LIVE_CLOSE_REFUSED = '[exit-authority] legacy live close refused';
+
+const positionKey = (exchange: string | null | undefined, symbol: string | null | undefined): string =>
+  `${String(exchange ?? '').trim().toUpperCase()}:${String(symbol ?? '').trim().toUpperCase()}`;
 
 /**
  * Strip an option/futures suffix to recover the underlying symbol.
@@ -66,7 +74,25 @@ export class TradeExecutionService {
     private readonly settingsService: SettingsService,
     private readonly marketFeedService: MarketFeedService,
     private readonly marketContextService: MarketContextService,
+    // Trade agent exit authority: live ⇒ only the owner (controller close, kill switch) may close a LIVE trade here.
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
   ) {}
+
+  private authorityLive(): boolean {
+    try {
+      return this.authority?.isLive() === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * TRADE_AGENT_AUTHORITY=live: closeTrade refuses a non-owner close of a LIVE trade (LEGACY_LIVE_CLOSE_REFUSED). Legacy
+   * callers (watch-monitor) ask first so they keep their own state open instead of marking a still-open position closed.
+   */
+  legacyLiveCloseRefused(): boolean {
+    return this.authorityLive();
+  }
 
   /**
    * Execute a trade. This is the SINGLE entry point for ALL trade execution.
@@ -396,9 +422,23 @@ export class TradeExecutionService {
            * Ignored for live trades — the broker is authoritative there.
            */
           exitPrice?: number;
+          /**
+           * The OWNER's own close (the trades controller, the kill switch). Under TRADE_AGENT_AUTHORITY=live a LIVE
+           * (non-paper) trade is closed here ONLY for an owner action: every other caller — the legacy
+           * watch-monitor target/SL/trail/EOD, the signal-review REJECT — is refused (trade agent exit authority
+           * spec §3 #9: the trade agent decides every live exit). Paper trades and authority off: unchanged.
+           */
+          ownerAction?: boolean;
         },
   ): Promise<Trade> {
-    const opts =
+    const opts: {
+      exitReasonTag?: ExitReasonTag | string | null;
+      exitNotes?: string | null;
+      reason?: string | null;
+      quantity?: number;
+      exitPrice?: number;
+      ownerAction?: boolean;
+    } =
       typeof reasonOrOpts === 'string'
         ? { reason: reasonOrOpts }
         : reasonOrOpts ?? {};
@@ -413,6 +453,12 @@ export class TradeExecutionService {
         `Cannot close trade with status: ${trade.status}`,
         HttpStatus.BAD_REQUEST,
       );
+    }
+
+    if (!trade.isPaperTrade && opts.ownerAction !== true && this.authorityLive()) {
+      const line = `${LEGACY_LIVE_CLOSE_REFUSED}: trade ${tradeId} (${(trade as any).instrument?.symbol ?? '?'}) — ${opts.reason ?? opts.exitReasonTag ?? 'no reason'}; the trade agent decides live exits (TRADE_AGENT_AUTHORITY=live)`;
+      this.logger.error(line);
+      throw new HttpException(line, HttpStatus.CONFLICT);
     }
 
     // Quantity to close: an explicit `quantity` closes only that slice
@@ -696,10 +742,30 @@ export class TradeExecutionService {
     // Close every open trade
     const openTrades = await this.tradeRepository.getOpenTrades();
     let closed = 0;
+    // TRADE_AGENT_AUTHORITY=live: a LIVE trades row may be stale (its position already closed by the trade agent's
+    // exit, which does not close the legacy row), and a blind MARKET close would then OPEN a reverse position. The kill
+    // switch is non-negotiable ("squares off ALL positions"), so a row is skipped ONLY on a POSITIVE broker read: a
+    // successful, NON-EMPTY positions answer with no open quantity for that symbol. An empty answer (the adapter
+    // returns [] when it has no data), a failed read or no adapter is UNREADABLE ⇒ the row is closed exactly as before.
+    // Every skip and every unreadable case is told to the owner (ops alert). Off: exactly as before (no broker read).
+    let brokerOpen: Set<string> | null | undefined;
 
     for (const trade of openTrades) {
       try {
-        await this.closeTrade(trade.id, `Kill switch: ${reason}`);
+        if (!trade.isPaperTrade && this.authorityLive()) {
+          if (brokerOpen === undefined) brokerOpen = await this.brokerOpenPositions();
+          const inst = (trade as { instrument?: { symbol?: string; exchange?: string } }).instrument;
+          const key = positionKey(inst?.exchange, inst?.symbol);
+          if (brokerOpen === null) {
+            this.logger.error(`[exit-authority] kill switch: broker positions unreadable — live trade ${trade.id} (${inst?.symbol ?? '?'}) closed as before`);
+            void sendOpsAlert(`killswitch-unreadable:${trade.id}`, `GrW ALERT: kill switch — broker positions unreadable; live trade ${trade.id} (${inst?.symbol ?? '?'}) closed at market as before. Check the position at the broker.`).catch(() => undefined);
+          } else if (!brokerOpen.has(key)) {
+            this.logger.warn(`[exit-authority] kill switch: live trade ${trade.id} (${inst?.symbol ?? '?'}) is flat at the broker — skipped (stale row), nothing sold`);
+            void sendOpsAlert(`killswitch-skip:${trade.id}`, `GrW ALERT: kill switch — live trade ${trade.id} (${inst?.symbol ?? '?'}) SKIPPED: the broker shows no open quantity (stale row). Check the position at the broker.`).catch(() => undefined);
+            continue;
+          }
+        }
+        await this.closeTrade(trade.id, { reason: `Kill switch: ${reason}`, ownerAction: true });
         closed++;
       } catch (error) {
         this.logger.error(
@@ -717,6 +783,22 @@ export class TradeExecutionService {
     this.tradeGateway.emitRiskStatus(riskStatus);
 
     return { closed };
+  }
+
+  /**
+   * `EXCHANGE:SYMBOL` of every non-zero broker position, or null when UNREADABLE: the read failed, no broker is
+   * configured, or the answer is empty (the adapter answers [] when it has no data, so empty is not proof of flat).
+   */
+  private async brokerOpenPositions(): Promise<Set<string> | null> {
+    if (!this.brokerAdapter) return null;
+    try {
+      const rows = await this.brokerAdapter.getPositions();
+      if (!Array.isArray(rows) || rows.length === 0) return null;
+      return new Set(rows.filter((p) => Number(p?.quantity) !== 0 && Number.isFinite(Number(p?.quantity))).map((p) => positionKey(p.exchange, p.symbol)));
+    } catch (err) {
+      this.logger.error(`[exit-authority] kill switch: broker positions read failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
   }
 
   /**

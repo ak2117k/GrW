@@ -1,19 +1,27 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { runInSharedSlot } from '../../ai-assist/assist-slot';
 import { withAiCallContext } from '../../ai-gateway/audit/ai-call-context';
 import { AiCallRepository } from '../../ai-gateway/audit/ai-call.repository';
-import { aiCallsRecordingOn, directRecordedTransport } from '../../ai-gateway/audit/recorded-transport';
+import { directOrFailoverTransport } from '../../ai-gateway/audit/failover-transport';
+import { aiCallsRecordingOn } from '../../ai-gateway/audit/recorded-transport';
 import { ClaudeCliTransport } from '../../ai-gateway/providers/claude-cli.provider';
 import type { MessagesTransport, TransportRequest } from '../../ai-gateway/transport.types';
+import { AUTHORITY_STATE, type AuthorityStatePort } from '../../exit-authority/exit-authority.tokens';
 import { judgeTransportFrom } from '../../trade-sentinel/services/llm-transport';
 import { SentinelCycleService } from '../../trade-sentinel/services/sentinel-cycle.service';
 import { DESK_MANAGER_CONFIG, type DeskManagerConfig } from '../desk-manager.config';
+import { authorityLive } from '../domain/authority';
 import type { DeskPacket } from '../domain/desk.types';
 import { managerSystemPrompt, managerUserMessage } from '../domain/manager-prompt';
 
 /** `ai_calls.job` for every manager call; config/ai-agents.json routes it to the trading agent (1 at once, 120 s). */
 export const MANAGER_JOB = 'desk.manager';
+/**
+ * `ai_calls.job` of the supreme confirm call (trade agent exit authority). config/ai-agents.json routes it to the
+ * trading agent with its own semaphore and a 30 s timeout, so a confirm never waits behind a manager run.
+ */
+export const SUPREME_CONFIRM_JOB = 'desk.confirm';
 /** Slot wait + call (matches config/ai-agents.json desk.manager timeoutMs). */
 export const MANAGER_TIMEOUT_MS = 120_000;
 const MAX_TOKENS = 12_000;
@@ -38,7 +46,9 @@ export interface ManagerLlmReply {
 @Injectable()
 export class ManagerLlmService {
   private transport: MessagesTransport | null = null;
+  private confirmTransport: MessagesTransport | null = null;
   private system: string | null = null;
+  private authoritySystem: string | null = null;
 
   constructor(
     private readonly config: ConfigService,
@@ -46,7 +56,38 @@ export class ManagerLlmService {
     private readonly calls: AiCallRepository,
     private readonly cycle: SentinelCycleService,
     @Inject(DESK_MANAGER_CONFIG) private readonly cfg: DeskManagerConfig,
+    // Trade agent exit authority: live adds the trade-agents / briefs section to the system prompt. Absent ⇒ off.
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
   ) {}
+
+  /** The system prompt in force: today's (off), or with the trade-agents / briefs section (authority live). */
+  systemPrompt(): string {
+    return authorityLive(this.authority)
+      ? (this.authoritySystem ??= managerSystemPrompt(this.cfg, { authority: true }))
+      : (this.system ??= managerSystemPrompt(this.cfg));
+  }
+
+  /**
+   * One short supreme call outside the manager cycle (the supreme confirm): the caller's request through the same
+   * recorded transport kind as decide() (job SUPREME_CONFIRM_JOB, so an AI agent gates it on its own semaphore and
+   * it never queues behind a running manager call), bounded by `timeoutMs`. Returns the reply text; throws on
+   * refusal, timeout or busy.
+   */
+  async send(userId: string, request: TransportRequest, timeoutMs: number): Promise<string> {
+    const t = (this.confirmTransport ??= this.recorded(SUPREME_CONFIRM_JOB));
+    const call = runInSharedSlot(this.cycle, () => withAiCallContext({ userId }, () => t.messages.create(request)), {
+      maxWaitMs: timeoutMs,
+      timeoutMs,
+      lane: 'signals',
+      job: SUPREME_CONFIRM_JOB,
+    });
+    const message = await withDeadline(call, timeoutMs);
+    if (message.stop_reason === 'refusal') throw new Error('the model declined');
+    return (message.content ?? [])
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text ?? '')
+      .join('');
+  }
 
   async decide(userId: string, packet: DeskPacket): Promise<ManagerLlmReply> {
     const started = Date.now();
@@ -56,7 +97,7 @@ export class ManagerLlmService {
       // No output_config.format: Vertex refused this schema ("compiled grammar is too large", 2026-11-27). The
       // prompt states the reply contract and parseManagerReply re-checks every field, so nothing is lost.
       output_config: { effort: 'high' },
-      system: [{ type: 'text', text: (this.system ??= managerSystemPrompt(this.cfg)), cache_control: { type: 'ephemeral' } }],
+      system: [{ type: 'text', text: this.systemPrompt(), cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: managerUserMessage(packet) }],
       cli: { effort: 'high' },
     };
@@ -76,14 +117,27 @@ export class ManagerLlmService {
     return { text, ms: Date.now() - started, model: this.cfg.model };
   }
 
-  private recorded(): MessagesTransport {
-    return directRecordedTransport({
+  /**
+   * The recorded direct transport, with ROUTE FAILOVER (trade agent exit authority Task 2/7) when `AI_FAILOVER` is on
+   * (default on when TRADE_AGENT_AUTHORITY=live): AI_FAILOVER_CHAIN routes (default vertex,cli; +api with a key), the
+   * first answer wins. Off: exactly `directRecordedTransport(...)` as before. Serves decide() and send() (the supreme
+   * confirm), so neither is lost to one provider's outage.
+   */
+  private recorded(job: string = MANAGER_JOB): MessagesTransport {
+    return directOrFailoverTransport({
       judge: judgeTransportFrom(this.config.get<string>('SENTINEL_JUDGE')),
       cli: this.cli,
       apiKey: this.config.get<string>('ANTHROPIC_API_KEY'),
       record: aiCallsRecordingOn(this.config.get<string>('AI_CALLS_RECORD')),
       audit: this.calls,
-      jobOf: () => MANAGER_JOB,
+      jobOf: () => job,
+      env: {
+        AI_FAILOVER: this.config.get<string>('AI_FAILOVER'),
+        AI_FAILOVER_CHAIN: this.config.get<string>('AI_FAILOVER_CHAIN'),
+        TRADE_AGENT_AUTHORITY: this.config.get<string>('TRADE_AGENT_AUTHORITY'),
+        ANTHROPIC_API_KEY: this.config.get<string>('ANTHROPIC_API_KEY'),
+      },
+      caller: job,
     });
   }
 }

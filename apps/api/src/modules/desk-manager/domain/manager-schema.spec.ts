@@ -97,6 +97,15 @@ describe('parseManagerReply', () => {
 
   it('the schema lists every action', () => {
     const actions = (MANAGER_REPLY_SCHEMA.properties.decisions.items.anyOf as unknown as Array<{ properties: { action: { enum: string[] } } }>).flatMap((s) => s.properties.action.enum);
-    expect(actions.sort()).toEqual(['BOOK', 'EXIT', 'FLAG_DATA_HOLE', 'NO_ACTION', 'OPEN', 'PAUSE_ENTRIES', 'RESUME', 'TIGHTEN', 'WATCH']);
+    expect(actions.sort()).toEqual(['BOOK', 'BRIEF', 'EXIT', 'FLAG_DATA_HOLE', 'NO_ACTION', 'OPEN', 'PAUSE_ENTRIES', 'RESUME', 'TIGHTEN', 'WATCH']);
+  });
+
+  it('BRIEF { action, trackerId, text } parses without reason / evidence; a missing trackerId or text voids the reply', () => {
+    const text = 'Lead: BSE reading. Plan: hold for 3950 while 15m closes stay above 3863.';
+    const r = parseManagerReply({ summary: 's', decisions: [{ action: 'BRIEF', trackerId: ' t1 ', text }] });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.reply.decisions[0]).toEqual({ action: 'BRIEF', trackerId: 't1', text, reason: 'trade brief', evidence: [] });
+    expect(parseManagerReply({ summary: 's', decisions: [{ action: 'BRIEF', text }] }).ok).toBe(false);
+    expect(parseManagerReply({ summary: 's', decisions: [{ action: 'BRIEF', trackerId: 't1' }] }).ok).toBe(false);
   });
 });

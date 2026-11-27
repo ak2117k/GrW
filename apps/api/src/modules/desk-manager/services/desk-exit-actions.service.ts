@@ -1,7 +1,9 @@
 import { HttpException, Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { SETUP_WATCH_MARKET, type SetupWatchMarket, type WatchRef } from '../../ai-setups/services/setup-watch.service';
+import { AUTHORITY_STATE, TRADE_ALARMS, type AuthorityStatePort, type TradeAlarmsPort } from '../../exit-authority/exit-authority.tokens';
 import { parseAutoExitConfig } from '../../sentinel-executor/domain/auto-exit.config';
 import { istDayStartUtc } from '../../sentinel-executor/domain/exit-order';
 import { isHeld } from '../../sentinel-executor/domain/guards';
@@ -9,6 +11,7 @@ import { ManualExitService } from '../../sentinel-executor/services/manual-exit.
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
 import { isPaperTracker, tradeIdOf } from '../../trade-sentinel/paper/paper-tracker';
 import type { ManagerTrackerLookup } from '../../trade-sentinel/ports/manager-trackers.port';
+import { authorityLive } from '../domain/authority';
 import type { ActionContext, ActionResult, PositionView } from '../domain/desk.types';
 
 /** The paper trades the desk manager opens (Task 5's EntryEnginePaperService brand). */
@@ -67,6 +70,9 @@ export class DeskExitActions implements ManagerTrackerLookup {
     // The owner-session market reads the AI setups use (underlying ref + LTP). Optional: absent ⇒ a live
     // TIGHTEN cannot name its watched instrument and FAILS loudly (NO_MARKET), never silently.
     @Optional() @Inject(SETUP_WATCH_MARKET) private readonly market?: DeskMarket | null,
+    // Trade agent exit authority (Task 7 wires): live ⇒ a live EXIT / BOOK raises a SUPREME_EXIT alarm. Absent ⇒ off.
+    @Optional() @Inject(TRADE_ALARMS) private readonly alarms?: Pick<TradeAlarmsPort, 'raise'> | null,
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
   ) {}
 
   async exit(trackerId: string, kind: 'EXIT' | 'BOOK', reason: string, ctx: ActionContext): Promise<ActionResult> {
@@ -83,18 +89,50 @@ export class DeskExitActions implements ManagerTrackerLookup {
       if (isPaperTracker(trackerId)) return await this.closePaper(tradeIdOf(trackerId), `DESK_MANAGER_${kind}`, why);
       if (ctx.cfg.mode !== 'live') return { status: 'RECORDED', detail: `shadow: ${kind} on live ${pos?.symbol ?? trackerId} recorded, not sent` };
 
+      // Trade agent exit authority (spec §4.4): the supreme's EXIT / BOOK on a live trade is an instruction alarm to
+      // that trade's agent, not a sell. Off / not wired ⇒ today's manual-exit path below.
+      let alarmFailed: string | null = null;
+      if (this.alarms && authorityLive(this.authority)) {
+        try {
+          await this.alarms.raise({
+            userId: owner,
+            trackerId,
+            symbol: pos?.symbol ?? trackerId,
+            rule: 'SUPREME_EXIT',
+            urgency: 'normal',
+            reason: `supreme asks ${kind}: ${String(reason ?? '').trim() || 'no reason given'}`.slice(0, 500),
+            wouldHave: `MANUAL ${kind} (desk manager → manual exit)`,
+            sourceRef: ctx.decisionId,
+            payload: { kind, runId: ctx.runId, decisionId: ctx.decisionId, pnl: pos?.pnl ?? null },
+          });
+          this.logger.warn(`[desk-manager] ${kind} ${pos?.symbol ?? trackerId}: asked the trade agent (SUPREME_EXIT alarm)`);
+          return { status: 'PENDING', detail: 'asked the trade agent' };
+        } catch (err) {
+          // The alarm could not be raised: the supreme wins disagreements, so its exit goes ahead the old way — made
+          // visible (result detail + ops alert). It is NOT owner-initiated, so under live it never cancels the owner's
+          // resting order (OPEN_ORDER_EXISTS → the owner is alerted instead).
+          alarmFailed = errText(err);
+          this.logger.error(`[desk-manager] ${kind} ${pos?.symbol ?? trackerId}: SUPREME_EXIT alarm failed (${alarmFailed}) — sending through the exit executor`);
+          void sendOpsAlert(
+            `desk-supreme-exit-direct:${trackerId}`,
+            `GrW ALERT: desk manager ${kind} on ${pos?.symbol ?? trackerId}: SUPREME_EXIT alarm failed (${alarmFailed.slice(0, 200)}), sent directly through the exit executor (the trade agent was not asked).`,
+          ).catch(() => undefined);
+        }
+      }
+      const direct = alarmFailed !== null ? `SUPREME_EXIT alarm failed, sent directly (${alarmFailed.slice(0, 200)}): ` : '';
+
       const r = await this.manual.request(
         { userId: owner, role: 'ADMIN', email: DESK_MANAGER_CALLER_EMAIL },
         trackerId,
         { now: ctx.now, reason: why },
       );
       if (!r.started) {
-        return { status: 'PENDING', detail: `an exit attempt is already working (${r.row.status}, ${r.row.verdictId})`, ref: r.row.id };
+        return { status: 'PENDING', detail: `${direct}an exit attempt is already working (${r.row.status}, ${r.row.verdictId})`, ref: r.row.id };
       }
       void r.done
         .then((o) => this.logger.warn(`[desk-manager] ${kind} ${pos?.symbol ?? trackerId}: ${o ? o.status : 'no outcome'} (attempt ${r.row.id})`))
         .catch((err) => this.logger.error(`[desk-manager] ${kind} ${pos?.symbol ?? trackerId} attempt ${r.row.id}: ${errText(err)}`));
-      return { status: 'DONE', detail: `${kind} sent through the exit executor (attempt ${r.row.verdictId})`, ref: r.row.id };
+      return { status: 'DONE', detail: `${direct}${kind} sent through the exit executor (attempt ${r.row.verdictId})`, ref: r.row.id };
     } catch (err) {
       // ManualExitService refuses with 403/404/422 (closed tracker, not F&O, no qty unit): a refusal, not a crash.
       if (err instanceof HttpException) return refused(errText(err));

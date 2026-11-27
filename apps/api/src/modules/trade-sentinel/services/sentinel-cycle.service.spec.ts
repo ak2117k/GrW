@@ -39,6 +39,8 @@ import { JUDGE_GATE_CONFIG, parseJudgeGateConfig, type JudgeGateConfig } from '.
 import { OWNER_ALERTS, type OwnerAlertPort } from '../ports/owner-alerts.port';
 import { LADDER_PLANS } from '../ports/ladder-plans.port';
 import { MANAGER_TRACKERS } from '../ports/manager-trackers.port';
+import { AUTHORITY_STATE, TRADE_ALARMS, TRADE_BRIEFS } from '../../exit-authority/exit-authority.tokens';
+import { ALARM_CHART_READER } from './alarm-chart';
 
 const USER = 'u1';
 
@@ -602,7 +604,11 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     // in-memory product cache for the intraday close decision, bound in the module; 2026-11-04).
     // The 21st the MANAGER_TRACKERS port (ports/manager-trackers.port.ts, type-only: a READ-ONLY view of
     // signal_orders.source for the desk manager's hard-loss exemption; 2026-11-26).
-    expect(injected).toHaveLength(21);
+    // The 22nd–24th the trade agent exit authority ports (exit-authority.tokens.ts, type-only, 2026-11-27):
+    // TRADE_ALARMS (writes a trade_alarms row and wakes the agent — it REPLACES a rule EXIT_NOW, never places
+    // an order), AUTHORITY_STATE (one boolean) and TRADE_BRIEFS (a text read). The 25th ALARM_CHART_READER
+    // (services/alarm-chart.ts, type-only: a READ-ONLY candles_1m read of the underlying's closed bars).
+    expect(injected).toHaveLength(25);
     // `TickSource` is an interface, so paramtypes emits Object for it and Nest
     // cannot resolve it by type. Without an explicit token Task 12 could not
     // register an adapter without editing this file.
@@ -624,6 +630,10 @@ describe('SentinelCycleService — shadow mode is structural', () => {
         expect.objectContaining({ index: 17, param: OWNER_ALERTS }),
         expect.objectContaining({ index: 18, param: LADDER_PLANS }),
         expect.objectContaining({ index: 20, param: MANAGER_TRACKERS }),
+        expect.objectContaining({ index: 21, param: TRADE_ALARMS }),
+        expect.objectContaining({ index: 22, param: AUTHORITY_STATE }),
+        expect.objectContaining({ index: 23, param: TRADE_BRIEFS }),
+        expect.objectContaining({ index: 24, param: ALARM_CHART_READER }),
       ]),
     );
 

@@ -1,8 +1,15 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { isHeld } from '../../sentinel-executor/domain/guards';
 import { parseAutoExitConfig } from '../../sentinel-executor/domain/auto-exit.config';
+import { AUTHORITY_STATE, TRADE_BRIEFS, type AuthorityStatePort, type TradeBriefsPort } from '../../exit-authority/exit-authority.tokens';
 import { minutesToClose } from '../../trade-sentinel/market-sessions';
+import { isPaperTracker } from '../../trade-sentinel/paper/paper-tracker';
 import type { DeskManagerConfig } from '../desk-manager.config';
+import { authorityLive } from '../domain/authority';
+import { BRIEF_MAX_CHARS } from '../domain/desk.types';
+
+/** A brief in the packet is cut to this (up to 50 positions must fit PACKET_MAX_CHARS); the agent reads it whole. */
+const PACKET_BRIEF_CHARS = Math.min(800, BRIEF_MAX_CHARS);
 import type {
   Block,
   DayPnlPath,
@@ -95,6 +102,9 @@ export class DeskStateService {
     @Optional() @Inject(DESK_STATE_GUARD) private readonly guard?: DeskGuardReader,
     @Optional() @Inject(DESK_MARKET) private readonly market?: DeskMarketPort,
     @Optional() @Inject(DESK_STATUS) private readonly status?: DeskStatusPort,
+    // Trade agent exit authority: live adds each live position's brief / hasBrief. Absent ⇒ off (packet unchanged).
+    @Optional() @Inject(TRADE_BRIEFS) private readonly briefs?: TradeBriefsPort | null,
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
   ) {}
 
   async build(userId: string, now: Date, cfg: DeskManagerConfig): Promise<DeskPacket> {
@@ -146,7 +156,7 @@ export class DeskStateService {
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.trackerId);
     const openIds = rows.map((r) => r.openDecisionId).filter((x): x is string => !!x);
-    const [sentinel, levelRows] = await Promise.all([this.repo.latestSentinel(ids), this.repo.managerLevelRows(ids, openIds)]);
+    const [sentinel, levelRows, briefs] = await Promise.all([this.repo.latestSentinel(ids), this.repo.managerLevelRows(ids, openIds), this.briefsOf(ids)]);
     return rows.map((r) => {
       const s = sentinel.get(r.trackerId);
       const mine = levelRows.filter((d) => d.trackerId === r.trackerId || (r.openDecisionId != null && d.id === r.openDecisionId));
@@ -166,8 +176,27 @@ export class DeskStateService {
         sentinel: s ? { verdict: s.verdict, thesisStatus: s.thesisStatus, reason: s.reason, invalidation: s.invalidation, at: s.at.toISOString() } : null,
         managerStop: lv.stop,
         managerTargets: lv.targets,
+        ...(briefs?.has(r.trackerId) ? { brief: briefs.get(r.trackerId) ?? null, hasBrief: briefs.get(r.trackerId) != null } : {}),
       };
     });
+  }
+
+  /**
+   * Authority live only: tracker → its brief (null = none) for the LIVE trackers. null when off / not wired, so
+   * the positions carry no brief fields. A failed read is "no brief" (the manager is asked for one; harmless).
+   */
+  private async briefsOf(ids: string[]): Promise<Map<string, string | null> | null> {
+    const port = this.briefs;
+    if (!port || !authorityLive(this.authority)) return null;
+    const live = ids.filter((id) => !isPaperTracker(id));
+    const out = new Map<string, string | null>();
+    await Promise.all(
+      live.map(async (id) => {
+        const text = await port.briefFor(id).catch(() => null);
+        out.set(id, typeof text === 'string' && text.trim() ? cut(text, PACKET_BRIEF_CHARS) : null);
+      }),
+    );
+    return out;
   }
 
   private async recentExits(userId: string, now: Date): Promise<RecentExit[]> {
@@ -262,7 +291,8 @@ export class DeskStateService {
     };
   }
 
-  private async memory(userId: string, now: Date): Promise<MemoryView> {
+  /** The memory block (also the supreme confirm's: SupremeConfirmService). */
+  async memory(userId: string, now: Date): Promise<MemoryView> {
     const [today, scorecard, lessons] = await Promise.all([this.repo.decisionsToday(userId, now), this.repo.scorecard(userId, 5, now), this.repo.deskLessons()]);
     return {
       today: today.map((d) => ({ at: d.createdAt.toISOString(), action: d.action, underlying: d.underlying, status: d.status, result: resultText(d.result) })),

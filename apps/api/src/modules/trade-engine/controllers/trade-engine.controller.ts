@@ -175,6 +175,8 @@ export class TradeEngineController {
       exitReasonTag: dto.exitReasonTag,
       exitNotes: dto.exitNotes,
       reason: dto.reason,
+      // The owner's own close button: allowed under TRADE_AGENT_AUTHORITY=live (owner action).
+      ownerAction: true,
     });
   }
 

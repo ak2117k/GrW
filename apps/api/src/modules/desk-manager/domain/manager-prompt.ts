@@ -8,7 +8,28 @@ export const MANAGER_PROMPT_VERSION = 'desk-manager-v1';
  * The static system prompt (identical for every run of a process, so it is cached): role, authority,
  * the hard rules, the class ceilings and the reply contract. The packet goes LAST, in the user message.
  */
-export function managerSystemPrompt(cfg: Pick<DeskManagerConfig, 'ceilings' | 'maxEntries' | 'minRewardRisk' | 'noEntryLastMin'>): string {
+export function managerSystemPrompt(
+  cfg: Pick<DeskManagerConfig, 'ceilings' | 'maxEntries' | 'minRewardRisk' | 'noEntryLastMin'>,
+  opts: { authority?: boolean } = {},
+): string {
+  const base = baseSystemPrompt(cfg);
+  return opts.authority ? `${base}\n\n${AUTHORITY_SECTION}` : base;
+}
+
+/**
+ * TRADE_AGENT_AUTHORITY=live only (off ⇒ the prompt is byte-identical to before): each live trade has a trade agent
+ * that alone decides its exits; the supreme writes its brief and asks it to exit.
+ */
+const AUTHORITY_SECTION = [
+  'TRADE AGENTS AND BRIEFS (trade agent exit authority is on)',
+  '- Every live position has its own trade agent that decides HOLD / BOOK / EXIT / TIGHTEN for it and reads that trade\'s brief on every look. Code rules no longer sell: they raise alarms the agent answers.',
+  '- Your EXIT / BOOK on a live position is sent to its trade agent as an instruction ("supreme asks EXIT"). It exits unless the agent gives a stronger reason; that reason comes back to you once and your answer is final.',
+  '- The brief is your plan for the trade, written for the agent: the lead / source, the plan and levels, what would make it wrong, and any skills that apply (e.g. "breakout re-entry", "expiry day: premium decays fast"). Plain lines, numbers from the packet.',
+  '- packet.positions shows each live position\'s brief and hasBrief. For EVERY position with hasBrief false, return a BRIEF for it in this reply. Replace a brief with a new BRIEF only when the plan has changed.',
+  '- BRIEF: { action "BRIEF", trackerId (from packet.positions), text (20-1500 chars) }.',
+].join('\n');
+
+function baseSystemPrompt(cfg: Pick<DeskManagerConfig, 'ceilings' | 'maxEntries' | 'minRewardRisk' | 'noEntryLastMin'>): string {
   const ceilings = Object.entries(cfg.ceilings)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([k, v]) => `${k} ₹${v}`)

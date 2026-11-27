@@ -158,6 +158,25 @@ describe('DeskStateService.build', () => {
     expect(a.ageMin).toBe(20);
   });
 
+  it('authority live: live positions carry brief / hasBrief (paper none); off: no brief fields at all', async () => {
+    const repo = repoMock({ openPositions: jest.fn(async () => [pos(1), pos(2), pos(3, { trackerId: 'paper:tr3', paper: true })]) });
+    const briefs = { briefFor: jest.fn(async (id: string) => (id === 'trk1' ? 'Plan: hold for 1100 above 1000.' : null)), write: jest.fn() };
+    const guard = { state: jest.fn(async () => guardState) };
+    const live = await new DeskStateService(repo as never, guard, market(), undefined, briefs, { isLive: () => true }).build('owner', NOW, cfg);
+    const [a, b, c] = live.positions.value ?? [];
+    expect(a).toMatchObject({ brief: 'Plan: hold for 1100 above 1000.', hasBrief: true });
+    expect(b).toMatchObject({ brief: null, hasBrief: false });
+    expect('hasBrief' in c).toBe(false);
+    expect(briefs.briefFor).not.toHaveBeenCalledWith('paper:tr3');
+    for (const authority of [{ isLive: () => false }, undefined]) {
+      const off = await new DeskStateService(repo as never, guard, market(), undefined, briefs, authority).build('owner', NOW, cfg);
+      for (const p of off.positions.value ?? []) {
+        expect('brief' in p).toBe(false);
+        expect('hasBrief' in p).toBe(false);
+      }
+    }
+  });
+
   it('recentExits only within 90 min', async () => {
     const closed = (id: string, minAgo: number): ClosedPositionRow => ({ trackerId: id, symbol: 'NIFTY27NOV2624650CE', underlying: 'NIFTY', exitAt: new Date(NOW.getTime() - minAgo * 60_000), pnl: -400, paper: false });
     const repo = repoMock({

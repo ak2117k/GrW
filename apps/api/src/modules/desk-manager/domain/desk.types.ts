@@ -58,6 +58,12 @@ export interface PositionView {
   sentinel: { verdict: string; thesisStatus: string | null; reason: string; invalidation: number | null; at: string } | null;
   managerStop: number | null;
   managerTargets: number[];
+  /**
+   * Trade agent exit authority (TRADE_AGENT_AUTHORITY=live only; absent otherwise, so the off packet is unchanged):
+   * the trade brief the trade agent reads every look, and whether one exists. Live trackers only.
+   */
+  brief?: string | null;
+  hasBrief?: boolean;
 }
 
 export interface RecentExit {
@@ -151,10 +157,16 @@ export type ManagerDecision =
   | ({ action: 'RESUME' } & Why)
   | ({ action: 'WATCH'; underlying: string; note: string; recheckMin: number } & Why)
   | ({ action: 'FLAG_DATA_HOLE'; what: string; impact: string } & Why)
-  | ({ action: 'NO_ACTION'; proposalRef?: string } & Why);
+  | ({ action: 'NO_ACTION'; proposalRef?: string } & Why)
+  /** Trade agent exit authority: the supreme writes (replaces) the trade brief of one live position. */
+  | ({ action: 'BRIEF'; trackerId: string; text: string } & Why);
 
 export type ManagerAction = ManagerDecision['action'];
-export const MANAGER_ACTIONS: readonly ManagerAction[] = ['OPEN', 'EXIT', 'BOOK', 'TIGHTEN', 'PAUSE_ENTRIES', 'RESUME', 'WATCH', 'FLAG_DATA_HOLE', 'NO_ACTION'];
+export const MANAGER_ACTIONS: readonly ManagerAction[] = ['OPEN', 'EXIT', 'BOOK', 'TIGHTEN', 'PAUSE_ENTRIES', 'RESUME', 'WATCH', 'FLAG_DATA_HOLE', 'NO_ACTION', 'BRIEF'];
+
+/** A trade brief's text bounds (the BRIEF action). */
+export const BRIEF_MIN_CHARS = 20;
+export const BRIEF_MAX_CHARS = 1500;
 
 export interface ManagerReply {
   summary: string;

@@ -42,7 +42,8 @@ import { AiGatewayModule } from '../ai-gateway/ai-gateway.module';
 import { AI_GATEWAY, type AiGateway } from '../ai-gateway/ai-gateway.service';
 import { jobFor, SentinelGatewayTransport } from '../ai-gateway/sentinel/sentinel-gateway.transport';
 import { AiCallRepository } from '../ai-gateway/audit/ai-call.repository';
-import { aiCallsRecordingOn, directRecordedTransport } from '../ai-gateway/audit/recorded-transport';
+import { aiCallsRecordingOn } from '../ai-gateway/audit/recorded-transport';
+import { AI_HEALTH, aiHealthOf, directOrFailoverTransport } from '../ai-gateway/audit/failover-transport';
 import { judgeTransportFrom, type MessagesTransport } from './services/llm-transport';
 import { SentinelNewsAdapter } from './adapters/news.adapter';
 import { SentinelOiWallSource } from './adapters/oi-wall.adapter';
@@ -61,7 +62,7 @@ import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig, withSessionExitTunin
 import { SESSION_TUNING } from '../self-review/tuning/tunables';
 import { REJUDGE_CONFIG, parseRejudgeConfig } from './services/rejudge-suppression';
 import { EXIT_ATTEMPTS, FUTILE_REJUDGE_CONFIG, parseFutileRejudgeConfig } from './services/futile-rejudge';
-import { JUDGE_GATE_CONFIG, parseJudgeGateConfig } from './services/judge-gate';
+import { isIntradayProduct, JUDGE_GATE_CONFIG, parseJudgeGateConfig } from './services/judge-gate';
 import { PrismaExitAttemptReader } from './repositories/exit-attempt.reader';
 import { MinuteBarsReader } from './adapters/minute-bars.reader';
 import { NewsEventsCoreModule } from '../news-events/news-events-core.module';
@@ -83,6 +84,11 @@ import { PrismaLadderPlanReader } from './repositories/ladder-plan.reader';
 import { parseLadderMode } from '../exit-discipline/target-ladder';
 import { CLOSE_PRODUCTS } from './ports/close-products.port';
 import { CloseProductBook } from '../intraday-carry/close-product-book';
+import { ExitAuthorityModule } from '../exit-authority/exit-authority.module';
+import { TRACKER_WAKE } from '../exit-authority/exit-authority.tokens';
+import { HARD_LOSS_PROBE, type HardLossProbe } from '../exit-authority/services/escalation-runner.service';
+import { ALARM_CHART_READER } from './services/alarm-chart';
+import { alarmChartReaderFor } from './repositories/alarm-chart.reader';
 
 /**
  * Trade Sentinel — Stage 0 (shadow). Watches open Angel One positions and
@@ -142,6 +148,11 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
     MarketEventsModule,
     // MBM M3 (MBM_PACKET): the fail-open, cached market-behaviour client for the packet block.
     MbmModule,
+    // Trade agent exit authority (2026-11-27): TRADE_ALARMS / AUTHORITY_STATE / TRADE_BRIEFS for the cycle, the
+    // agent. Inert while TRADE_AGENT_AUTHORITY=off. The cycle sees only the port interfaces (the structural spec
+    // still holds); the authority's own backstop exits go through its late-bound OWNER_EXIT (ManualExitService,
+    // bound in SentinelExecutorModule), named there in the open, not here.
+    ExitAuthorityModule,
   ],
   controllers: [SentinelController, NightAnalysisController],
   providers: [
@@ -195,6 +206,12 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
        * reply text capped at ~60 KB each, CLI/API token usage, latency, error),
        * fire-and-forget: the provider, request and reply objects are unchanged.
        * `AI_CALLS_RECORD=off` binds exactly the unwrapped transport.
+       *
+       * ROUTE FAILOVER (2026-11-27, trade agent exit authority Task 2). `AI_FAILOVER=on` (default on
+       * when TRADE_AGENT_AUTHORITY=live, else off) serves the direct path from `AI_FAILOVER_CHAIN`
+       * (default vertex,cli; +api when ANTHROPIC_API_KEY is set) — one recorded transport per route,
+       * the first answer wins, and SENTINEL_JUDGE is superseded by the chain. Off: exactly today's
+       * transport. The gateway path (AI_GATEWAY_SENTINEL=true) is unchanged either way.
        */
       useFactory: (
         config: ConfigService,
@@ -204,16 +221,26 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
       ): MessagesTransport =>
         config.get<string>('AI_GATEWAY_SENTINEL')?.trim().toLowerCase() === 'true'
           ? new SentinelGatewayTransport(gateway)
-          : directRecordedTransport({
+          : directOrFailoverTransport({
               judge: judgeTransportFrom(config.get<string>('SENTINEL_JUDGE')),
               cli,
               apiKey: config.get<string>('ANTHROPIC_API_KEY'),
               record: aiCallsRecordingOn(config.get<string>('AI_CALLS_RECORD')),
               audit: calls,
               jobOf: jobFor,
+              env: {
+                AI_FAILOVER: config.get<string>('AI_FAILOVER'),
+                AI_FAILOVER_CHAIN: config.get<string>('AI_FAILOVER_CHAIN'),
+                TRADE_AGENT_AUTHORITY: config.get<string>('TRADE_AGENT_AUTHORITY'),
+                ANTHROPIC_API_KEY: config.get<string>('ANTHROPIC_API_KEY'),
+              },
+              caller: 'sentinel',
             }),
       inject: [ConfigService, ClaudeCliTransport, AI_GATEWAY, AiCallRepository],
     },
+    // AI_HEALTH (exit authority): the sentinel's failover instance — allDownSince() is the first time
+    // every route failed, null once any answers. Failover off / gateway path: a stub that is never down.
+    { provide: AI_HEALTH, useFactory: (client: MessagesTransport) => aiHealthOf(client), inject: [ANTHROPIC_CLIENT] },
 
     // Adapters — the narrow ports, bound to the real services.
     { provide: OPEN_POSITIONS, useClass: OpenPositionsRepository },
@@ -297,6 +324,24 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
     OiWallSnapshotService,
     SentinelCycleService,
     SentinelRunnerService,
+    // Trade agent exit authority ports IMPLEMENTED here (ExitAuthorityModule's late-bound forwarders find them):
+    // TRACKER_WAKE = the runner's per-tracker wake; HARD_LOSS_PROBE = the fast guard's hard-loss reading on a quick
+    // price (the backstop's "still past the limit?"); ALARM_CHART_READER = closed 5m/15m bars + N15 for the alarm look.
+    { provide: TRACKER_WAKE, useExisting: SentinelRunnerService },
+    {
+      provide: HARD_LOSS_PROBE,
+      // productIntraday: the broker product the carry engine last read (CloseProductBook, ≤5 min old, else unknown) —
+      // the deadline backstop does not sell a position converted to carry-forward.
+      useFactory: (cycle: SentinelCycleService, products: CloseProductBook): HardLossProbe => ({
+        stillPastLimit: (trackerId: string) => cycle.hardLossStillPast(trackerId),
+        productIntraday: (trackerId: string) => {
+          const p = products.productTypeOf(trackerId);
+          return p === null ? null : isIntradayProduct(p);
+        },
+      }),
+      inject: [SentinelCycleService, CloseProductBook],
+    },
+    { provide: ALARM_CHART_READER, useFactory: alarmChartReaderFor, inject: [PrismaService] },
     // Part B — tick-driven price sensors. The hub is reached ONLY through this
     // port binding (composition root), so the cycle's walk never reaches it.
     TickSensorBook,
@@ -347,6 +392,7 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
     JUDGE_GATE_CONFIG,
     MARKET_EVENTS,
     CloseProductBook,
+    AI_HEALTH,
   ],
 })
 export class TradeSentinelModule {}

@@ -90,10 +90,10 @@ describe('SentinelExecutorModule wiring', () => {
     }
   });
 
-  it('declares exactly the imports the plans name (no trade-sentinel, no auto-execution module; MbmModule for MBM M3 exit shadow)', () => {
+  it('declares exactly the imports the plans name (no trade-sentinel, no auto-execution module; MbmModule for MBM M3 exit shadow; ExitAuthorityModule for the trade agent exit authority ports)', () => {
     const imports = (Reflect.getMetadata(MODULE_METADATA.IMPORTS, SentinelExecutorModule) as Array<{ name: string }>)
       .map((m) => m.name)
       .sort();
-    expect(imports).toEqual(['CredentialDecryptorModule', 'MarketDataModule', 'MbmModule', 'PrismaModule']);
+    expect(imports).toEqual(['CredentialDecryptorModule', 'ExitAuthorityModule', 'MarketDataModule', 'MbmModule', 'PrismaModule']);
   });
 });

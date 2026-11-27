@@ -4,6 +4,8 @@ import { AiGatewayModule } from '../ai-gateway/ai-gateway.module';
 import { AiSetupsModule } from '../ai-setups/ai-setups.module';
 import { SETUP_WATCH_MARKET } from '../ai-setups/services/setup-watch.service';
 import { EntryEngineModule } from '../entry-engine/entry-engine.module';
+import { ExitAuthorityModule } from '../exit-authority/exit-authority.module';
+import { SUPREME_CONFIRM } from '../exit-authority/exit-authority.tokens';
 import { SentinelExecutorModule } from '../sentinel-executor/sentinel-executor.module';
 import { SignalTraderModule } from '../signal-trader/signal-trader.module';
 import { TradeEngineModule } from '../trade-engine/trade-engine.module';
@@ -26,6 +28,7 @@ import { DeskWakeListener } from './services/desk-wake.listener';
 import { ManagerLlmService } from './services/manager-llm.service';
 import { DESK_PACKET_BUILDER, ManagerRunnerService, type DeskPacketBuilder } from './services/manager-runner.service';
 import { PendingEntryWatchService } from './services/pending-entry-watch.service';
+import { SupremeConfirmService } from './services/supreme-confirm.service';
 import { DESK_WAKE as TARGET_WATCH_WAKE, TargetWatchService } from './services/target-watch.service';
 
 /**
@@ -45,6 +48,10 @@ import { DESK_WAKE as TARGET_WATCH_WAKE, TargetWatchService } from './services/t
     SignalTraderModule,
     TradeEngineModule,
     TradeSentinelModule,
+    // Trade agent exit authority (2026-11-27): TRADE_ALARMS / TRADE_BRIEFS / AUTHORITY_STATE for DeskExitActions,
+    // TargetWatchService, DeskActionsService, PendingEntryWatchService, DeskStateService and ManagerLlmService.
+    // SUPREME_CONFIRM stays this module's own binding below (a local provider wins over the imported forwarder).
+    ExitAuthorityModule,
   ],
   controllers: [DeskManagerController],
   providers: [
@@ -80,10 +87,13 @@ import { DESK_WAKE as TARGET_WATCH_WAKE, TargetWatchService } from './services/t
     { provide: DESK_EXIT_ACTIONS, useExisting: DeskExitActions },
     PendingEntryWatchService,
     TargetWatchService,
+    // Trade agent exit authority (2026-11-27): the supreme confirm call.
+    SupremeConfirmService,
+    { provide: SUPREME_CONFIRM, useExisting: SupremeConfirmService },
     // Learning (Task 6).
     { provide: DESK_GRADE_MARKET, useExisting: SETUP_WATCH_MARKET },
     DeskGradeCron,
   ],
-  exports: [DeskGuardModule, ManagerRunnerService],
+  exports: [DeskGuardModule, ManagerRunnerService, SUPREME_CONFIRM],
 })
 export class DeskManagerModule {}

@@ -4,8 +4,10 @@ import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { SETUP_WATCH_MARKET, type SetupWatchMarket, type WatchRef } from '../../ai-setups/services/setup-watch.service';
+import { AUTHORITY_STATE, TRADE_ALARMS, type AuthorityStatePort, type TradeAlarmsPort } from '../../exit-authority/exit-authority.tokens';
 import { paperTrackerId, isPaperTracker, tradeIdOf } from '../../trade-sentinel/paper/paper-tracker';
 import { DESK_MANAGER_CONFIG, type DeskManagerConfig } from '../desk-manager.config';
+import { authorityLive } from '../domain/authority';
 import type { ActionResult, DeskPacket, PositionView, WakeReason } from '../domain/desk.types';
 import { DeskExitActions, isTighter } from './desk-exit-actions.service';
 
@@ -82,6 +84,9 @@ export class TargetWatchService {
     @Inject(DESK_MANAGER_CONFIG) private readonly cfg: DeskManagerConfig,
     @Optional() @Inject(SETUP_WATCH_MARKET) private readonly market?: DeskMarket | null,
     @Optional() @Inject(DESK_WAKE) private readonly waker?: DeskWakePort | null,
+    // Trade agent exit authority (Task 7 wires): live ⇒ a live position's lock is a TARGET_LOCK alarm. Absent ⇒ off.
+    @Optional() @Inject(TRADE_ALARMS) private readonly alarms?: Pick<TradeAlarmsPort, 'raise'> | null,
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
   ) {}
 
   @Cron('*/5 * * * * *', { timeZone: 'Asia/Kolkata' })
@@ -178,7 +183,39 @@ export class TargetWatchService {
       return;
     }
     if (!isTighter(p.bullish, level, p.stop)) return; // never loosens: the stop in force is already at or past it
+    if (!isPaperTracker(p.trackerId) && this.alarms && authorityLive(this.authority) && (await this.lockAlarm(p, level, st.reached, now))) return;
     await this.lock(p, level, st.reached, now);
+  }
+
+  /**
+   * Trade agent exit authority (spec §4.2 "Desk target-lock"): a live position's lock becomes a TARGET_LOCK alarm
+   * to its trade agent instead of a code tighten. false = the alarm could not be raised (the caller locks as today).
+   */
+  private async lockAlarm(p: ManagedPosition, level: number, reached: number, now: Date): Promise<boolean> {
+    const target = p.targets[reached - 1];
+    const to = reached >= 2 ? `target ${reached - 1}` : 'entry';
+    const reason = `target lock: ${p.underlying} crossed target ${reached} (${target}) and the manager did not act within ${TARGET_LOCK_AFTER_MS / 1000} s — lock the profit: stop to ${to} ${level}`;
+    try {
+      const row = await (this.alarms as Pick<TradeAlarmsPort, 'raise'>).raise(
+        {
+          userId: this.cfg.ownerUserId as string,
+          trackerId: p.trackerId,
+          symbol: p.symbol,
+          rule: 'TARGET_LOCK',
+          urgency: 'normal',
+          reason: reason.slice(0, 500),
+          wouldHave: `TIGHTEN ${p.underlying} stop to ${level} (${TARGET_LOCK_RUN_ID})`,
+          sourceRef: p.openDecisionId,
+          payload: { level, underlying: p.underlying, target, reached, stopInForce: p.stop },
+        },
+        now,
+      );
+      this.logger.warn(`[desk-target] TARGET_LOCK alarm ${p.symbol}: ${reason}${row ? ` (alarm ${row.id})` : ' (an open alarm already covers it)'}`);
+      return true;
+    } catch (err) {
+      this.logger.error(`[desk-target] ${p.symbol}: TARGET_LOCK alarm failed (${errText(err)}) — locking by code as before`);
+      return false;
+    }
   }
 
   private async lock(p: ManagedPosition, level: number, reached: number, now: Date): Promise<ActionResult> {

@@ -2,6 +2,7 @@ import { Logger, UnprocessableEntityException } from '@nestjs/common';
 import { parseDeskManagerConfig } from '../desk-manager.config';
 import type { ActionContext, DeskPacket, PositionView } from '../domain/desk.types';
 import { DeskExitActions, bullishExposure, isTighter } from './desk-exit-actions.service';
+import * as opsAlert from '../../../common/utils/ops-alert';
 
 const NOW = new Date('2026-11-26T05:30:00Z'); // 11:00 IST
 const OWNER = 'owner';
@@ -99,6 +100,70 @@ describe('DeskExitActions', () => {
       });
       const lower = harness({ exitsToday: 2 });
       expect((await lower.svc.exit('t1', 'EXIT', 'x', ctx('live', [pos()], { DESK_MANAGER_MAX_EXITS: '2' }))).status).toBe('REFUSED');
+    });
+
+    describe('trade agent exit authority', () => {
+      const withAuthority = (live: boolean, raise: jest.Mock = jest.fn(async () => ({ id: 'alarm-1' }))) => {
+        const h = harness();
+        const svc = new DeskExitActions(h.prisma as never, h.manual as never, h.paper as never, h.market as never, { raise }, { isLive: () => live });
+        return { ...h, svc, raise };
+      };
+
+      it('live: a live EXIT / BOOK raises a SUPREME_EXIT alarm and does NOT call manual exit', async () => {
+        const h = withAuthority(true);
+        const r = await h.svc.exit('t1', 'BOOK', 'target 1 reached', ctx('live'));
+        expect(r).toEqual({ status: 'PENDING', detail: 'asked the trade agent' });
+        expect(h.manual.request).not.toHaveBeenCalled();
+        expect(h.raise).toHaveBeenCalledTimes(1);
+        expect(h.raise.mock.calls[0][0]).toEqual(
+          expect.objectContaining({ userId: OWNER, trackerId: 't1', symbol: 'BSE30DEC253900CE', rule: 'SUPREME_EXIT', urgency: 'normal', reason: 'supreme asks BOOK: target 1 reached', sourceRef: 'dec1' }),
+        );
+        const e = await h.svc.exit('t1', 'EXIT', 'thesis broken', ctx('live'));
+        expect(e.status).toBe('PENDING');
+        expect(h.raise.mock.calls[1][0].reason).toBe('supreme asks EXIT: thesis broken');
+      });
+
+      it('live: an alarm already open (deduped, null) is still PENDING', async () => {
+        const h = withAuthority(true, jest.fn(async () => null));
+        expect(await h.svc.exit('t1', 'EXIT', 'x', ctx('live'))).toEqual({ status: 'PENDING', detail: 'asked the trade agent' });
+        expect(h.manual.request).not.toHaveBeenCalled();
+      });
+
+      it('live: the alarm failing falls back to the manual exit (the supreme wins) — visibly, and not owner-initiated', async () => {
+        const ops = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true);
+        const h = withAuthority(true, jest.fn(async () => { throw new Error('db down'); }));
+        const r = await h.svc.exit('t1', 'EXIT', 'x', ctx('live'));
+        expect(r.status).toBe('DONE');
+        expect(r.detail).toMatch(/^SUPREME_EXIT alarm failed, sent directly \(db down\): EXIT sent through the exit executor/);
+        expect(h.manual.request).toHaveBeenCalledTimes(1);
+        // No ownerInitiated: under live the executor never cancels the owner's resting order for this exit.
+        expect((h.manual.request.mock.calls[0] as unknown[])[2]).toEqual({ now: NOW, reason: 'DESK_MANAGER EXIT: x' });
+        expect(ops).toHaveBeenCalledWith('desk-supreme-exit-direct:t1', expect.stringContaining('SUPREME_EXIT alarm failed (db down), sent directly'));
+      });
+
+      it('off: no alarm, no ops alert, the detail exactly as today', async () => {
+        const ops = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true);
+        const h = withAuthority(false);
+        const r = await h.svc.exit('t1', 'EXIT', 'x', ctx('live'));
+        expect(r).toEqual({ status: 'DONE', detail: 'EXIT sent through the exit executor (attempt man_t1_1)', ref: 'exec1' });
+        expect(ops).not.toHaveBeenCalled();
+      });
+
+      it('off (isLive false, or no ports): today\'s manual exit, no alarm', async () => {
+        const h = withAuthority(false);
+        expect((await h.svc.exit('t1', 'EXIT', 'x', ctx('live'))).status).toBe('DONE');
+        expect(h.manual.request).toHaveBeenCalledTimes(1);
+        expect(h.raise).not.toHaveBeenCalled();
+      });
+
+      it('live: paper trackers and the hold list keep today\'s rules', async () => {
+        const h = withAuthority(true);
+        h.prisma.trade.findUnique.mockResolvedValueOnce({ id: 'tr1', isPaperTrade: true, strategy: 'DESK_MANAGER', status: 'OPEN' } as never);
+        expect((await h.svc.exit('paper:tr1', 'EXIT', 'x', ctx('live', [pos({ trackerId: 'paper:tr1' })]))).status).toBe('DONE');
+        expect(h.paper.closeTrade).toHaveBeenCalled();
+        expect((await h.svc.exit('t1', 'EXIT', 'x', ctx('live', [pos({ held: true })]))).status).toBe('REFUSED');
+        expect(h.raise).not.toHaveBeenCalled();
+      });
     });
 
     it('an attempt already working is PENDING, not a second order', async () => {

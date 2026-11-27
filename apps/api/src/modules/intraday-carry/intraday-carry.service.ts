@@ -20,6 +20,7 @@ import { SESSION_TUNING } from '../self-review/tuning/tunables';
 import { afterConversion, decideClose, type CloseAction, type CloseOutcome } from './domain/carry-decision';
 import { openRowFor, verifyConversion, type BookRow } from './domain/verify-conversion';
 import { IntradayCarryRepository } from './repositories/intraday-carry.repository';
+import { AUTHORITY_STATE, TRADE_ALARMS, type AuthorityStatePort, type TradeAlarmsPort } from '../exit-authority/exit-authority.tokens';
 
 /** DI token: the hub's SessionClock (MCX late close honoured), built in the module. */
 export const CARRY_SESSION_CLOCK = Symbol('CARRY_SESSION_CLOCK');
@@ -33,6 +34,8 @@ const READ_AHEAD_EVERY_MS = 60_000;
 export const CARRY_EXIT_STAMP = 'rule:intraday-carry/1';
 export const CARRY_EXIT_REASON_PREFIX = 'INTRADAY_CARRY EXIT (close decision, code rule):';
 export const CARRY_FIRE = 'intraday-carry';
+/** carry-decision.ts words a close decision taken from the judge's own verdict as `judge <VERDICT>: <reason>`. */
+const JUDGE_REASON_PREFIX = 'judge ';
 
 /** The position book row's descriptive fields Angel's convert API documents beside the core ones. */
 const CONVERT_EXTRA_KEYS = [
@@ -109,6 +112,10 @@ export class IntradayCarryService implements OnModuleInit, OnModuleDestroy {
     @Inject(CARRY_SESSION_CLOCK) private readonly clock: Pick<SessionClock, 'minutesToClose'>,
     /** Self-review session-open tunables (carry.decideByMin); absent ⇒ INTRADAY_CARRY_DECIDE_BY_MIN. */
     @Optional() @Inject(SESSION_TUNING) private readonly sessionTuning?: CarryTuningReader,
+    // Trade agent exit authority (exit-authority.tokens.ts): live ⇒ a CODE close exit (EXPIRY_DAY, NO_JUDGEMENT,
+    // CARRY not confirmed) raises a `deadline` alarm instead of an EXIT_NOW. Absent / not live ⇒ exactly as before.
+    @Optional() @Inject(TRADE_ALARMS) private readonly alarms?: TradeAlarmsPort | null,
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
   ) {}
 
   onModuleInit(): void {
@@ -380,6 +387,41 @@ export class IntradayCarryService implements OnModuleInit, OnModuleDestroy {
   private async recordExit(t: Tracker, p: Progress, verdict: CloseVerdict | null, o: CloseOutcome, now: Date, executorOn: boolean): Promise<void> {
     if (!executorOn) {
       this.logger.error(`[carry] EXIT ${p.symbol} (tracker ${t.id}): the AI auto-exit is off for this user (AI_AUTO_EXIT_ENABLED / AI_AUTO_EXIT_USER_IDS) — Angel's MIS square-off closes it`);
+    }
+    // Trade agent exit authority (live): a CODE exit — not the judge's own close verdict ("judge …") — becomes a
+    // `deadline` alarm on the broker's MIS square-off: the trade agent decides, and an unanswered alarm is exited
+    // by code just before the deadline (exit-authority escalation). No EXIT_NOW is written.
+    // The judge's own EXIT also raises that deadline alarm (then records its EXIT_NOW as before): its rule:intraday-carry
+    // stamp makes the router turn the EXIT_NOW into an alarm, and the router finds this one — with the deadline — open,
+    // instead of raising an urgent CARRY alarm with no deadline (final review 5a).
+    const judgeExit = o.reason.startsWith(JUDGE_REASON_PREFIX);
+    if (this.alarms && this.authority?.isLive() === true) {
+      const w = this.windowFor(t.exchange, now);
+      // The square-off: the window's end. Unknown (the clock says the venue is shut) ⇒ now, the safe direction.
+      const deadline = w ? new Date(w.openedAt.getTime() + this.cfg.windowMin * 60_000) : now;
+      const reason = `${CARRY_EXIT_REASON_PREFIX} ${o.reason}`.slice(0, 500);
+      try {
+        const row = await this.alarms.raise({
+          userId: t.userId,
+          trackerId: t.id,
+          symbol: t.symbol,
+          rule: 'CARRY',
+          urgency: 'deadline',
+          reason: o.reason.slice(0, 500),
+          wouldHave: `EXIT_NOW ${reason}`.slice(0, 500),
+          deadline,
+          severityN: null,
+          sourceRef: p.id,
+          payload: { decisionId: p.id, verdictId: verdict?.id ?? null, minutesLeft: w?.minutesLeft ?? null, executorOn },
+        }, now);
+        this.logger.warn(
+          `[carry] EXIT ${p.symbol} (tracker ${t.id}): CARRY alarm ${row ? `raised (${row.id})` : 'deduped'} with deadline ${deadline.toISOString()} — ` +
+            (judgeExit ? "the judge's EXIT_NOW is recorded too; the trade agent decides (TRADE_AGENT_AUTHORITY=live)" : 'no EXIT_NOW written, the trade agent decides (TRADE_AGENT_AUTHORITY=live)'),
+        );
+      } catch (err) {
+        this.logger.error(`[carry] could not raise the CARRY alarm for ${p.symbol} (tracker ${t.id}): ${errText(err)} — the broker squares it off`);
+      }
+      if (!judgeExit) return;
     }
     const packet = (verdict?.packet ?? (await this.latestPacket(t.id, now)) ?? { intradayCarry: { decisionId: p.id } }) as Prisma.InputJsonValue;
     const money = (packet as { money?: { netPnl?: unknown } } | null)?.money;

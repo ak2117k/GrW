@@ -52,6 +52,12 @@ export const MANAGER_REPLY_SCHEMA = {
           obj('WATCH', { underlying: str, note: str, recheckMin: num }),
           obj('FLAG_DATA_HOLE', { what: str, impact: str }),
           obj('NO_ACTION', { proposalRef: { anyOf: [{ type: 'null' }, str] } }),
+          {
+            type: 'object',
+            additionalProperties: false,
+            required: ['action', 'trackerId', 'text'],
+            properties: { action: { type: 'string', enum: ['BRIEF'] }, trackerId: str, text: str, ...why },
+          },
         ],
       },
     },
@@ -68,8 +74,9 @@ const optNum = (v: unknown) => v === undefined || v === null || finite(v);
 /**
  * Text → JSON, tolerating a ```json fence or a line of prose around the one object (the reply is no longer
  * grammar-constrained: Vertex rejected MANAGER_REPLY_SCHEMA as too large). An object passes through.
+ * Also the supreme confirm reply's parser (domain/confirm-prompt.ts).
  */
-function toJson(raw: unknown): unknown {
+export function toJson(raw: unknown): unknown {
   if (typeof raw !== 'string') return raw;
   const t = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   try {
@@ -91,6 +98,15 @@ function parseDecision(x: unknown): { d: ManagerDecision } | { error: string } {
   if (!isRec(x)) return { error: 'not an object' };
   const action = x.action;
   if (!MANAGER_ACTIONS.includes(action as never)) return { error: `unknown action ${String(action)}` };
+  if (action === 'BRIEF') {
+    // { action, trackerId, text }: reason / evidence optional (the brief is the content). Length is validateDecision's
+    // check, so a too-short brief is INVALID on its own and never voids the rest of the reply.
+    if (!nonEmpty(x.trackerId)) return { error: 'BRIEF without trackerId' };
+    if (typeof x.text !== 'string') return { error: 'BRIEF without text' };
+    if (x.evidence !== undefined && !(Array.isArray(x.evidence) && x.evidence.every((e) => typeof e === 'string'))) return { error: 'evidence must be an array of strings' };
+    const evidence = Array.isArray(x.evidence) ? (x.evidence as string[]).map((e) => e.trim()).filter((e) => e.length > 0) : [];
+    return { d: { action, trackerId: x.trackerId.trim(), text: x.text.trim(), reason: nonEmpty(x.reason) ? x.reason.trim() : 'trade brief', evidence } };
+  }
   if (!nonEmpty(x.reason)) return { error: 'missing reason' };
   if (!Array.isArray(x.evidence) || !x.evidence.every((e) => typeof e === 'string')) return { error: 'evidence must be an array of strings' };
   const w = { reason: x.reason.trim(), evidence: (x.evidence as string[]).map((e) => e.trim()).filter((e) => e.length > 0) };

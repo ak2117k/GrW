@@ -149,6 +149,34 @@ export class WatchService {
     private readonly brokerAdapter: BrokerAdapter | null = null,
   ) {}
 
+  /** Entries whose live close was refused and WARNed already (once each; bounded). */
+  private readonly refusedLiveClose = new Set<string>();
+
+  /**
+   * TRADE_AGENT_AUTHORITY=live: the trade engine refuses this LIVE entry's close (only the owner or the trade agent may
+   * close a live trade). The entry is then left exactly as it is — still TRADED, nothing written, never marked closed over
+   * a position that is still open — and a WARN is logged once per entry. Paper entries and authority off: false (today).
+   */
+  private liveCloseRefused(entry: any): boolean {
+    if (!entry || entry.paperTradeId || !entry.liveTradeId) return false;
+    let refused = false;
+    try {
+      refused = this.trade.legacyLiveCloseRefused?.() === true;
+    } catch {
+      refused = false;
+    }
+    if (!refused) return false;
+    if (!this.refusedLiveClose.has(entry.id)) {
+      this.refusedLiveClose.add(entry.id);
+      if (this.refusedLiveClose.size > 1_000) this.refusedLiveClose.delete(this.refusedLiveClose.values().next().value as string);
+      this.logger.warn(
+        `[exit-authority] watch entry ${entry.id} (${entry.symbol}): live close refused (TRADE_AGENT_AUTHORITY=live) — the entry stays OPEN; ` +
+          `the trade agent / owner decides live trade ${entry.liveTradeId}`,
+      );
+    }
+    return true;
+  }
+
   /**
    * List watch entries (optionally a single IST day) enriched with the
    * triggering Chartink scanner name and, for closed entries, the linked
@@ -848,6 +876,7 @@ export class WatchService {
 
   async transitionTargetHit(entryId: string, price: number): Promise<void> {
     const entry = await this.repo.findById(entryId);
+    if (this.liveCloseRefused(entry)) return;
     await this.repo.createEvent({
       watchEntryId: entryId,
       eventType: WatchEventType.TARGET_HIT,
@@ -923,6 +952,7 @@ export class WatchService {
       );
       return;
     }
+    if (this.liveCloseRefused(entry)) return;
     await this.repo.createEvent({
       watchEntryId: entryId,
       eventType: WatchEventType.SL_HIT_SCORE,
@@ -953,6 +983,7 @@ export class WatchService {
     openPnl: number,
   ): Promise<void> {
     const entry = await this.repo.findById(entryId);
+    if (this.liveCloseRefused(entry)) return;
 
     // Re-confirm the loss with an independent fresh REST quote before exiting.
     // A single bad feed tick (observed: a glitch tick several rupees off the
@@ -1147,6 +1178,9 @@ export class WatchService {
     if (entry.status !== WatchStatus.TRADED) {
       throw new Error(`Cannot closeTraded on entry in status ${entry.status}`);
     }
+    if (this.liveCloseRefused(entry)) {
+      throw new Error(`live close refused (TRADE_AGENT_AUTHORITY=live): entry ${entryId} stays OPEN`);
+    }
 
     await this.closeLinkedTrade(entry, reason, this.lastMarkPrice(entry));
 
@@ -1228,6 +1262,7 @@ export class WatchService {
     // slice's recorded fill matches the actual trigger, not the cached LTP
     // at simulation time (same class of bug as commit 9fb5bcd).
     const partialTradeId = entry.paperTradeId ?? entry.liveTradeId;
+    if (this.liveCloseRefused(entry)) return; // nothing sold: no partial exit, no trail on the WatchEntry
     if (partialTradeId) {
       try {
         await this.trade.closeTrade(partialTradeId, {
@@ -1310,6 +1345,7 @@ export class WatchService {
    * status=EXITED, write TRAILING_STOP_HIT event, unsubscribe feed.
    */
   private async triggerTrailingStop(entry: any, ltp: number, stopPrice: number): Promise<void> {
+    if (this.liveCloseRefused(entry)) return;
     this.logger.log(
       `${entry.symbol}: trailing stop hit at ₹${ltp.toFixed(2)} (high-water=${entry.trailingHighWater}, stop=${stopPrice.toFixed(2)})`,
     );

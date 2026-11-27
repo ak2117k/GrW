@@ -1,5 +1,7 @@
 // apps/api/src/modules/sentinel-executor/services/sentinel-exit-executor.service.ts
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { AUTHORITY_STATE, OWNER_ESCALATION, type AuthorityStatePort, type OwnerEscalationPort } from '../../exit-authority/exit-authority.tokens';
+import { isPaperTrackerId } from '../domain/exit-authority';
 import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { ExitFailureAlerts, exitFailStreakFrom, scrubBrokerMessage } from '../domain/exit-failure-alert';
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -66,6 +68,14 @@ export { AI_EXIT_SESSION_CLOCK, AI_EXIT_SLEEP } from './executor.tokens';
 const DISABLED_CFG = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });
 export type Sleep = (ms: number) => Promise<void>;
 export type AiExitOutcome = { status: AiExitStatus | 'DUPLICATE'; reason?: string };
+
+export interface ExecuteOptions {
+  /**
+   * MANUAL only: the OWNER asked for this exit (the app's Exit button, the Telegram Exit / bx tap). Under
+   * TRADE_AGENT_AUTHORITY=live only such an exit may cancel the owner's resting orders (owner ruling 2026-11-27).
+   */
+  ownerInitiated?: boolean;
+}
 
 /** FLOOR_BROKER_SL live: one position's stop request (FloorBrokerSlService builds it from the cycle's floor). */
 export interface FloorStopIntent {
@@ -192,6 +202,20 @@ function noted(run: Run, message: string | null | undefined): string | null | un
   const room = 500 - note.length - 3;
   return room > 0 ? `${message.slice(0, room)} | ${note}` : note;
 }
+/** The non-terminal orders resting on one contract, for the owner's blocked-exit alert: "123 (LIMIT SELL 75 @ 120.5)". */
+function openOrdersOn(book: unknown[], exchange: string, token: string): string {
+  const up = (x: unknown) => String(x ?? '').toUpperCase();
+  return (book as Array<Record<string, unknown>>)
+    .filter((o) => String(o?.symboltoken ?? '') === token && up(o?.exchange) === up(exchange)
+      && !isTerminalOrderStatus(String(o?.status ?? o?.orderstatus ?? '')))
+    .map((o) => {
+      const px = Number(o?.price) > 0 ? ` @ ${String(o.price)}` : '';
+      const trg = Number(o?.triggerprice) > 0 ? ` trg ${String(o.triggerprice)}` : '';
+      return `${String(o?.orderid ?? '?')} (${String(o?.ordertype ?? '?')} ${String(o?.transactiontype ?? '?')} ${String(o?.quantity ?? '?')}${px}${trg})`;
+    })
+    .join(', ')
+    .slice(0, 300);
+}
 /** "SL1 (STOPLOSS_MARKET SELL 100), T1 (LIMIT SELL 100)" */
 const describeProtective = (orders: ProtectiveOrder[]) =>
   orders.map((o) => `${o.orderId} (${o.orderType} ${o.side} ${o.quantity})`).join(', ');
@@ -220,6 +244,8 @@ export class SentinelExitExecutor {
   private readonly stopChangedAt = new Map<string, number>();
   /** FLOOR_BROKER_SL_AT=ceiling: trackers already warned "ceiling stop blocked by owner order" (once per tracker). */
   private readonly ceilingBlockWarned = new Set<string>();
+  /** Exit authority: execution rows whose OPEN_ORDER_EXISTS block already went to the owner (once per row; bounded). */
+  private readonly blockedEscalated = new Set<string>();
 
   constructor(
     private readonly repo: AiExitExecutionRepository,
@@ -228,7 +254,21 @@ export class SentinelExitExecutor {
     @Inject(AI_EXIT_SESSION_CLOCK) private readonly clock: Pick<SessionClock, 'isOpen' | 'minutesToClose' | 'tradingWindow'>,
     @Inject(AI_EXIT_SLEEP) private readonly sleep: Sleep,
     private readonly gate: ExitGateService,
+    // Trade agent exit authority (absent / off ⇒ today): live ⇒ the exit gate is facts only, and a confirmed exit
+    // blocked by the owner's resting order goes to the owner (never cancelled for them).
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort,
+    @Optional() @Inject(OWNER_ESCALATION) private readonly escalation?: OwnerEscalationPort,
   ) {}
+
+  /** TRADE_AGENT_AUTHORITY is live for this tracker (bound, live, not a paper tracker). */
+  private authorityLive(trackerId: string): boolean {
+    if (isPaperTrackerId(trackerId)) return false;
+    try {
+      return this.authority?.isLive() === true;
+    } catch {
+      return false;
+    }
+  }
 
   async process(v: PendingVerdict, cfg: AutoExitConfig, now: Date = new Date()): Promise<AiExitOutcome> {
     // 1. CLAIM — the idempotency anchor. Nothing touches the broker before this.
@@ -246,6 +286,7 @@ export class SentinelExitExecutor {
    */
   async execute(
     id: string, v: PendingVerdict, aiCfg: AutoExitConfig, now: Date = new Date(), trigger: ExitTrigger = 'AI',
+    opts: ExecuteOptions = {},
   ): Promise<AiExitOutcome> {
     // FLOOR_BROKER_SL: an exit and a floor-stop change never overlap on one position. The exit marks the
     // tracker busy (syncFloorStops leaves it alone) and first waits — bounded, exits are never blocked — for
@@ -256,7 +297,7 @@ export class SentinelExitExecutor {
       for (let waited = 0; this.stopBusy.has(key) && waited < STOP_IDLE_WAIT_MS; waited += STOP_IDLE_POLL_MS) {
         await this.sleep(STOP_IDLE_POLL_MS);
       }
-      return await this.executeAttempt(id, v, aiCfg, now, trigger);
+      return await this.executeAttempt(id, v, aiCfg, now, trigger, opts.ownerInitiated === true);
     } finally {
       const n = (this.exitBusy.get(key) ?? 1) - 1;
       if (n > 0) this.exitBusy.set(key, n);
@@ -265,9 +306,18 @@ export class SentinelExitExecutor {
   }
 
   private async executeAttempt(
-    id: string, v: PendingVerdict, aiCfg: AutoExitConfig, now: Date, trigger: ExitTrigger,
+    id: string, v: PendingVerdict, aiCfg: AutoExitConfig, now: Date, trigger: ExitTrigger, ownerInitiated: boolean,
   ): Promise<AiExitOutcome> {
-    const cfg: AutoExitConfig = trigger === 'MANUAL' ? { ...aiCfg, mode: 'live' } : aiCfg;
+    let cfg: AutoExitConfig = trigger === 'MANUAL' ? { ...aiCfg, mode: 'live' } : aiCfg;
+    // TRADE_AGENT_AUTHORITY=live (spec §4.5b, owner 2026-11-27 "keep me alerting"): only an OWNER-initiated exit (the
+    // app's Exit button, the Telegram Exit / bx tap: MANUAL + ownerInitiated) may cancel the owner's order. Every other
+    // exit — AI, price trigger, and MANUAL without ownerInitiated (backstops, supreme exits, the desk manager's direct
+    // fallback) — ignores EXIT_CANCEL_OWNER_ORDERS and AI_AUTO_EXIT_CANCEL_PROTECTIVE, so OPEN_ORDER_EXISTS goes to the
+    // owner (blockedExit). Off ⇒ unchanged for every caller.
+    const ownerAction = trigger === 'MANUAL' && ownerInitiated;
+    if (!ownerAction && (cfg.cancelOwnerOrders === true || cfg.cancelProtective) && this.authorityLive(v.trackerId)) {
+      cfg = { ...cfg, cancelOwnerOrders: false, cancelProtective: false };
+    }
 
     // 2. GUARDS — DB + clock only.
     const tracker = (await this.prisma.tradeTracker.findUnique({ where: { id: v.trackerId } })) as Tracker | null;
@@ -309,6 +359,9 @@ export class SentinelExitExecutor {
     // Started now so its DB reads overlap the session lease and the broker reads below.
     // The gate can only PREVENT an AI sell; load never rejects and is bounded (fail-open).
     const gated = trigger === 'AI';
+    // TRADE_AGENT_AUTHORITY=live (spec §4.3.4): the gate no longer blocks the agent's confirmed EXIT. Its facts are
+    // still computed and stored on the row (`gate`, marked gateFacts) for review; off ⇒ the gate blocks as today.
+    const gateFactsOnly = gated && this.authorityLive(v.trackerId);
     const gateLoad: Promise<GateContext> | null = gated && this.gate.enabled() ? this.gate.load(v, now) : null;
     // Never an unhandled rejection if the lease fails before the gate is awaited (gateRecord still sees any rejection).
     gateLoad?.catch(() => undefined);
@@ -324,6 +377,11 @@ export class SentinelExitExecutor {
           throw new SessionTokenExpiredError(first.detail ?? 'AG8001');
         }
         if (first.kind === 'skip' && first.reason === OWNER_ORDER_CANCEL_FAILED) return this.ownerCancelFailed(run, first.detail ?? '');
+        if (first.kind === 'skip' && first.reason === 'OPEN_ORDER_EXISTS' && !ownerAction && this.escalation && this.authorityLive(v.trackerId)) {
+          const out = await this.finish(id, v, 'SKIPPED', first.reason);
+          this.escalateBlocked(id, v, first.detail);
+          return out;
+        }
         if (first.kind === 'skip' || first.kind === 'fail') {
           return first.kind === 'skip'
             ? this.finish(id, v, 'SKIPPED', first.reason)
@@ -333,12 +391,18 @@ export class SentinelExitExecutor {
         // consequences — the dry-run branch, any protective cancel and the order. A blocked
         // verdict ends SKIPPED here: nothing is cancelled, nothing is sent.
         const gate = gated ? await this.gateRecord(gateLoad, first, t, now) : null;
-        await this.recordPlan(id, first.order, first.ltp, gate ? { gate } : {});
-        if (gate && isBlocking(gate)) {
+        if (gateFactsOnly && gate) {
+          const facts: GateRecordV1 & { gateFacts: true } = { ...gate, gateFacts: true };
+          await this.recordPlan(id, first.order, first.ltp, { gate: facts });
+          this.logger.log(`[exit-gate] facts only (TRADE_AGENT_AUTHORITY=live, not applied): ${gateSummary(gate)} — ${v.symbol} verdict ${v.id}`);
+        } else {
+          await this.recordPlan(id, first.order, first.ltp, gate ? { gate } : {});
+        }
+        if (!gateFactsOnly && gate && isBlocking(gate)) {
           this.logger.log(`[exit-gate] ${gateSummary(gate)} — ${v.symbol} verdict ${v.id}`);
           return this.finish(id, v, 'SKIPPED', gate.outcome);
         }
-        if (gate && gate.outcome === 'PASS') {
+        if (!gateFactsOnly && gate && gate.outcome === 'PASS') {
           this.logger.log(`[exit-gate] ${gateSummary(gate)} — ${v.symbol} verdict ${v.id}`);
         }
 
@@ -432,6 +496,24 @@ export class SentinelExitExecutor {
       );
     }
     return this.finish(id, v, 'FAILED', 'BROKER_AUTH', { brokerMessage: detail.slice(0, 200) });
+  }
+
+  /**
+   * TRADE_AGENT_AUTHORITY=live, spec §4.5b: a confirmed exit refused OPEN_ORDER_EXISTS goes to the owner at once
+   * (Telegram Exit / Hold) — the owner's order is never cancelled for them. Once per execution row; never awaited,
+   * never throws (an alert problem cannot change the attempt's outcome).
+   */
+  private escalateBlocked(id: string, v: PendingVerdict, detail: string | undefined): void {
+    if (!this.escalation || this.blockedEscalated.has(id)) return;
+    this.blockedEscalated.add(id);
+    if (this.blockedEscalated.size > 1_000) this.blockedEscalated.delete(this.blockedEscalated.values().next().value as string);
+    const escalation = this.escalation;
+    void Promise.resolve()
+      .then(() => escalation.blockedExit({
+        userId: v.userId, trackerId: v.trackerId, symbol: v.symbol, reason: String(v.reason ?? '').slice(0, 500),
+        detail: `OPEN_ORDER_EXISTS: ${detail || 'an open order rests on the contract'} (execution ${id}, verdict ${v.id})`.slice(0, 500),
+      }))
+      .catch((err) => this.logger.warn(`[ai-exit] owner escalation for ${v.symbol} execution ${id} failed: ${errText(err)}`));
   }
 
   /**
@@ -970,7 +1052,7 @@ export class SentinelExitExecutor {
         if (own.kind === 'cancel') return { kind: 'protective', via: 'owner', ...fields, orders: own.orders };
         if (own.kind === 'uncancellable') return { kind: 'skip', reason: OWNER_ORDER_CANCEL_FAILED, detail: own.detail };
       }
-      return { kind: 'skip', reason: 'OPEN_ORDER_EXISTS' };
+      return { kind: 'skip', reason: 'OPEN_ORDER_EXISTS', detail: openOrdersOn(book, plan.order.exchange, plan.order.token) };
     }
     return { kind: 'ok', order: plan.order, ltp: plan.ltp, unitVerified: plan.unitVerified };
   }

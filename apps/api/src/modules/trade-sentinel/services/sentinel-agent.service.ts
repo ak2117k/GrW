@@ -23,6 +23,7 @@ import {
 } from '../prompts/sentinel-overnight-prompt';
 import type { OvernightPacket } from '../overnight/overnight-packet.types';
 import { parseExitTriggerProposal, type ExitTriggerProposal } from './exit-trigger-proposal';
+import { AUTHORITY_STATE, type AuthorityStatePort } from '../../exit-authority/exit-authority.tokens';
 
 /**
  * The effort values the API accepts. Narrowed here rather than left as `string`
@@ -240,6 +241,9 @@ export class SentinelAgentService {
     // argument keeps working, and so a container without ConfigModule still
     // boots — the compiled defaults are then used, which are the correct tiers.
     @Optional() private readonly config?: ConfigService,
+    // Trade agent exit authority (exit-authority.tokens.ts): live ⇒ the +x1 "ALARMS AND BRIEF" section and stamp.
+    // Read per call (the boot check can turn it live after construction). Absent ⇒ off, byte-identical.
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
   ) {}
 
   /**
@@ -291,6 +295,22 @@ export class SentinelAgentService {
         FLOOR_HARD_EXIT: this.config.get<string>('FLOOR_HARD_EXIT') ?? undefined,
       }).floorHardExit,
     };
+  }
+
+  /**
+   * The prompt options for THIS packet. Trade agent exit authority (+x1): only while AUTHORITY_STATE is live AND the
+   * packet carries the live path's `alarm` / `brief` keys — so a paper judgement (the paper sentinel shares this
+   * service) and every packet with the authority off get exactly today's text and stamp.
+   */
+  private promptOptionsFor(packet: ContextPacket | null | undefined): SentinelPromptOptions {
+    const o = this.promptOptions;
+    const live = this.authority?.isLive() === true && !!packet && ('alarm' in packet || 'brief' in packet);
+    return live ? { ...o, authority: true } : o;
+  }
+
+  /** The stamp of the prompt {@link judge} uses for `packet` (see {@link promptOptionsFor}). */
+  promptVersionFor(packet: ContextPacket): string {
+    return sentinelCompositePromptVersion(this.promptOptionsFor(packet));
   }
 
   /**
@@ -366,7 +386,7 @@ export class SentinelAgentService {
         system: [
           {
             type: 'text',
-            text: sentinelSystemPrompt(this.promptOptions),
+            text: sentinelSystemPrompt(this.promptOptionsFor(packet)),
             // Identical on every call, and the packet rides in the user turn —
             // so the whole prefix is cacheable across every position, every tick.
             cache_control: { type: 'ephemeral' },

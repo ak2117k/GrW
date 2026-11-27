@@ -12,6 +12,7 @@ import { OwnerBrokerSessionProvider } from '../sentinel-executor/services/owner-
 import { AiExitExecutionRepository } from '../sentinel-executor/repositories/ai-exit-execution.repository';
 import { SentinelVerdictRepository } from '../trade-sentinel/repositories/sentinel-verdict.repository';
 import { TradeSentinelModule } from '../trade-sentinel/trade-sentinel.module';
+import { ExitAuthorityModule } from '../exit-authority/exit-authority.module';
 import { CARRY_SESSION_CLOCK, IntradayCarryService } from './intraday-carry.service';
 import { CARRY_SCORE_CANDLES, IntradayCarryScoreService } from './intraday-carry-score.service';
 import { IntradayCarryRepository } from './repositories/intraday-carry.repository';
@@ -27,7 +28,9 @@ import { IntradayCarryRepository } from './repositories/intraday-carry.repositor
  * INTRADAY_CARRY_USERS (default empty). Rollback: INTRADAY_CARRY=off.
  */
 @Module({
-  imports: [PrismaModule, MarketDataModule, CredentialDecryptorModule, TradeSentinelModule],
+  // ExitAuthorityModule (2026-11-27): TRADE_ALARMS / AUTHORITY_STATE — under TRADE_AGENT_AUTHORITY=live a code
+  // EXIT becomes a `deadline` CARRY alarm on the broker's MIS square-off (close − INTRADAY_CARRY_SQUARE_OFF_LEAD_MIN).
+  imports: [PrismaModule, MarketDataModule, CredentialDecryptorModule, TradeSentinelModule, ExitAuthorityModule],
   providers: [
     IntradayCarryRepository,
     IntradayCarryService,

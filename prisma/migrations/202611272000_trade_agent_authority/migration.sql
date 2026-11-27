@@ -28,6 +28,9 @@ CREATE TABLE "trade_alarms" (
 );
 CREATE INDEX "trade_alarms_status_tracker_id_idx" ON "trade_alarms"("status", "tracker_id");
 CREATE INDEX "trade_alarms_tracker_id_rule_status_idx" ON "trade_alarms"("tracker_id", "rule", "status");
+-- At most one live (OPEN/SNOOZED) alarm per (tracker, rule), even across processes. Partial: not expressible in
+-- schema.prisma, so it lives only here; a concurrent second create gets P2002 and TradeAlarmsService treats it as deduped.
+CREATE UNIQUE INDEX "trade_alarms_tracker_id_rule_live_key" ON "trade_alarms"("tracker_id", "rule") WHERE "status" IN ('OPEN', 'SNOOZED');
 
 CREATE TABLE "trade_briefs" (
     "tracker_id" TEXT NOT NULL,

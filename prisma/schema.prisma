@@ -4275,6 +4275,8 @@ model TradeAlarm {
 
   @@index([status, trackerId])
   @@index([trackerId, rule, status])
+  // Plus a partial unique index in migration 202611272000_trade_agent_authority (Prisma cannot express it):
+  // trade_alarms_tracker_id_rule_live_key ON (tracker_id, rule) WHERE status IN ('OPEN','SNOOZED').
   @@map("trade_alarms")
 }
 

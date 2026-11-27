@@ -25,6 +25,8 @@ export const ALARM_REASON_CAP = 500;
 export class TradeAlarmsService implements TradeAlarmsPort {
   private readonly log = new Logger(TradeAlarmsService.name);
   private warnedNoWake = false;
+  /** Tail of the in-flight raise chain per (tracker, rule). */
+  private readonly chains = new Map<string, Promise<void>>();
 
   constructor(
     private readonly repo: TradeAlarmRepository,
@@ -36,6 +38,23 @@ export class TradeAlarmsService implements TradeAlarmsPort {
     if (isPaperTracker(a.trackerId)) return null;
     if (!this.state?.isLive()) return null;
 
+    // Serialise raises per (tracker, rule) in-process, so a tick-driven rule and a sentinel pass firing together
+    // never both read "no alarm" and both create. Across processes the partial unique index backs this up (P2002).
+    const key = `${a.trackerId}\u0000${a.rule}`;
+    const prev = this.chains.get(key) ?? Promise.resolve();
+    const run = prev.then(() => this.raiseSerial(a, now));
+    const tail: Promise<void> = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.chains.set(key, tail);
+    void tail.then(() => {
+      if (this.chains.get(key) === tail) this.chains.delete(key);
+    });
+    return run;
+  }
+
+  private async raiseSerial(a: RaiseAlarm, now: Date): Promise<AlarmRow | null> {
     const reason = (a.reason ?? '').slice(0, ALARM_REASON_CAP);
     const latest = await this.repo.findLatestLive(a.trackerId, a.rule);
 
@@ -59,7 +78,7 @@ export class TradeAlarmsService implements TradeAlarmsPort {
       });
     } else {
       // Nothing live, or the agent answered and the rule is still true past the re-raise rule: a fresh alarm.
-      row = await this.repo.create({
+      const created = await this.createOrDedupe({
         userId: a.userId,
         trackerId: a.trackerId,
         symbol: a.symbol,
@@ -82,10 +101,25 @@ export class TradeAlarmsService implements TradeAlarmsPort {
         telegramMessageId: null,
         snoozedUntil: null,
       });
+      if (!created) return null;
+      row = created;
     }
 
     this.wakeAgent(row);
     return row;
+  }
+
+  /** Create, or null when another process already holds the live alarm (partial unique index → P2002). */
+  private async createOrDedupe(input: Omit<AlarmRow, 'id'>): Promise<AlarmRow | null> {
+    try {
+      return await this.repo.create(input);
+    } catch (err) {
+      if ((err as { code?: unknown } | null)?.code === 'P2002') {
+        this.log.log(`[exit-authority] raise deduped by unique index: ${input.trackerId} ${input.rule}`);
+        return null;
+      }
+      throw err;
+    }
   }
 
   openFor(trackerId: string): Promise<AlarmRow[]> {

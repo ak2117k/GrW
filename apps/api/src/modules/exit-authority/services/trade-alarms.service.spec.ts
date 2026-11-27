@@ -87,6 +87,30 @@ describe('TradeAlarmsService', () => {
     expect(wake.wakeTracker).toHaveBeenCalledTimes(1);
   });
 
+  it('two raises started together for the same tracker+rule → one create, one wake, the other null', async () => {
+    const { repo, wake, svc } = setup();
+    const [r1, r2] = await Promise.all([svc.raise(floor(), T0), svc.raise(floor(), T0)]);
+    expect(repo.creates).toBe(1);
+    expect(repo.rows).toHaveLength(1);
+    expect(wake.wakeTracker).toHaveBeenCalledTimes(1);
+    expect([r1, r2].filter((r) => r === null)).toHaveLength(1);
+  });
+
+  it('a failed raise does not block the next raise for the same key', async () => {
+    const { repo, svc } = setup();
+    const create = jest.spyOn(repo, 'create').mockRejectedValueOnce(new Error('db down'));
+    await expect(svc.raise(floor(), T0)).rejects.toThrow('db down');
+    expect(await svc.raise(floor(), at(1_000))).not.toBeNull();
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it('a P2002 (another process holds the live alarm) on create returns null without a wake', async () => {
+    const { repo, wake, svc } = setup();
+    jest.spyOn(repo, 'create').mockRejectedValueOnce(Object.assign(new Error('Unique constraint failed'), { code: 'P2002' }));
+    expect(await svc.raise(floor(), T0)).toBeNull();
+    expect(wake.wakeTracker).not.toHaveBeenCalled();
+  });
+
   it('a different rule on the same tracker is its own alarm', async () => {
     const { repo, svc } = setup();
     await svc.raise(floor(), T0);

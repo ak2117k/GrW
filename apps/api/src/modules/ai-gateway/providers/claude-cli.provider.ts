@@ -235,8 +235,8 @@ export class ClaudeCliTransport implements MessagesTransport {
     params: TransportRequest,
   ): Promise<{ message: TransportMessage; envelope: CliEnvelope }> {
     const system = params.system.map((s) => s.text).join('\n\n');
-    const schema = params.output_config.format.schema;
-    const promptFile = this.promptFileFor(system + schemaInstruction(schema));
+    const schema = params.output_config.format?.schema;
+    const promptFile = this.promptFileFor(schema ? system + schemaInstruction(schema) : system);
 
     // Images ride on a stream-json user message (image content blocks) — the only way `claude -p`
     // takes an image with every tool disabled. Text-only calls keep the plain-stdin path unchanged.

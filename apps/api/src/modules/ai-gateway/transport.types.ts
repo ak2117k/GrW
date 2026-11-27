@@ -43,7 +43,8 @@ export interface TransportRequest {
   max_tokens: number;
   output_config: {
     effort: 'low' | 'medium' | 'high';
-    format: { type: 'json_schema'; schema: Record<string, unknown> };
+    /** Optional: a caller whose schema is too large for a compiled grammar (desk manager) states the contract in its prompt instead. */
+    format?: { type: 'json_schema'; schema: Record<string, unknown> };
   };
   system: Array<{
     type: 'text';

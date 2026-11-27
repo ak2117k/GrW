@@ -26,6 +26,15 @@ describe('parseManagerReply', () => {
     expect(parseManagerReply({ decisions: [] }).ok).toBe(false);
   });
 
+  it('a reply wrapped in a line of prose still parses; a broken object inside prose does not', () => {
+    const inner = '{"summary":"quiet","decisions":[{"action":"NO_ACTION","proposalRef":null,"reason":"no edge","evidence":["ltp 1 (x)"]}]}';
+    const r = parseManagerReply(`Here is the desk decision:\n${inner}\nThat is all.`);
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.reply.decisions[0].action).toBe('NO_ACTION');
+    expect(parseManagerReply('Decision: {"summary": "x", "decisions": [ } done').ok).toBe(false);
+    expect(parseManagerReply('{"summary":"x","decisions":[{"action":"FLY","reason":"r","evidence":["e"]}]} ok').ok).toBe(false);
+  });
+
   it('unknown action rejected (and one bad decision rejects the whole reply)', () => {
     const r = parseManagerReply({ summary: 's', decisions: [EXIT, { action: 'SELL_EVERYTHING', reason: 'r', evidence: ['1'] }] });
     expect(r.ok).toBe(false);

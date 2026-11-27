@@ -11,7 +11,6 @@ import { SentinelCycleService } from '../../trade-sentinel/services/sentinel-cyc
 import { DESK_MANAGER_CONFIG, type DeskManagerConfig } from '../desk-manager.config';
 import type { DeskPacket } from '../domain/desk.types';
 import { managerSystemPrompt, managerUserMessage } from '../domain/manager-prompt';
-import { MANAGER_REPLY_SCHEMA } from '../domain/manager-schema';
 
 /** `ai_calls.job` for every manager call; config/ai-agents.json routes it to the trading agent (1 at once, 120 s). */
 export const MANAGER_JOB = 'desk.manager';
@@ -29,7 +28,8 @@ export interface ManagerLlmReply {
 /**
  * The manager AI call: one desk packet → the reply text.
  *
- * - Model: DESK_MANAGER_MODEL (Opus 5.5), effort high, strict JSON schema (MANAGER_REPLY_SCHEMA).
+ * - Model: DESK_MANAGER_MODEL (Opus 5.5), effort high. Reply contract in the prompt, checked by parseManagerReply
+ *   (no structured-output schema: Vertex rejects its compiled grammar as too large).
  * - Prompt: the static system prompt (cache_control ephemeral), the packet last in the user message.
  * - Transport: the sentinel's direct binding wrapped in the ai_calls recorder, job 'desk.manager', userId = owner.
  * - Capacity: runInSharedSlot (lane 'signals'); with AI agents on, the trading agent serves it.
@@ -53,7 +53,9 @@ export class ManagerLlmService {
     const request: TransportRequest = {
       model: this.cfg.model,
       max_tokens: MAX_TOKENS,
-      output_config: { effort: 'high', format: { type: 'json_schema', schema: MANAGER_REPLY_SCHEMA as unknown as Record<string, unknown> } },
+      // No output_config.format: Vertex refused this schema ("compiled grammar is too large", 2026-11-27). The
+      // prompt states the reply contract and parseManagerReply re-checks every field, so nothing is lost.
+      output_config: { effort: 'high' },
       system: [{ type: 'text', text: (this.system ??= managerSystemPrompt(this.cfg)), cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: managerUserMessage(packet) }],
       cli: { effort: 'high' },

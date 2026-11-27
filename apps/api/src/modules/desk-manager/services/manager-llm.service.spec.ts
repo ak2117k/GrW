@@ -2,13 +2,12 @@ import * as slot from '../../ai-assist/assist-slot';
 import { parseDeskManagerConfig } from '../desk-manager.config';
 import type { DeskPacket } from '../domain/desk.types';
 import { managerSystemPrompt } from '../domain/manager-prompt';
-import { MANAGER_REPLY_SCHEMA } from '../domain/manager-schema';
 import { MANAGER_JOB, ManagerLlmService } from './manager-llm.service';
 
 const REPLY = { summary: 'quiet', decisions: [{ action: 'NO_ACTION', reason: 'nothing', evidence: ['ltp 1'] }] };
 const packet = { at: '2026-11-26T04:30:00.000Z', mode: 'shadow', positions: { status: 'unavailable', reason: 'timed out', source: 'x' } } as unknown as DeskPacket;
 
-type Req = { model: string; output_config: { effort: string; format: unknown }; system: Array<{ text: string; cache_control?: unknown }>; messages: Array<{ content: string }> };
+type Req = { model: string; output_config: { effort: string; format?: unknown }; system: Array<{ text: string; cache_control?: unknown }>; messages: Array<{ content: string }> };
 
 function make(reply: { text?: string; stop_reason?: string } = {}) {
   const cli = {
@@ -27,14 +26,15 @@ function make(reply: { text?: string; stop_reason?: string } = {}) {
 }
 
 describe('ManagerLlmService.decide', () => {
-  it('sends job desk.manager, the reply schema, effort high, the configured model; static prompt cached, packet last', async () => {
+  it('sends job desk.manager, no output schema, effort high, the configured model; static prompt cached, packet last', async () => {
     const { svc, req, audit, cfg } = make();
     const out = await svc.decide('owner-1', packet);
     expect(JSON.parse(out.text)).toEqual(REPLY);
     expect(out.model).toBe('claude-opus-test');
     expect(req().model).toBe('claude-opus-test');
     expect(req().output_config.effort).toBe('high');
-    expect(req().output_config.format).toEqual({ type: 'json_schema', schema: MANAGER_REPLY_SCHEMA });
+    // No grammar-constrained format: Vertex rejects MANAGER_REPLY_SCHEMA as too large; parseManagerReply checks the reply.
+    expect(req().output_config.format).toBeUndefined();
     expect(req().system[0]).toMatchObject({ text: managerSystemPrompt(cfg), cache_control: { type: 'ephemeral' } });
     const msg = req().messages[0].content;
     expect(msg.endsWith(JSON.stringify(packet))).toBe(true);

@@ -17,7 +17,7 @@ describe('imageSetupRequest', () => {
     const req = imageSetupRequest('claude-haiku-5-5', input, { mediaType: 'image/jpeg', data: 'QUJD' });
     expect(req.model).toBe('claude-haiku-5-5');
     expect(req.system[0].text).toBe(IMAGE_SETUP_SYSTEM);
-    expect(req.output_config.format.schema).toBe(IMAGE_SETUP_SCHEMA);
+    expect(req.output_config.format?.schema).toBe(IMAGE_SETUP_SCHEMA);
     expect(req.messages).toHaveLength(1);
     expect(req.messages[0].images).toEqual([{ mediaType: 'image/jpeg', data: 'QUJD' }]);
     expect(req.messages[0].content).toContain('Channel: Stock Wale Bhaiyaa Learning Group');

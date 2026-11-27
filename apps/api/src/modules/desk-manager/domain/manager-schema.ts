@@ -65,14 +65,24 @@ const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFi
 const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
 const optNum = (v: unknown) => v === undefined || v === null || finite(v);
 
-/** Text → JSON (tolerating a ```json fence); an object passes through. */
+/**
+ * Text → JSON, tolerating a ```json fence or a line of prose around the one object (the reply is no longer
+ * grammar-constrained: Vertex rejected MANAGER_REPLY_SCHEMA as too large). An object passes through.
+ */
 function toJson(raw: unknown): unknown {
   if (typeof raw !== 'string') return raw;
   const t = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   try {
     return JSON.parse(t);
   } catch {
-    return undefined;
+    const a = t.indexOf('{');
+    const b = t.lastIndexOf('}');
+    if (a < 0 || b <= a) return undefined;
+    try {
+      return JSON.parse(t.slice(a, b + 1));
+    } catch {
+      return undefined;
+    }
   }
 }
 

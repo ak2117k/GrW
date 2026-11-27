@@ -125,7 +125,7 @@ describe('notes-judge-replay', () => {
     for (const r of f.requests) {
       expect(r.model).toBe('claude-opus-5'); // the stored record's model, both arms
       expect(r.output_config.effort).toBe('medium');
-      expect(r.output_config.format.type).toBe('json_schema');
+      expect(r.output_config.format?.type).toBe('json_schema');
     }
   });
 

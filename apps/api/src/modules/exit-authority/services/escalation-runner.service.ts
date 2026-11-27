@@ -17,6 +17,7 @@ import {
 import { EscalationRepository } from '../repositories/escalation.repository';
 import { TradeAlarmRepository } from '../repositories/trade-alarm.repository';
 import { TelegramBotClient, type InlineButton } from '../telegram/telegram-bot.client';
+import { TrackerMessages } from '../telegram/tracker-messages';
 import { AuthorityStateService } from './authority-state.service';
 
 /**
@@ -74,6 +75,8 @@ export class EscalationRunner {
   private running = false;
   private readonly cannotActAt = new Map<string, number>();
   private warnedNoProbe = false;
+  /** This pass's alarms grouped by tracker. */
+  private byTracker = new Map<string, AlarmRow[]>();
 
   constructor(
     private readonly alarmRepo: TradeAlarmRepository,
@@ -81,6 +84,7 @@ export class EscalationRunner {
     @Inject(TRADE_ALARMS) private readonly alarms: TradeAlarmsPort,
     private readonly state: AuthorityStateService,
     private readonly telegram: TelegramBotClient,
+    private readonly messages: TrackerMessages,
     @Optional() @Inject(OWNER_EXIT) private readonly ownerExit?: OwnerExitPort,
     @Optional() @Inject(HARD_LOSS_PROBE) private readonly probe?: HardLossProbe,
     @Optional() @Inject(AI_HEALTH) private readonly aiHealth?: AiHealthPort,
@@ -102,6 +106,16 @@ export class EscalationRunner {
       if (all.length === 0) return;
       const open = await this.esc.openTrackerIds([...new Set(all.map((a) => a.trackerId))]);
       const aiDown = this.aiDown();
+      this.byTracker = new Map();
+      for (const a of all) {
+        const list = this.byTracker.get(a.trackerId) ?? [];
+        list.push(a);
+        this.byTracker.set(a.trackerId, list);
+      }
+      // After a restart the per-trade message is known only from the rows: newest raised alarm carrying one.
+      for (const a of [...all].sort((x, y) => y.lastRaisedAt.getTime() - x.lastRaisedAt.getTime())) {
+        if (a.telegramMessageId != null && open.has(a.trackerId)) this.messages.seed(a.trackerId, a.telegramMessageId);
+      }
       for (const a of all) {
         try {
           if (!open.has(a.trackerId)) await this.closeGone(a);
@@ -121,9 +135,26 @@ export class EscalationRunner {
   private async closeGone(a: AlarmRow): Promise<void> {
     await this.alarmRepo.update(a.id, { status: 'CLOSED' });
     this.log.log(`${LOG} alarm ${a.id} ${a.symbol} ${a.rule} CLOSED: tracker ${a.trackerId} is no longer open`);
-    if (a.telegramMessageId != null) {
-      await this.edit(a.telegramMessageId, `${a.symbol}: trade closed. Alarm ${a.rule} closed, nothing to do.`);
-    }
+    const messageId = this.messages.get(a.trackerId) ?? a.telegramMessageId;
+    this.messages.clear(a.trackerId);
+    // Same text for every alarm of the trade, so a second edit of the same message is a harmless "not modified".
+    if (messageId != null) await this.edit(messageId, `${a.symbol}: trade closed. Alarms closed, nothing to do.`);
+  }
+
+  /** The trade's one live owner message: edit it when there is one, else send it; remember it per trade. */
+  private async putTradeMessage(trackerId: string, text: string, buttons?: InlineButton[][]): Promise<number | null> {
+    let messageId = this.messages.get(trackerId);
+    if (messageId != null && !(await this.edit(messageId, text, buttons))) messageId = null;
+    if (messageId == null) messageId = await this.send(text, buttons);
+    this.messages.set(trackerId, messageId);
+    return messageId;
+  }
+
+  /** Another unresolved, alerted alarm of the same trade currently relies on the trade message. */
+  private otherAlertedOpen(a: AlarmRow): boolean {
+    return (this.byTracker.get(a.trackerId) ?? []).some(
+      (o) => o.id !== a.id && o.alertedAt != null && o.answeredAt == null && (o.status === 'OPEN' || o.status === 'SNOOZED'),
+    );
   }
 
   private async openAlarm(a: AlarmRow, now: Date, aiDown: boolean): Promise<void> {
@@ -132,8 +163,11 @@ export class EscalationRunner {
       const v = await this.alarmRepo.latestAgentVerdict(a.trackerId, a.raisedAt);
       if (v) {
         await this.alarms.answer(a.id, v.id, v.verdict, now);
-        if (a.telegramMessageId != null) {
-          await this.edit(a.telegramMessageId, `${a.symbol}: the agent answered ${v.verdict} at ${istTime(v.createdAt)} IST. Alarm ${a.rule} resolved.`);
+        a.answeredAt = now; // this pass's view (otherAlertedOpen) sees it answered
+        const messageId = this.messages.get(a.trackerId);
+        // Only when no other unresolved alarm of the trade is showing its buttons on the trade message.
+        if (a.alertedAt != null && messageId != null && !this.otherAlertedOpen(a)) {
+          await this.edit(messageId, `${a.symbol}: the agent answered ${v.verdict} at ${istTime(v.createdAt)} IST. Alarm ${a.rule} resolved.`);
         }
         return;
       }
@@ -154,23 +188,20 @@ export class EscalationRunner {
     }
     if (due == null) return;
 
+    // One live message per trade (§4.5 B): edit the trade's message (this alarm's text + its buttons) or send it.
     if (due === 'REALERT') {
       const count = a.alertCount + 1;
       const text = await this.alertText(a, now, `REPEAT ${count - 1}: ALARM UNANSWERED`, aiDown);
-      let messageId = a.telegramMessageId;
-      if (messageId != null) {
-        const ok = await this.edit(messageId, text, alarmButtons(a.id));
-        if (!ok) messageId = null;
-      }
-      if (messageId == null) messageId = await this.send(text, alarmButtons(a.id));
+      const messageId = await this.putTradeMessage(a.trackerId, text, alarmButtons(a.id));
       await this.alarmRepo.update(a.id, { alertCount: count, telegramMessageId: messageId });
       return;
     }
 
     const header = due === 'DEADLINE_WARN' ? 'DEADLINE WARNING: NO AGENT DECISION' : 'ALARM UNANSWERED';
-    const messageId = await this.send(await this.alertText(a, now, header, aiDown), alarmButtons(a.id));
+    const messageId = await this.putTradeMessage(a.trackerId, await this.alertText(a, now, header, aiDown), alarmButtons(a.id));
     // alertedAt is recorded even when the send failed: the owner was unreachable, which is exactly what the
     // hard-loss backstop's owner-silent clock measures.
+    a.alertedAt = now;
     await this.alarmRepo.update(a.id, { alertedAt: now, alertCount: 1, telegramMessageId: messageId });
   }
 
@@ -189,13 +220,23 @@ export class EscalationRunner {
     await this.alarmRepo.update(a.id, { status: 'BACKSTOPPED' });
     this.log.warn(`${LOG} ${reason} → exit sent (${result})`);
     const line = `BACKSTOP ${kind}: code sold ${a.symbol} (${result}).\nAlarm ${a.rule}: ${a.reason}\nNo agent decision${kind === 'HARD_LOSS' ? ', no owner answer for 10 min, and still past the hard-loss limit' : ' before the broker deadline'}.`;
-    if (a.telegramMessageId != null) await this.edit(a.telegramMessageId, line);
-    await this.send(line);
+    const messageId = this.messages.get(a.trackerId) ?? a.telegramMessageId;
+    if (messageId != null) await this.edit(messageId, line);
+    await this.send(line); // a fresh message too: an edit does not notify the owner's phone
   }
 
   /** §4.4: the agent gets one look at a supreme exit request; a non-exit answer goes back to the supreme once. */
   private async supremeExit(a: AlarmRow, now: Date): Promise<void> {
-    if (a.payload?.roundTrip === true) return;
+    if (a.payload?.roundTrip === true) {
+      // The decision is made (confirm called at most once); only a failed exit is retried, every pass,
+      // until it goes through or the trade closes (closeGone).
+      if (a.payload.exitPending === true && a.status !== 'CLOSED') {
+        if (!this.ownerExit) return this.cannotAct(a, 'SUPREME_EXIT (retry)', now);
+        const reason = typeof a.payload.exitReason === 'string' ? a.payload.exitReason : `SUPREME_EXIT (final): ${a.reason}`;
+        await this.supremeExitNow(a, reason, now);
+      }
+      return;
+    }
 
     let verdict: { id: string; verdict: string } | null =
       a.answeredAt != null && a.answer != null ? { id: a.answerVerdictId ?? '', verdict: a.answer } : null;
@@ -210,8 +251,9 @@ export class EscalationRunner {
     if (!verdict) {
       if (now.getTime() - a.raisedAt.getTime() < SUPREME_EXIT_AGENT_LOOK_MS) return;
       if (!this.ownerExit) return this.cannotAct(a, 'SUPREME_EXIT (agent silent)', now);
-      await this.markRoundTrip(a, { agent: 'silent' });
-      await this.supremeExitNow(a, `SUPREME_EXIT (agent silent): ${a.reason}`, now);
+      const reason = `SUPREME_EXIT (agent silent): ${a.reason}`;
+      await this.markRoundTrip(a, { agent: 'silent', exitPending: true, exitReason: reason });
+      await this.supremeExitNow(a, reason, now);
       return;
     }
 
@@ -222,13 +264,19 @@ export class EscalationRunner {
     }
 
     if (!this.ownerExit) return this.cannotAct(a, 'SUPREME_EXIT (final)', now);
-    // Marked BEFORE the call so the confirm is made exactly once per alarm, across passes and restarts.
-    await this.markRoundTrip(a, { agent: verdict.verdict });
+    // Marked BEFORE the call so the confirm is made exactly once per alarm, across passes and restarts. The exit
+    // is marked pending up front too: a crash mid-confirm then reads as a confirm ERROR (the supreme exit stands)
+    // and the next pass exits; only OVERRIDE_HOLD clears it.
+    const reason = `SUPREME_EXIT (final): ${a.reason}`;
+    await this.markRoundTrip(a, { agent: verdict.verdict, exitPending: true, exitReason: reason });
     const result = await this.confirmOnce(a, verdict);
     this.log.warn(`${LOG} SUPREME_EXIT ${a.symbol}: agent ${verdict.verdict} → supreme ${result.decision} (${result.reason})`);
-    await this.markRoundTrip(a, { agent: verdict.verdict, supreme: result.decision });
-    if (result.decision === 'OVERRIDE_HOLD') return;
-    await this.supremeExitNow(a, `SUPREME_EXIT (final): ${a.reason}`, now);
+    if (result.decision === 'OVERRIDE_HOLD') {
+      await this.markRoundTrip(a, { supreme: result.decision, exitPending: false });
+      return;
+    }
+    await this.markRoundTrip(a, { supreme: result.decision });
+    await this.supremeExitNow(a, reason, now);
   }
 
   private async confirmOnce(a: AlarmRow, verdict: { id: string; verdict: string }): Promise<ConfirmResult> {
@@ -259,12 +307,14 @@ export class EscalationRunner {
   private async supremeExitNow(a: AlarmRow, reason: string, now: Date): Promise<void> {
     try {
       const result = await this.ownerExit!.exitAsOwner(a.userId, a.trackerId, reason.slice(0, 480));
-      await this.alarmRepo.update(a.id, { status: 'CLOSED' });
+      a.payload = { ...(a.payload ?? {}), exitPending: false };
+      await this.alarmRepo.update(a.id, { status: 'CLOSED', payload: a.payload });
       this.log.warn(`${LOG} ${reason} → exit sent on ${a.symbol} (${result})`);
     } catch (err) {
+      // payload.exitPending stays true: retried next pass (ManualExitService is idempotent).
       const msg = (err as Error)?.message ?? 'error';
-      this.log.error(`${LOG} ${reason}: exit FAILED on ${a.symbol} (${a.trackerId}): ${msg}`);
-      await this.throttledNotify(a, now, `Supreme exit FAILED on ${a.symbol}: ${msg}. Exit it yourself if you agree.`);
+      this.log.error(`${LOG} ${reason}: exit FAILED on ${a.symbol} (${a.trackerId}): ${msg}; retrying every 15 s`);
+      await this.throttledNotify(a, now, `Supreme exit FAILED on ${a.symbol}: ${msg}. Retrying every 15 s; exit it yourself if you agree.`);
     }
   }
 

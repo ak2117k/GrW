@@ -9,6 +9,7 @@ import { EscalationRunner } from './services/escalation-runner.service';
 import { TradeAlarmsService } from './services/trade-alarms.service';
 import { OwnerButtonsService } from './telegram/owner-buttons.service';
 import { TelegramBotClient } from './telegram/telegram-bot.client';
+import { TrackerMessages } from './telegram/tracker-messages';
 
 /**
  * Trade agent exit authority (docs/superpowers/specs/2026-11-27-trade-agent-exit-authority-design.md).
@@ -27,6 +28,7 @@ import { TelegramBotClient } from './telegram/telegram-bot.client';
     TradeBriefRepository,
     { provide: TRADE_BRIEFS, useExisting: TradeBriefRepository },
     TelegramBotClient,
+    TrackerMessages,
     AuthorityStateService,
     { provide: AUTHORITY_STATE, useExisting: AuthorityStateService },
     EscalationRepository,

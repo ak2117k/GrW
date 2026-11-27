@@ -12,6 +12,8 @@ import type { AlarmRow, ConfirmResult, SupremeConfirmPort, TradeAlarmsPort } fro
 import type { EscalationRepository } from '../repositories/escalation.repository';
 import type { AgentVerdictRef, TradeAlarmPatch, TradeAlarmRepository } from '../repositories/trade-alarm.repository';
 import type { TelegramBotClient } from '../telegram/telegram-bot.client';
+import { TrackerMessages } from '../telegram/tracker-messages';
+import { holdUntil } from '../telegram/owner-buttons.service';
 import type { AuthorityStateService } from './authority-state.service';
 import { EscalationRunner, type HardLossProbe, type OwnerExitPort } from './escalation-runner.service';
 
@@ -106,6 +108,7 @@ function setup(opts: { ownerExit?: boolean; probe?: boolean; aiDown?: boolean; c
       alarms,
       state,
       telegram as unknown as TelegramBotClient,
+      new TrackerMessages(),
       opts.ownerExit === false ? undefined : ownerExit,
       probe,
       aiHealth,
@@ -297,6 +300,50 @@ describe('EscalationRunner.pass', () => {
     });
   });
 
+  it('owner Hold resets owner silence: after the snooze a fresh alert goes out, and no HARD_LOSS backstop until 10 min after it', async () => {
+    const { db, ownerExit, telegram, runner } = setup({ aiDown: true, probe: true });
+    db.alarms.push(alarm({ rule: 'HARD_LOSS', urgency: 'urgent', alertedAt: at(60_000), alertCount: 2, telegramMessageId: 55 }));
+    // The owner taps Hold at T0+3 min: the patch OwnerButtonsService writes.
+    const holdAt = at(180_000);
+    const until = holdUntil(db.alarms[0], holdAt);
+    await db.update('a1', { status: 'SNOOZED', snoozedUntil: until, alertedAt: null, alertCount: 0 });
+
+    await runner.pass(new Date(until.getTime() - 1)); // still snoozed: nothing
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+    expect(telegram.editMessage).not.toHaveBeenCalled();
+
+    await runner.pass(until); // snooze over: re-alert (on the trade's message), not a sale
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+    expect(telegram.editMessage).toHaveBeenCalledTimes(1);
+    expect(telegram.editMessage.mock.calls[0][0]).toBe(55);
+    expect(db.alarms[0]).toMatchObject({ alertedAt: until, alertCount: 1 });
+
+    await runner.pass(new Date(until.getTime() + BACKSTOP_OWNER_SILENT_MS - 1));
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+    await runner.pass(new Date(until.getTime() + BACKSTOP_OWNER_SILENT_MS));
+    expect(ownerExit.exitAsOwner.mock.calls[0][2]).toMatch(/^BACKSTOP HARD_LOSS: /);
+  });
+
+  it('one message per trade: two alarms on one tracker → one send + one edit (latest alarm id on the buttons)', async () => {
+    const { db, telegram, runner } = setup();
+    db.alarms.push(alarm());
+    await runner.pass(at(ESCALATE_AFTER_MS));
+    db.alarms.push(alarm({ id: 'a2', rule: 'LADDER', reason: 'ladder step lost', raisedAt: at(ESCALATE_AFTER_MS), lastRaisedAt: at(ESCALATE_AFTER_MS) }));
+    await runner.pass(at(2 * ESCALATE_AFTER_MS));
+    expect(telegram.sendMessage).toHaveBeenCalledTimes(1);
+    expect(telegram.editMessage).toHaveBeenCalledTimes(1);
+    const [id, text, buttons] = telegram.editMessage.mock.calls[0];
+    expect(id).toBe(101);
+    expect(text).toContain('ladder step lost');
+    expect(buttons).toEqual([
+      [
+        { text: 'Exit', data: 'x:a2' },
+        { text: 'Hold', data: 'h:a2' },
+      ],
+    ]);
+    expect(db.alarms.find((a) => a.id === 'a2')?.telegramMessageId).toBe(101);
+  });
+
   it('restart: a fresh runner on the same store resumes (re-alerts, does not re-send the first alert)', async () => {
     const { db, telegram, runner, make } = setup();
     db.alarms.push(alarm());
@@ -398,6 +445,39 @@ describe('EscalationRunner.pass', () => {
       await runner.pass(at(15_000));
       await runner.pass(at(30_000));
       expect(supreme.confirm).toHaveBeenCalledTimes(1);
+      expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(1);
+    });
+
+    it('a failed supreme exit is retried every pass (confirm still once) until it goes through', async () => {
+      const { db, ownerExit, supreme, telegram, runner } = setup({ confirm: 'CONFIRM' });
+      ownerExit.exitAsOwner.mockRejectedValueOnce(new Error('broker 500')).mockRejectedValueOnce(new Error('broker 500'));
+      db.alarms.push(supremeAlarm());
+      db.verdicts.push({ id: 'v1', verdict: 'HOLD', createdAt: at(20_000), trackerId: 'trk1' });
+      await runner.pass(at(30_000));
+      expect(db.alarms[0].payload).toMatchObject({ roundTrip: true, exitPending: true });
+      expect(db.alarms[0].status).not.toBe('CLOSED');
+      expect(String(telegram.sendMessage.mock.calls.at(-1)?.[0])).toMatch(/Supreme exit FAILED/);
+      await runner.pass(at(45_000));
+      expect(db.alarms[0].status).not.toBe('CLOSED');
+      await runner.pass(at(60_000));
+      expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(3);
+      expect(ownerExit.exitAsOwner.mock.calls[2][2]).toMatch(/^SUPREME_EXIT \(final\): /);
+      expect(db.alarms[0].status).toBe('CLOSED');
+      expect(db.alarms[0].payload?.exitPending).toBe(false);
+      expect(supreme.confirm).toHaveBeenCalledTimes(1);
+      await runner.pass(at(75_000));
+      expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(3);
+    });
+
+    it('a pending supreme exit stops when the trade closes', async () => {
+      const { db, ownerExit, runner } = setup();
+      ownerExit.exitAsOwner.mockRejectedValueOnce(new Error('broker 500'));
+      db.alarms.push(supremeAlarm());
+      await runner.pass(at(SUPREME_EXIT_AGENT_LOOK_MS));
+      expect(db.alarms[0].payload?.exitPending).toBe(true);
+      db.openTrackers.clear();
+      await runner.pass(at(SUPREME_EXIT_AGENT_LOOK_MS + 15_000));
+      expect(db.alarms[0].status).toBe('CLOSED');
       expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(1);
     });
 

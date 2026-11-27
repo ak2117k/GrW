@@ -19,7 +19,14 @@ export interface TelegramCallbackQuery {
   id: string;
   data?: string;
   from?: { id: number; username?: string };
-  message?: { message_id: number; chat: { id: number | string } };
+  message?: {
+    message_id: number;
+    chat: { id: number | string; type?: string };
+    /** Unix seconds the message was sent. */
+    date?: number;
+    /** Unix seconds of its last edit (our re-alerts edit it). */
+    edit_date?: number;
+  };
 }
 
 export interface TelegramUpdate {
@@ -69,6 +76,11 @@ export class TelegramBotClient {
   /** The one chat the owner escalation talks to (and the only chat whose button taps are obeyed). */
   chatId(): string {
     return (this.env().TELEGRAM_ALERT_CHAT_ID ?? '').trim();
+  }
+
+  /** Optional TELEGRAM_ALERT_OWNER_USER_ID: the only Telegram user whose taps are obeyed. '' = unset. */
+  ownerUserId(): string {
+    return (this.env().TELEGRAM_ALERT_OWNER_USER_ID ?? '').trim();
   }
 
   configured(): boolean {

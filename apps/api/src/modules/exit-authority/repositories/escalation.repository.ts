@@ -70,6 +70,16 @@ export class EscalationRepository {
     return new Set(rows.map((r) => r.id));
   }
 
+  /** The trade's live owner message: the newest still-tracked alarm of the tracker that carries one. */
+  async trackerMessageId(trackerId: string): Promise<number | null> {
+    const r = await this.prisma.tradeAlarm.findFirst({
+      where: { trackerId, status: { in: RUNNER_STATUSES }, telegramMessageId: { not: null } },
+      orderBy: { lastRaisedAt: 'desc' },
+      select: { telegramMessageId: true },
+    });
+    return r?.telegramMessageId ?? null;
+  }
+
   async tracker(id: string): Promise<TrackerRef | null> {
     return this.prisma.tradeTracker.findUnique({
       where: { id },

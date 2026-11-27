@@ -4244,3 +4244,48 @@ model DeskGuardState {
 
   @@map("desk_guard_state")
 }
+
+/// Trade agent exit authority (2026-11-27): a code rule that would have sold now raises an alarm for
+/// the trade's agent instead. One open alarm per (tracker, rule); answered by the agent's next verdict.
+model TradeAlarm {
+  id                String    @id @default(cuid())
+  userId            String    @map("user_id")
+  trackerId         String    @map("tracker_id")
+  symbol            String
+  rule              String // HARD_LOSS | HARD_LOSS_FAST | FLOOR | LADDER | PRICE_TRIGGER | CARRY | TARGET_LOCK | SUPREME_EXIT
+  urgency           String // normal | urgent | deadline
+  reason            String
+  wouldHave         String    @map("would_have")
+  deadline          DateTime? @db.Timestamptz(6)
+  severityN         Float?    @map("severity_n")
+  sourceRef         String?   @map("source_ref")
+  payload           Json?
+  status            String // OPEN | ANSWERED | SNOOZED | BACKSTOPPED | CLOSED
+  raisedAt          DateTime  @map("raised_at") @db.Timestamptz(6)
+  lastRaisedAt      DateTime  @map("last_raised_at") @db.Timestamptz(6)
+  answeredAt        DateTime? @map("answered_at") @db.Timestamptz(6)
+  answerVerdictId   String?   @map("answer_verdict_id")
+  answer            String?
+  alertedAt         DateTime? @map("alerted_at") @db.Timestamptz(6)
+  alertCount        Int       @default(0) @map("alert_count")
+  telegramMessageId Int?      @map("telegram_message_id")
+  snoozedUntil      DateTime? @map("snoozed_until") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status, trackerId])
+  @@index([trackerId, rule, status])
+  @@map("trade_alarms")
+}
+
+/// The supreme's brief for one trade (lead, plan, levels, what would make it wrong); read by the agent every look.
+model TradeBrief {
+  trackerId String   @id @map("tracker_id")
+  userId    String   @map("user_id")
+  text      String
+  by        String // OPEN | MANAGER | CONFIRM
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("trade_briefs")
+}

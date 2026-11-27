@@ -13,6 +13,7 @@ import { UNCERTAIN_RESOLVE_SWEEP_MS } from '../domain/uncertain-exit';
 import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { ExitOutcomeService } from './exit-outcome.service';
 import { SentinelExitExecutor, type AiExitOutcome } from './sentinel-exit-executor.service';
+import { ExitAuthorityRouter } from './exit-authority-router.service';
 
 /** The executor outcomes that are an exit (sent, filled, or rehearsed in dry-run): each gets a noise read. */
 export const NOISE_READ_STATUSES: ReadonlySet<string> = new Set(['PLACED', 'FILLED', 'DRY_RUN']);
@@ -57,6 +58,8 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
     private readonly outcomes: ExitOutcomeService,
     @Optional() private readonly noise?: ExitNoiseReadService,
     @Optional() private readonly resolver?: ExitUncertainResolver,
+    // Trade agent exit authority: inert (today's loop, untouched) unless TRADE_AGENT_AUTHORITY is live.
+    @Optional() private readonly router?: ExitAuthorityRouter,
   ) {}
 
   /**
@@ -141,6 +144,10 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
     try {
       const since = new Date(now.getTime() - 2 * cfg.maxVerdictAgeSec * 1000);
       const verdicts = await this.repo.pendingVerdicts(cfg.userIds, since, PER_PASS);
+      if (this.router?.active()) {
+        await this.runRouted(verdicts, cfg);
+        return;
+      }
       for (const v of verdicts) {
         try {
           const at = new Date();
@@ -154,6 +161,31 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`[ai-exit] poll failed: ${errText(err)}`);
     } finally {
       this.running = false;
+    }
+  }
+
+  /**
+   * TRADE_AGENT_AUTHORITY=live: every verdict is routed first (in parallel, so one 30 s supreme confirm never
+   * makes the rest of the pass wait for it serially), then only the EXECUTE ones go to the executor, in order.
+   * A route that throws leaves its verdict unclaimed: it is routed again on the next pass.
+   */
+  private async runRouted(verdicts: PendingVerdict[], cfg: AutoExitConfig): Promise<void> {
+    const router = this.router!;
+    const routes = await Promise.all(verdicts.map((v) => router.route(v, cfg).catch((err: unknown) => {
+      this.logger.error(`[ai-exit] verdict ${v.id} could not be routed: ${errText(err)} — retried next pass`);
+      return null;
+    })));
+    for (let i = 0; i < verdicts.length; i++) {
+      const v = verdicts[i];
+      const r = routes[i];
+      if (!r || r.kind !== 'EXECUTE') continue;
+      try {
+        const at = new Date();
+        const out = await this.executor.process(v, cfg);
+        this.noiseRead(v, out, 'AI_EXIT', at);
+      } catch (err) {
+        this.logger.error(`[ai-exit] verdict ${v.id} errored: ${errText(err)}`);
+      }
     }
   }
 

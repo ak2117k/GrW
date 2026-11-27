@@ -15,6 +15,7 @@ import {
   SentinelExitExecutor,
 } from './services/sentinel-exit-executor.service';
 import { SentinelExitPoller } from './services/sentinel-exit-poller.service';
+import { ExitAuthorityRouter } from './services/exit-authority-router.service';
 import { ExitFillSettler } from './services/exit-fill-settler.service';
 import { ExitUncertainResolver } from './services/exit-uncertain-resolver.service';
 import { EXIT_OUTCOME_CANDLES, EXIT_OUTCOME_USERS, ExitOutcomeService } from './services/exit-outcome.service';
@@ -52,6 +53,8 @@ import { ExitNoiseRepository } from '../exit-noise/exit-noise.repository';
     OwnerBrokerSessionProvider,
     SentinelExitExecutor,
     SentinelExitPoller,
+    // Trade agent exit authority: inert unless AUTHORITY_STATE is bound and live (Task 7 wires the ports).
+    ExitAuthorityRouter,
     ExitFillSettler,
     ExitUncertainResolver,
     AiExitOutcomeRepository,

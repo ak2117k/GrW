@@ -227,3 +227,49 @@ describe('SentinelExitPoller — uncertain-exit resolver timer (2026-11-10)', ()
     expect(jest.getTimerCount()).toBe(0);
   });
 });
+
+describe('SentinelExitPoller — exit authority router (TRADE_AGENT_AUTHORITY)', () => {
+  afterEach(() => { jest.restoreAllMocks(); setEnv({}); });
+  const created = new Date('2026-11-27T05:00:00Z');
+  const rows = [
+    { id: 'a', userId: 'owner', trackerId: 't1', symbol: 'X', reason: 'r', createdAt: created, promptVersion: 'sentinel/v9' },
+    { id: 'b', userId: 'owner', trackerId: 't2', symbol: 'Y', reason: 'r', createdAt: created, promptVersion: 'rule:floor-hard/1' },
+    { id: 'c', userId: 'owner', trackerId: 't3', symbol: 'Z', reason: 'r', createdAt: created, promptVersion: 'sentinel/v9' },
+    { id: 'd', userId: 'owner', trackerId: 't4', symbol: 'W', reason: 'r', createdAt: created, promptVersion: 'sentinel/v9' },
+  ];
+  function withRouter(router: { active: () => boolean; route: jest.Mock }) {
+    setEnv({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner' });
+    const m = make();
+    m.repo.pendingVerdicts.mockResolvedValue(rows);
+    const poller = new SentinelExitPoller(m.repo as never, m.executor as never, m.settler as never, m.outcomes as never, undefined, undefined, router as never);
+    jest.spyOn(global, 'setInterval').mockReturnValue({ unref: () => undefined } as never);
+    jest.spyOn(global, 'setTimeout').mockReturnValue({ unref: () => undefined } as never);
+    poller.onModuleInit();
+    return { ...m, poller };
+  }
+
+  it('live: routes every verdict, processes only EXECUTE (in order); a throwing route is skipped (retried next pass)', async () => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const route = jest.fn(async (v: { id: string }, _cfg?: unknown) => {
+      if (v.id === 'b') return { kind: 'ALARM', alarmId: 'al1' };
+      if (v.id === 'c') return { kind: 'HELD_BY_SUPREME', reason: 'hold' };
+      if (v.id === 'd') throw new Error('boom');
+      return { kind: 'EXECUTE' };
+    });
+    const { poller, executor } = withRouter({ active: () => true, route });
+    await poller.runOnce();
+    expect(route.mock.calls.map((c) => c[0].id)).toEqual(['a', 'b', 'c', 'd']);
+    expect(route.mock.calls[0][1]).toEqual(expect.objectContaining({ mode: 'dry-run', userIds: ['owner'] }));
+    expect(executor.process.mock.calls.map((c) => c[0].id)).toEqual(['a']);
+    poller.onModuleDestroy();
+  });
+
+  it('off (router present, not live): the router is never asked; every verdict goes to the executor as today', async () => {
+    const route = jest.fn();
+    const { poller, executor } = withRouter({ active: () => false, route });
+    await poller.runOnce();
+    expect(route).not.toHaveBeenCalled();
+    expect(executor.process.mock.calls.map((c) => c[0].id)).toEqual(['a', 'b', 'c', 'd']);
+    poller.onModuleDestroy();
+  });
+});

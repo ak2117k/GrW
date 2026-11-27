@@ -44,6 +44,8 @@ function harness(opts: {
   tick?: number | null;
   lotSize?: number | null;
   gate?: { enabled: () => boolean; load: jest.Mock; decide: jest.Mock };
+  /** Exit authority ports (absent ⇒ today's 6-arg constructor). */
+  authority?: { live: boolean };
 } = {}) {
   const calls: string[] = [];
   const queue = <T>(xs: T[] | undefined, dflt: T) => {
@@ -90,10 +92,14 @@ function harness(opts: {
   const gate = opts.gate ?? { enabled: () => false, load: jest.fn(), decide: jest.fn() };
   const clock = { isOpen: jest.fn(() => opts.open ?? true), minutesToClose: jest.fn(() => 419), tradingWindow: jest.fn(() => null) };
   const sleep = jest.fn(async () => undefined);
-  const ex = new SentinelExitExecutor(repo as never, prisma as never, sessions as never, clock as never, sleep, gate as never);
+  const escalation = { blockedExit: jest.fn(async (..._a: any[]) => undefined) };
+  const state = { isLive: jest.fn(() => opts.authority?.live === true) };
+  const ex = opts.authority
+    ? new SentinelExitExecutor(repo as never, prisma as never, sessions as never, clock as never, sleep, gate as never, state, escalation)
+    : new SentinelExitExecutor(repo as never, prisma as never, sessions as never, clock as never, sleep, gate as never);
   const lastPatch = () => repo.update.mock.calls.at(-1)?.[1];
   const patches = () => repo.update.mock.calls.map((c) => c[1]);
-  return { ex, session, repo, prisma, sessions, calls, lastPatch, patches, sleep, gate };
+  return { ex, session, repo, prisma, sessions, calls, lastPatch, patches, sleep, gate, escalation, state };
 }
 
 describe('SentinelExitExecutor', () => {
@@ -1643,5 +1649,75 @@ describe('SentinelExitExecutor — PRICE_TRIGGER (sentinel price triggers)', () 
       await expect(h.ex.execute('row1', TV, LIVE_CP, NOW, 'PRICE_TRIGGER'))
         .resolves.toEqual({ status: 'REJECTED', reason: 'UNPROTECTED_AFTER_CANCEL:BROKER_REJECTED' });
     });
+  });
+});
+
+describe('SentinelExitExecutor — trade agent exit authority (TRADE_AGENT_AUTHORITY)', () => {
+  const OWNER_ORDER_BOOK = env([{ orderid: 'O0', status: 'open', symboltoken: '445566', exchange: 'MCX', ordertype: 'LIMIT', transactiontype: 'BUY', quantity: '100', price: '40' }]);
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  it('live: a gate that would block does NOT block; its facts are stored on the row (gateFacts) and the exit is sent', async () => {
+    const gate = gateStub(rec('GATED_THESIS_INTACT'));
+    const h = harness({ gate, authority: { live: true }, positions: [env([posRow('100')]), env([posRow('0')])], books: [env([]), FILLED_BOOK] });
+    await h.ex.process(V, LIVE, NOW);
+    expect(gate.load).toHaveBeenCalled();
+    expect(gate.decide).toHaveBeenCalled();
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.patches()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ side: 'SELL', quantity: 100, gate: expect.objectContaining({ outcome: 'GATED_THESIS_INTACT', gateFacts: true }) }),
+    ]));
+    expect(h.patches().some((p: any) => p.status === 'SKIPPED')).toBe(false);
+  });
+
+  it('live, AWAITING_CONFIRMATION: not applied either', async () => {
+    const h = harness({ gate: gateStub(rec('AWAITING_CONFIRMATION', 'THESIS_BROKEN')), authority: { live: true }, positions: [env([posRow('100')]), env([posRow('0')])] });
+    await h.ex.process(V, LIVE, NOW);
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('off (ports bound, not live): the gate blocks exactly as today, no gateFacts marker', async () => {
+    const h = harness({ gate: gateStub(rec('GATED_THESIS_INTACT')), authority: { live: false } });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'GATED_THESIS_INTACT' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(h.patches().some((p: any) => p.gate && 'gateFacts' in p.gate)).toBe(false);
+  });
+
+  it('live, paper tracker: the gate blocks as today (paper keeps today\'s rules)', async () => {
+    const h = harness({ gate: gateStub(rec('GATED_THESIS_INTACT')), authority: { live: true } });
+    await expect(h.ex.process({ ...V, trackerId: 'paper:x1' }, LIVE, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'GATED_THESIS_INTACT' });
+  });
+
+  it('live: OPEN_ORDER_EXISTS → SKIPPED as today, and the owner is told once for the execution row (order described)', async () => {
+    const h = harness({ authority: { live: true }, books: [OWNER_ORDER_BOOK] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+    await flush();
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(h.escalation.blockedExit).toHaveBeenCalledTimes(1);
+    const arg = h.escalation.blockedExit.mock.calls[0][0] as Record<string, string>;
+    expect(arg).toMatchObject({ userId: 'owner', trackerId: 't1', symbol: V.symbol, reason: 'thesis broken' });
+    expect(arg.detail).toContain('OPEN_ORDER_EXISTS');
+    expect(arg.detail).toContain('O0 (LIMIT BUY 100 @ 40)');
+    expect(arg.detail).toContain('row1');
+  });
+
+  it('live: a throwing escalation never changes the outcome', async () => {
+    const h = harness({ authority: { live: true }, books: [OWNER_ORDER_BOOK] });
+    h.escalation.blockedExit.mockRejectedValueOnce(new Error('telegram down'));
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+    await flush();
+  });
+
+  it('off: OPEN_ORDER_EXISTS → SKIPPED, nobody escalated', async () => {
+    const h = harness({ authority: { live: false }, books: [OWNER_ORDER_BOOK] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+    await flush();
+    expect(h.escalation.blockedExit).not.toHaveBeenCalled();
+  });
+
+  it('live: the owner\'s own MANUAL exit blocked by an open order is not escalated (it is the owner)', async () => {
+    const h = harness({ authority: { live: true }, books: [OWNER_ORDER_BOOK] });
+    await h.ex.execute('row1', { ...V, id: 'man_x' }, LIVE, NOW, 'MANUAL');
+    await flush();
+    expect(h.escalation.blockedExit).not.toHaveBeenCalled();
   });
 });

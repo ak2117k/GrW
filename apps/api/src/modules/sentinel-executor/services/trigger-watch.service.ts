@@ -26,6 +26,9 @@ import { ExitNoiseReadService } from '../../exit-noise/exit-noise.service';
 import { triggerCheckFromPacket } from '../../exit-discipline/trigger-check';
 import { cutLossFromPacket, cutLossK15, cutLossRealActs, type CutLossRecord } from '../../exit-discipline/cut-loss-yardstick';
 import { TRIGGER_N15_READER, type N15Reader } from '../repositories/n15.reader';
+import { AUTHORITY_STATE, TRADE_ALARMS, type AuthorityStatePort, type TradeAlarmsPort } from '../../exit-authority/exit-authority.tokens';
+import { isPaperTrackerId } from '../domain/exit-authority';
+import { isHeld } from '../domain/guards';
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const IST_HM = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
@@ -75,7 +78,21 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
     @Optional() private readonly noise?: ExitNoiseReadService,
     // CUT_LOSS yardstick (record only on real): the watched underlying's 15-minute N, DB only.
     @Optional() @Inject(TRIGGER_N15_READER) private readonly n15Reader?: Pick<N15Reader, 'n15'>,
+    // Trade agent exit authority: live ⇒ a confirmed cross raises an alarm instead of selling. Absent / off ⇒ today.
+    @Optional() @Inject(TRADE_ALARMS) private readonly alarms?: TradeAlarmsPort,
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort,
   ) {}
+
+  /** A fire on this tracker raises an alarm (live authority, alarm store bound, a live tracker not on the hold list). */
+  private alarmsFire(t: ArmedTrigger, acfg: AutoExitConfig): boolean {
+    if (!this.alarms) return false;
+    try {
+      if (this.authority?.isLive() !== true) return false;
+    } catch {
+      return false;
+    }
+    return !isPaperTrackerId(t.trackerId) && !isHeld(acfg.hold, { id: t.trackerId, symbol: t.symbol });
+  }
 
   onModuleInit(): void {
     this.start(process.env);
@@ -429,6 +446,23 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
     const reason = firedReason(t, f.tick, IST_HM.format(t.armedAt));
     this.logger.warn(`[ai-trigger] FIRED ${reason}`);
     this.releaseIfUnused(t.watch.key);
+    if (this.alarmsFire(t, acfg)) {
+      // TRADE_AGENT_AUTHORITY=live: the trigger is FIRED (claimed above, as today) but nothing is sold —
+      // the trade agent is alarmed and decides. A raise that throws falls back to today's exit: the trigger is
+      // already consumed, and a fired stop that silently does nothing is the one outcome we never accept.
+      try {
+        const row = await this.alarms!.raise({
+          userId: t.userId, trackerId: t.trackerId, symbol: t.symbol, rule: 'PRICE_TRIGGER', urgency: 'normal', reason,
+          wouldHave: `EXIT_NOW PRICE_TRIGGER ${t.op} ${t.price} (${t.watch.symbol}) — fired at ${f.tick.price}`,
+          sourceRef: t.id,
+          payload: { triggerId: t.id, armedBy: t.verdictId, instrument: t.instrument, op: t.op, level: t.price, watch: t.watch.symbol, firedAt: f.tick.price },
+        }, now);
+        this.logger.warn(`[ai-trigger] ALARM PRICE_TRIGGER instead of an exit — ${t.symbol} trigger ${t.id}${row ? ` alarm ${row.id}` : ' (an open alarm covers it)'}`);
+        return;
+      } catch (err) {
+        this.logger.error(`[ai-trigger] alarm for trigger ${t.id} could not be raised: ${errText(err)} — falling back to the exit`);
+      }
+    }
     const v: PendingVerdict = {
       id: triggerVerdictId(t.id), userId: t.userId, trackerId: t.trackerId, symbol: t.symbol, reason, createdAt: now,
     };

@@ -23,6 +23,8 @@ function harness(o: {
   proposals?: unknown[][]; tracker?: unknown; price?: PriceResult; hub?: boolean;
   claimFire?: () => Promise<boolean>; armed?: unknown[]; closed?: string[];
   verdictForCheck?: (...a: any[]) => Promise<unknown>; recordCheck?: (...a: any[]) => Promise<void>; checkOf?: (...a: any[]) => Promise<unknown>;
+  /** Exit authority ports (absent ⇒ today's constructor, 5 args). */
+  authority?: { live: boolean; raise?: (...a: any[]) => Promise<unknown> };
 } = {}) {
   const listeners: Array<(p: Price) => void> = [];
   const hub = {
@@ -53,12 +55,16 @@ function harness(o: {
   const execRepo = { claim: jest.fn(async (..._a: any[]) => 'exec1'), findByVerdictId: jest.fn(async (..._a: any[]) => ({ fillPrice: 8920, orderLtp: 8924, decisionLtp: 8924 })) };
   const executor = { execute: jest.fn(async (..._a: any[]) => ({ status: 'DRY_RUN' })) };
   const clock = { isOpen: jest.fn(() => true) };
-  const svc = new TriggerWatchService(repo as never, execRepo as never, executor as never, moduleRef as never, clock as never);
+  const alarms = { raise: jest.fn(o.authority?.raise ?? (async (..._a: any[]) => ({ id: 'al1' }))), openFor: jest.fn(), openForTrackers: jest.fn(), answer: jest.fn() };
+  const state = { isLive: jest.fn(() => o.authority?.live === true) };
+  const svc = o.authority
+    ? new TriggerWatchService(repo as never, execRepo as never, executor as never, moduleRef as never, clock as never, undefined, undefined, alarms as never, state)
+    : new TriggerWatchService(repo as never, execRepo as never, executor as never, moduleRef as never, clock as never);
   const emit = (ltp: number, at: Date, source: Price['source'] = 'ws') => {
     jest.spyOn(Date, 'now').mockReturnValue(at.getTime());
     for (const fn of listeners) fn({ ref: { exchange: 'MCX', token: '472789', symbol: 'F' }, ltp, at: at.getTime(), source });
   };
-  return { svc, hub, source, moduleRef, repo, execRepo, executor, clock, emit, listeners };
+  return { svc, hub, source, moduleRef, repo, execRepo, executor, clock, emit, listeners, alarms, state };
 }
 
 let intervalSpy: jest.SpyInstance;
@@ -172,6 +178,47 @@ describe('TriggerWatchService — firing', () => {
     expect(h.executor.execute.mock.calls[0][0]).toBe('exec1');
     expect(h.executor.execute.mock.calls[0][4]).toBe('PRICE_TRIGGER');
     expect(h.executor.execute.mock.calls[0][1].reason).toMatch(/^PRICE_TRIGGER: CRUDEOIL19NOV26FUT < 8930 — fired at 8924 \(2 ticks over 1100 ms\)/);
+  });
+
+  it('TRADE_AGENT_AUTHORITY=live: a confirmed cross is FIRED as today but raises a PRICE_TRIGGER alarm, nothing sold', async () => {
+    const h = harness({ proposals: [[proposal()], []], authority: { live: true } });
+    await armed(h);
+    h.emit(8925, ms(T0, 1000));
+    h.emit(8924, ms(T0, 2100));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(h.repo.claimFire).toHaveBeenCalledTimes(1);
+    expect(h.repo.claimFire.mock.calls[0][0]).toBe('trg1');
+    expect(h.alarms.raise).toHaveBeenCalledTimes(1);
+    const a = h.alarms.raise.mock.calls[0][0] as Record<string, unknown>;
+    expect(a).toMatchObject({ userId: 'owner', trackerId: 't1', symbol: TRACKER.symbol, rule: 'PRICE_TRIGGER', urgency: 'normal', sourceRef: 'trg1' });
+    expect(String(a.reason)).toMatch(/^PRICE_TRIGGER: CRUDEOIL19NOV26FUT < 8930 — fired at 8924 \(2 ticks over 1100 ms\)/);
+    expect(String(a.wouldHave)).toContain('EXIT_NOW PRICE_TRIGGER');
+    expect(h.execRepo.claim).not.toHaveBeenCalled();
+    expect(h.executor.execute).not.toHaveBeenCalled();
+  });
+
+  it('authority ports bound but off: the fire executes exactly as today, no alarm', async () => {
+    const h = harness({ proposals: [[proposal()], []], authority: { live: false } });
+    await armed(h);
+    h.emit(8925, ms(T0, 1000));
+    h.emit(8924, ms(T0, 2100));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(h.alarms.raise).not.toHaveBeenCalled();
+    expect(h.executor.execute).toHaveBeenCalledTimes(1);
+    expect(h.executor.execute.mock.calls[0][4]).toBe('PRICE_TRIGGER');
+  });
+
+  it('live but the alarm raise throws: falls back to today\'s exit (a fired stop is never silently dropped)', async () => {
+    const h = harness({ proposals: [[proposal()], []], authority: { live: true, raise: async () => { throw new Error('db down'); } } });
+    await armed(h);
+    h.emit(8925, ms(T0, 1000));
+    h.emit(8924, ms(T0, 2100));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(h.executor.execute).toHaveBeenCalledTimes(1);
   });
 
   it('a lost claim (another process fired, or it expired) executes nothing', async () => {

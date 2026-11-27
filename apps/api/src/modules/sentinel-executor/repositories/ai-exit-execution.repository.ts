@@ -21,6 +21,8 @@ export interface PendingVerdict {
   symbol: string;
   reason: string;
   createdAt: Date;
+  /** The verdict's promptVersion: `rule:…` for a code-rule EXIT_NOW (exit authority router); absent on synthetic verdicts. */
+  promptVersion?: string | null;
 }
 
 export type AiExitPatch = Partial<
@@ -55,7 +57,7 @@ export class AiExitExecutionRepository {
   async pendingVerdicts(userIds: string[], since: Date, limit = 5): Promise<PendingVerdict[]> {
     if (userIds.length === 0) return [];
     return this.prisma.$queryRaw<PendingVerdict[]>(Prisma.sql`
-      SELECT v."id", v."userId", v."trackerId", v."symbol", v."reason", v."createdAt"
+      SELECT v."id", v."userId", v."trackerId", v."symbol", v."reason", v."createdAt", v."promptVersion"
       FROM "sentinel_verdicts" v
       WHERE v."userId" IN (${Prisma.join(userIds)})
         AND v."createdAt" >= ${since}

@@ -151,6 +151,8 @@ describe('AiExitExecutionRepository', () => {
     expect(q.sql).toContain('NOT EXISTS');
     expect(q.sql).toContain('"ai_exit_executions"');
     expect(q.sql).toContain('ORDER BY v."createdAt" ASC');
+    // Exit authority: the router tells a code-rule EXIT_NOW (promptVersion 'rule:…') from an agent's.
+    expect(q.sql).toContain('v."promptVersion"');
     // user ids, the window and the limit are bound parameters, never spliced into the SQL
     expect(q.values).toEqual(['owner', 'u2', since, 5]);
   });

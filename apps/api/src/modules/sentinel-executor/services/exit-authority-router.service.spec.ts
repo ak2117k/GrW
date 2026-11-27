@@ -1,10 +1,11 @@
 // apps/api/src/modules/sentinel-executor/services/exit-authority-router.service.spec.ts
 import { Logger } from '@nestjs/common';
-import { ExitAuthorityRouter, RULE_STAMPS, ruleAlarmFor } from './exit-authority-router.service';
+import { ExitAuthorityRouter, RAISE_ATTEMPTS, RULE_STAMPS, ruleAlarmFor } from './exit-authority-router.service';
 import { FLOOR_HARD_EXIT_STAMP, TARGET_LADDER_STAMP, isPaperTrackerId, isRuleStamp } from '../domain/exit-authority';
 import { CARRY_EXIT_STAMP } from '../../intraday-carry/intraday-carry.service';
 import { CONFIRM_TIMEOUT_MS } from '../../exit-authority/domain/timings';
 import type { AlarmRow, ConfirmResult } from '../../exit-authority/exit-authority.tokens';
+import * as opsAlert from '../../../common/utils/ops-alert';
 
 const T0 = new Date('2026-11-27T05:00:00Z');
 const verdict = (over: Record<string, unknown> = {}) => ({
@@ -28,14 +29,18 @@ function make(opts: { live?: boolean; confirm?: () => Promise<ConfirmResult>; op
   };
   const supreme = { confirm: jest.fn(opts.confirm ?? (async (): Promise<ConfirmResult> => ({ decision: 'CONFIRM', reason: 'agreed', latencyMs: 5 }))) };
   const briefs = { briefFor: jest.fn().mockResolvedValue('plan: ride to 24100'), write: jest.fn().mockResolvedValue(undefined) };
+  const escalation = { blockedExit: jest.fn().mockResolvedValue(undefined) };
   const router = opts.noPorts
     ? new ExitAuthorityRouter(repo as never)
-    : new ExitAuthorityRouter(repo as never, state, alarms, supreme, briefs);
-  return { router, repo, state, alarms, supreme, briefs };
+    : new ExitAuthorityRouter(repo as never, state, alarms, supreme, briefs, escalation);
+  return { router, repo, state, alarms, supreme, briefs, escalation };
 }
+const flush = () => new Promise((r) => setImmediate(r));
+let ops: jest.SpyInstance;
 
 describe('ExitAuthorityRouter', () => {
   beforeEach(() => {
+    ops = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true);
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
   });
@@ -106,19 +111,49 @@ describe('ExitAuthorityRouter', () => {
       expect(repo.update).toHaveBeenCalledWith('row1', { status: 'SKIPPED', reason: 'AUTHORITY_ALARM' });
     });
 
-    it('a raise that throws leaves the verdict unclaimed (retried next pass) and never executes', async () => {
+    it('a raise that throws leaves the verdict unclaimed (retried next pass), never executes, and alerts once', async () => {
       const { router, repo, alarms } = make();
       alarms.raise.mockRejectedValueOnce(new Error('db down'));
       await expect(router.route(verdict({ promptVersion: FLOOR_HARD_EXIT_STAMP }))).resolves.toEqual({ kind: 'ALARM', alarmId: null });
       expect(repo.claim).not.toHaveBeenCalled();
+      expect(ops).toHaveBeenCalledWith('authority-raise:v1', expect.stringContaining('could not be stored'));
     });
 
-    it.each(['CONFIRM', 'ERROR'] as const)('an LLM EXIT_NOW → confirm(); %s → EXECUTE', async (decision) => {
-      const { router, repo, supreme } = make({ confirm: async () => ({ decision, reason: 'x', latencyMs: 9 }) });
+    it(`a raise failing ${RAISE_ATTEMPTS} times claims the row SKIPPED AUTHORITY_ALARM_RAISE_FAILED and tells the owner (stops head-of-line blocking)`, async () => {
+      const { router, repo, alarms, escalation } = make();
+      alarms.raise.mockRejectedValue(new Error('db down'));
+      const v = verdict({ promptVersion: FLOOR_HARD_EXIT_STAMP });
+      for (let i = 1; i < RAISE_ATTEMPTS; i++) {
+        await expect(router.route(v)).resolves.toEqual({ kind: 'ALARM', alarmId: null });
+        expect(repo.claim).not.toHaveBeenCalled();
+      }
+      await expect(router.route(v)).resolves.toEqual({ kind: 'ALARM', alarmId: null });
+      await flush();
+      expect(repo.update).toHaveBeenCalledWith('row1', { status: 'SKIPPED', reason: 'AUTHORITY_ALARM_RAISE_FAILED' });
+      expect(escalation.blockedExit).toHaveBeenCalledWith(expect.objectContaining({ trackerId: 'trk1', symbol: v.symbol }));
+      expect(ops.mock.calls.filter((c) => c[0] === 'authority-raise:v1')).toHaveLength(1);
+      expect(ops).toHaveBeenCalledWith('authority-raise-failed:v1', expect.any(String));
+    });
+
+    it('live with NO alarm store: fail closed — ALARM, row SKIPPED AUTHORITY_NO_ALARM_STORE, owner alerted, never EXECUTE', async () => {
+      const repo = { claim: jest.fn().mockResolvedValue('row1'), update: jest.fn() };
+      const escalation = { blockedExit: jest.fn().mockResolvedValue(undefined) };
+      const router = new ExitAuthorityRouter(repo as never, { isLive: () => true }, undefined, undefined, undefined, escalation);
+      await expect(router.route(verdict({ promptVersion: FLOOR_HARD_EXIT_STAMP }))).resolves.toEqual({ kind: 'ALARM', alarmId: null });
+      await flush();
+      expect(repo.update).toHaveBeenCalledWith('row1', { status: 'SKIPPED', reason: 'AUTHORITY_NO_ALARM_STORE' });
+      expect(ops).toHaveBeenCalledWith('authority-no-store:v1', expect.any(String));
+      expect(escalation.blockedExit).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['CONFIRM', 'ERROR'] as const)('an LLM EXIT_NOW → confirm(); %s → EXECUTE, the open alarm answered', async (decision) => {
+      const open = [alarmRow({ id: 'al1' })];
+      const { router, repo, supreme, alarms } = make({ open, confirm: async () => ({ decision, reason: 'x', latencyMs: 9 }) });
       await expect(router.route(verdict())).resolves.toEqual({ kind: 'EXECUTE' });
       expect(supreme.confirm).toHaveBeenCalledWith(expect.objectContaining({
-        userId: 'owner', trackerId: 'trk1', agentDecision: 'EXIT', agentReason: 'thesis broken', brief: 'plan: ride to 24100', alarm: null,
+        userId: 'owner', trackerId: 'trk1', agentDecision: 'EXIT', agentReason: 'thesis broken', brief: 'plan: ride to 24100', alarm: open[0],
       }));
+      expect(alarms.answer).toHaveBeenCalledWith('al1', 'v1', `EXIT (supreme ${decision})`);
       expect(repo.claim).not.toHaveBeenCalled();
     });
 
@@ -127,10 +162,10 @@ describe('ExitAuthorityRouter', () => {
       await expect(router.route(verdict())).resolves.toEqual({ kind: 'EXECUTE' });
     });
 
-    it('confirm is raced against CONFIRM_TIMEOUT_MS: a never-resolving supreme → TIMEOUT at 30 s → EXECUTE', async () => {
+    it('confirm is raced against CONFIRM_TIMEOUT_MS: a never-resolving supreme → TIMEOUT at 30 s → EXECUTE, alarm answered', async () => {
       jest.useFakeTimers();
       const warn = Logger.prototype.warn as jest.Mock;
-      const { router } = make({ confirm: () => new Promise<ConfirmResult>(() => undefined) });
+      const { router, alarms } = make({ open: [alarmRow({ id: 'al1' })], confirm: () => new Promise<ConfirmResult>(() => undefined) });
       let done: unknown = null;
       const p = router.route(verdict()).then((r) => { done = r; });
       await jest.advanceTimersByTimeAsync(CONFIRM_TIMEOUT_MS - 1);
@@ -139,6 +174,7 @@ describe('ExitAuthorityRouter', () => {
       await p;
       expect(done).toEqual({ kind: 'EXECUTE' });
       expect(warn.mock.calls.map((c) => String(c[0])).some((l) => l.includes('TIMEOUT'))).toBe(true);
+      expect(alarms.answer).toHaveBeenCalledWith('al1', 'v1', 'EXIT (supreme TIMEOUT)');
     });
 
     it('OVERRIDE_HOLD → HELD_BY_SUPREME: row SKIPPED SUPREME_HOLD:<reason>, open alarm answered, brief note written', async () => {

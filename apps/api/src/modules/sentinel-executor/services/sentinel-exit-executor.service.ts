@@ -299,7 +299,13 @@ export class SentinelExitExecutor {
   private async executeAttempt(
     id: string, v: PendingVerdict, aiCfg: AutoExitConfig, now: Date, trigger: ExitTrigger,
   ): Promise<AiExitOutcome> {
-    const cfg: AutoExitConfig = trigger === 'MANUAL' ? { ...aiCfg, mode: 'live' } : aiCfg;
+    let cfg: AutoExitConfig = trigger === 'MANUAL' ? { ...aiCfg, mode: 'live' } : aiCfg;
+    // TRADE_AGENT_AUTHORITY=live (spec §4.5b, owner 2026-11-27 "keep me alerting"): an AI / price-trigger exit
+    // never cancels the owner's order — EXIT_CANCEL_OWNER_ORDERS is ignored, OPEN_ORDER_EXISTS goes to the owner.
+    // MANUAL (the owner's own Exit, Telegram Exit, backstop via the owner path) keeps today's behaviour.
+    if (trigger !== 'MANUAL' && cfg.cancelOwnerOrders === true && this.authorityLive(v.trackerId)) {
+      cfg = { ...cfg, cancelOwnerOrders: false };
+    }
 
     // 2. GUARDS — DB + clock only.
     const tracker = (await this.prisma.tradeTracker.findUnique({ where: { id: v.trackerId } })) as Tracker | null;

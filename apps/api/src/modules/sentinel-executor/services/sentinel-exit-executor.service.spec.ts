@@ -1720,4 +1720,47 @@ describe('SentinelExitExecutor — trade agent exit authority (TRADE_AGENT_AUTHO
     await flush();
     expect(h.escalation.blockedExit).not.toHaveBeenCalled();
   });
+
+  describe('owner order on the contract (spec §4.5b, owner 2026-11-27 "keep me alerting")', () => {
+    const SV: PendingVerdict = { ...V, symbol: 'SENSEX26NOV83600PE' };
+    const TRK = { id: 't1', userId: 'owner', status: 'OPEN', kind: 'POSITION', exchange: 'BFO', token: '1171', symbol: 'SENSEX26NOV83600PE', qty: 40 };
+    const pos = (netqty: string) => env([{ tradingsymbol: 'SENSEX26NOV83600PE', symboltoken: '1171', exchange: 'BFO', producttype: 'CARRYFORWARD', netqty, ltp: '453.2' }]);
+    const own = (x: Record<string, unknown> = {}) => ({
+      orderid: 'OWN1', variety: 'NORMAL', ordertype: 'LIMIT', transactiontype: 'SELL', producttype: 'CARRYFORWARD',
+      quantity: '80', price: '520', triggerprice: '0', status: 'open', symboltoken: '1171', exchange: 'BFO', ordertag: '', ...x,
+    });
+    // EXIT_CANCEL_OWNER_ORDERS defaults ON.
+    const CFG = parseAutoExitConfig({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner' });
+    const cancelled = env([own({ status: 'cancelled' })]);
+    const filled = env([own({ status: 'cancelled' }), { orderid: 'O1', status: 'complete', symboltoken: '1171', exchange: 'BFO' }]);
+    let alert: jest.SpyInstance;
+    beforeEach(() => { alert = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true); });
+    afterEach(() => alert.mockRestore());
+
+    it.each(['AI', 'PRICE_TRIGGER'] as const)('live %s exit: the owner order is NOT cancelled (EXIT_CANCEL_OWNER_ORDERS ignored); SKIPPED OPEN_ORDER_EXISTS → blockedExit', async (trigger) => {
+      expect(CFG.cancelOwnerOrders).toBe(true);
+      const h = harness({ tracker: TRK, authority: { live: true }, positions: [pos('40')], books: [env([own()])] });
+      const out = trigger === 'AI' ? await h.ex.process(SV, CFG, NOW) : await h.ex.execute('row1', { ...SV, id: 'trg_x' }, CFG, NOW, 'PRICE_TRIGGER');
+      expect(out).toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+      await flush();
+      expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+      expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+      expect(h.escalation.blockedExit).toHaveBeenCalledTimes(1);
+      expect(String((h.escalation.blockedExit.mock.calls[0][0] as { detail: string }).detail)).toContain('OWN1 (LIMIT SELL 80 @ 520)');
+    });
+
+    it('off: the owner order is cancelled and the exit sent, exactly as today; nobody escalated', async () => {
+      const h = harness({ tracker: TRK, authority: { live: false }, positions: [pos('40'), pos('40'), pos('0')], books: [env([own()]), cancelled, cancelled, filled] });
+      await expect(h.ex.process(SV, CFG, NOW)).resolves.toEqual({ status: 'FILLED' });
+      expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('NORMAL', 'OWN1');
+      await flush();
+      expect(h.escalation.blockedExit).not.toHaveBeenCalled();
+    });
+
+    it('live MANUAL (owner path): keeps today\'s behaviour — the owner order is cancelled and the exit sent', async () => {
+      const h = harness({ tracker: TRK, authority: { live: true }, positions: [pos('40'), pos('40'), pos('0')], books: [env([own()]), cancelled, cancelled, filled] });
+      await expect(h.ex.execute('row1', { ...SV, id: 'man_x' }, CFG, NOW, 'MANUAL')).resolves.toEqual({ status: 'FILLED' });
+      expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('NORMAL', 'OWN1');
+    });
+  });
 });

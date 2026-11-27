@@ -26,7 +26,15 @@ import { ExitNoiseReadService } from '../../exit-noise/exit-noise.service';
 import { triggerCheckFromPacket } from '../../exit-discipline/trigger-check';
 import { cutLossFromPacket, cutLossK15, cutLossRealActs, type CutLossRecord } from '../../exit-discipline/cut-loss-yardstick';
 import { TRIGGER_N15_READER, type N15Reader } from '../repositories/n15.reader';
-import { AUTHORITY_STATE, TRADE_ALARMS, type AuthorityStatePort, type TradeAlarmsPort } from '../../exit-authority/exit-authority.tokens';
+import {
+  AUTHORITY_STATE,
+  OWNER_ESCALATION,
+  TRADE_ALARMS,
+  type AuthorityStatePort,
+  type OwnerEscalationPort,
+  type TradeAlarmsPort,
+} from '../../exit-authority/exit-authority.tokens';
+import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { isPaperTrackerId } from '../domain/exit-authority';
 import { isHeld } from '../domain/guards';
 
@@ -81,17 +89,32 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
     // Trade agent exit authority: live ⇒ a confirmed cross raises an alarm instead of selling. Absent / off ⇒ today.
     @Optional() @Inject(TRADE_ALARMS) private readonly alarms?: TradeAlarmsPort,
     @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort,
+    @Optional() @Inject(OWNER_ESCALATION) private readonly escalation?: OwnerEscalationPort,
   ) {}
 
-  /** A fire on this tracker raises an alarm (live authority, alarm store bound, a live tracker not on the hold list). */
+  /**
+   * A fire on this tracker never sells (live authority, a live tracker not on the hold list): it raises an alarm,
+   * or — with no alarm store bound — alerts the owner. Fail closed: live never falls back to a code sell.
+   */
   private alarmsFire(t: ArmedTrigger, acfg: AutoExitConfig): boolean {
-    if (!this.alarms) return false;
     try {
       if (this.authority?.isLive() !== true) return false;
     } catch {
       return false;
     }
     return !isPaperTrackerId(t.trackerId) && !isHeld(acfg.hold, { id: t.trackerId, symbol: t.symbol });
+  }
+
+  /** Live, a fired trigger that could not alarm: ops alert + the owner's blocked-exit escalation (if bound). Never throws. */
+  private tellOwner(t: ArmedTrigger, f: Fire, reason: string, why: string): void {
+    const text = `PRICE_TRIGGER fired on ${t.symbol} (${t.watch.symbol} ${t.op} ${t.price}, at ${f.tick.price}, trigger ${t.id}) ` +
+      `but ${why} — NOTHING SOLD and the trade agent was NOT alarmed. Check the position.`;
+    void sendOpsAlert(`authority-trigger:${t.id}`, `GrW ALERT: ${text}`).catch(() => undefined);
+    const esc = this.escalation;
+    if (!esc) return;
+    void Promise.resolve()
+      .then(() => esc.blockedExit({ userId: t.userId, trackerId: t.trackerId, symbol: t.symbol, reason: reason.slice(0, 500), detail: text.slice(0, 500) }))
+      .catch((err) => this.logger.warn(`[ai-trigger] owner escalation for trigger ${t.id} failed: ${errText(err)}`));
   }
 
   onModuleInit(): void {
@@ -447,11 +470,16 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
     this.logger.warn(`[ai-trigger] FIRED ${reason}`);
     this.releaseIfUnused(t.watch.key);
     if (this.alarmsFire(t, acfg)) {
-      // TRADE_AGENT_AUTHORITY=live: the trigger is FIRED (claimed above, as today) but nothing is sold —
-      // the trade agent is alarmed and decides. A raise that throws falls back to today's exit: the trigger is
-      // already consumed, and a fired stop that silently does nothing is the one outcome we never accept.
+      // TRADE_AGENT_AUTHORITY=live: the trigger is FIRED (claimed above, as today) but nothing is sold — the trade
+      // agent is alarmed and decides. No store, or a raise that throws: still nothing sold (no code sell under live);
+      // the trigger stays FIRED and the owner gets a loud alert instead.
+      if (!this.alarms) {
+        this.logger.error(`[ai-trigger] live but no alarm store bound — trigger ${t.id} on ${t.symbol} NOT sold`);
+        this.tellOwner(t, f, reason, 'no alarm store is bound');
+        return;
+      }
       try {
-        const row = await this.alarms!.raise({
+        const row = await this.alarms.raise({
           userId: t.userId, trackerId: t.trackerId, symbol: t.symbol, rule: 'PRICE_TRIGGER', urgency: 'normal', reason,
           wouldHave: `EXIT_NOW PRICE_TRIGGER ${t.op} ${t.price} (${t.watch.symbol}) — fired at ${f.tick.price}`,
           sourceRef: t.id,
@@ -460,7 +488,9 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`[ai-trigger] ALARM PRICE_TRIGGER instead of an exit — ${t.symbol} trigger ${t.id}${row ? ` alarm ${row.id}` : ' (an open alarm covers it)'}`);
         return;
       } catch (err) {
-        this.logger.error(`[ai-trigger] alarm for trigger ${t.id} could not be raised: ${errText(err)} — falling back to the exit`);
+        this.logger.error(`[ai-trigger] alarm for trigger ${t.id} could not be raised: ${errText(err)} — NOT sold, owner alerted`);
+        this.tellOwner(t, f, reason, `the alarm could not be stored (${errText(err).slice(0, 200)})`);
+        return;
       }
     }
     const v: PendingVerdict = {

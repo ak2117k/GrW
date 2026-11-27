@@ -11,6 +11,7 @@ import {
 import { CONFIRM_TIMEOUT_MS } from '../../exit-authority/domain/timings';
 import {
   AUTHORITY_STATE,
+  OWNER_ESCALATION,
   SUPREME_CONFIRM,
   TRADE_ALARMS,
   TRADE_BRIEFS,
@@ -19,6 +20,7 @@ import {
   type AlarmUrgency,
   type AuthorityStatePort,
   type ConfirmResult,
+  type OwnerEscalationPort,
   type SupremeConfirmPort,
   type TradeAlarmsPort,
   type TradeBriefsPort,
@@ -26,6 +28,7 @@ import {
 import type { AutoExitConfig, AutoExitMode } from '../domain/auto-exit.types';
 import { isHeld } from '../domain/guards';
 import { AiExitExecutionRepository, type PendingVerdict } from '../repositories/ai-exit-execution.repository';
+import { sendOpsAlert } from '../../../common/utils/ops-alert';
 
 export type RouteOutcome =
   | { kind: 'EXECUTE' }
@@ -41,6 +44,11 @@ export const RULE_STAMPS: readonly string[] = [FLOOR_HARD_EXIT_STAMP, TARGET_LAD
 
 /** ai_exit_executions.reason of a rule EXIT_NOW turned into an alarm (the poller never re-reads it). */
 export const AUTHORITY_ALARM = 'AUTHORITY_ALARM';
+/** Live with no alarm store bound: the rule exit is not sold (fail closed). */
+export const AUTHORITY_NO_ALARM_STORE = 'AUTHORITY_NO_ALARM_STORE';
+/** The alarm could not be stored RAISE_ATTEMPTS times: the row is closed so it stops blocking the poll. */
+export const AUTHORITY_ALARM_RAISE_FAILED = 'AUTHORITY_ALARM_RAISE_FAILED';
+export const RAISE_ATTEMPTS = 3;
 /** ai_exit_executions.reason prefix of an agent EXIT the supreme overrode to HOLD. */
 export const SUPREME_HOLD = 'SUPREME_HOLD';
 
@@ -73,7 +81,11 @@ export class ExitAuthorityRouter {
     @Optional() @Inject(TRADE_ALARMS) private readonly alarms?: TradeAlarmsPort,
     @Optional() @Inject(SUPREME_CONFIRM) private readonly supreme?: SupremeConfirmPort,
     @Optional() @Inject(TRADE_BRIEFS) private readonly briefs?: TradeBriefsPort,
+    @Optional() @Inject(OWNER_ESCALATION) private readonly escalation?: OwnerEscalationPort,
   ) {}
+
+  /** verdictId → consecutive failed alarm raises (bounded). */
+  private readonly raiseFailures = new Map<string, number>();
 
   /** True only when the exit authority is bound and live. False ⇒ callers keep today's path untouched. */
   active(): boolean {
@@ -95,8 +107,14 @@ export class ExitAuthorityRouter {
   }
 
   private async ruleAlarm(v: PendingVerdict, stamp: string, mode: AutoExitMode): Promise<RouteOutcome> {
-    if (!this.alarms) return EXECUTE; // no alarm store bound ⇒ behave as off
     const { rule, urgency } = ruleAlarmFor(stamp, String(v.reason ?? ''));
+    if (!this.alarms) {
+      // Fail CLOSED: live with no alarm store would otherwise be a code sell. Nothing is sold; the owner is told.
+      this.logger.error(`[exit-authority] live but no alarm store bound — rule ${rule} exit NOT sold — ${v.symbol} verdict ${v.id}`);
+      await this.skipRow(v, mode, AUTHORITY_NO_ALARM_STORE);
+      this.tellOwner(v, `no-store:${v.id}`, `rule ${rule} would have exited ${v.symbol}, but no alarm store is bound — nothing sold, nobody alarmed. Check the position.`);
+      return { kind: 'ALARM', alarmId: null };
+    }
     let alarm: AlarmRow | null;
     try {
       alarm = await this.alarms.raise({
@@ -107,13 +125,36 @@ export class ExitAuthorityRouter {
         payload: { stamp, verdictId: v.id },
       });
     } catch (err) {
-      // Not claimed: the verdict stays pending and the raise is retried on the next pass. Never sold by code.
-      this.logger.error(`[exit-authority] alarm ${rule} for ${v.symbol} verdict ${v.id} could not be raised: ${errText(err)} — retried next pass`);
+      // Never sold by code. Retried on the next pass (not claimed) up to RAISE_ATTEMPTS, then claimed SKIPPED so a
+      // stuck row stops head-of-line blocking newer verdicts in the poll's oldest-first LIMIT.
+      const n = (this.raiseFailures.get(v.id) ?? 0) + 1;
+      this.raiseFailures.set(v.id, n);
+      if (this.raiseFailures.size > 1_000) this.raiseFailures.delete(this.raiseFailures.keys().next().value as string);
+      this.logger.error(`[exit-authority] alarm ${rule} for ${v.symbol} verdict ${v.id} could not be raised (${n}/${RAISE_ATTEMPTS}): ${errText(err)}`);
+      if (n === 1) {
+        void sendOpsAlert(`authority-raise:${v.id}`, `GrW ALERT: rule ${rule} alarm for ${v.symbol} could not be stored (${errText(err).slice(0, 200)}). Nothing sold. Retrying.`).catch(() => undefined);
+      }
+      if (n >= RAISE_ATTEMPTS) {
+        this.raiseFailures.delete(v.id);
+        await this.skipRow(v, mode, AUTHORITY_ALARM_RAISE_FAILED);
+        this.tellOwner(v, `raise-failed:${v.id}`, `rule ${rule} alarm for ${v.symbol} failed ${n} times (${errText(err).slice(0, 200)}) — nothing sold, the agent was NOT alarmed. Check the position.`);
+      }
       return { kind: 'ALARM', alarmId: null };
     }
+    this.raiseFailures.delete(v.id);
     await this.skipRow(v, mode, AUTHORITY_ALARM);
     this.logger.warn(`[exit-authority] ALARM ${rule} (${urgency}) instead of a code exit — ${v.symbol} verdict ${v.id}${alarm ? ` alarm ${alarm.id}` : ' (an open alarm covers it)'}`);
     return { kind: 'ALARM', alarmId: alarm?.id ?? null };
+  }
+
+  /** Ops alert (deduped per key by sendOpsAlert) + the owner's blocked-exit escalation when bound. Never throws. */
+  private tellOwner(v: PendingVerdict, key: string, text: string): void {
+    void sendOpsAlert(`authority-${key}`, `GrW ALERT: ${text}`).catch(() => undefined);
+    const esc = this.escalation;
+    if (!esc) return;
+    void Promise.resolve()
+      .then(() => esc.blockedExit({ userId: v.userId, trackerId: v.trackerId, symbol: v.symbol, reason: String(v.reason ?? '').slice(0, 500), detail: text.slice(0, 500) }))
+      .catch((err) => this.logger.warn(`[exit-authority] owner escalation for ${v.symbol} failed: ${errText(err)}`));
   }
 
   private async agentExit(v: PendingVerdict, mode: AutoExitMode): Promise<RouteOutcome> {

@@ -1,6 +1,8 @@
 // apps/api/src/modules/sentinel-executor/services/trigger-watch.service.spec.ts
 import type { Price, PriceResult } from '../../market-hub/hub.types';
 import { TriggerWatchService } from './trigger-watch.service';
+import { Logger } from '@nestjs/common';
+import * as opsAlert from '../../../common/utils/ops-alert';
 
 const ENV = {
   SENTINEL_TRIGGERS_ENABLED: 'true', AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_QTY_UNITS: 'MCX:units',
@@ -24,7 +26,7 @@ function harness(o: {
   claimFire?: () => Promise<boolean>; armed?: unknown[]; closed?: string[];
   verdictForCheck?: (...a: any[]) => Promise<unknown>; recordCheck?: (...a: any[]) => Promise<void>; checkOf?: (...a: any[]) => Promise<unknown>;
   /** Exit authority ports (absent ⇒ today's constructor, 5 args). */
-  authority?: { live: boolean; raise?: (...a: any[]) => Promise<unknown> };
+  authority?: { live: boolean; raise?: (...a: any[]) => Promise<unknown>; noStore?: boolean };
 } = {}) {
   const listeners: Array<(p: Price) => void> = [];
   const hub = {
@@ -57,14 +59,15 @@ function harness(o: {
   const clock = { isOpen: jest.fn(() => true) };
   const alarms = { raise: jest.fn(o.authority?.raise ?? (async (..._a: any[]) => ({ id: 'al1' }))), openFor: jest.fn(), openForTrackers: jest.fn(), answer: jest.fn() };
   const state = { isLive: jest.fn(() => o.authority?.live === true) };
+  const escalation = { blockedExit: jest.fn(async (..._a: any[]) => undefined) };
   const svc = o.authority
-    ? new TriggerWatchService(repo as never, execRepo as never, executor as never, moduleRef as never, clock as never, undefined, undefined, alarms as never, state)
+    ? new TriggerWatchService(repo as never, execRepo as never, executor as never, moduleRef as never, clock as never, undefined, undefined, o.authority.noStore ? undefined : (alarms as never), state, escalation)
     : new TriggerWatchService(repo as never, execRepo as never, executor as never, moduleRef as never, clock as never);
   const emit = (ltp: number, at: Date, source: Price['source'] = 'ws') => {
     jest.spyOn(Date, 'now').mockReturnValue(at.getTime());
     for (const fn of listeners) fn({ ref: { exchange: 'MCX', token: '472789', symbol: 'F' }, ltp, at: at.getTime(), source });
   };
-  return { svc, hub, source, moduleRef, repo, execRepo, executor, clock, emit, listeners, alarms, state };
+  return { svc, hub, source, moduleRef, repo, execRepo, executor, clock, emit, listeners, alarms, state, escalation };
 }
 
 let intervalSpy: jest.SpyInstance;
@@ -210,15 +213,25 @@ describe('TriggerWatchService — firing', () => {
     expect(h.executor.execute.mock.calls[0][4]).toBe('PRICE_TRIGGER');
   });
 
-  it('live but the alarm raise throws: falls back to today\'s exit (a fired stop is never silently dropped)', async () => {
-    const h = harness({ proposals: [[proposal()], []], authority: { live: true, raise: async () => { throw new Error('db down'); } } });
+  it.each([
+    ['the alarm raise throws', { live: true, raise: async () => { throw new Error('db down'); } }],
+    ['no alarm store is bound', { live: true, noStore: true }],
+  ])('live and %s: NOTHING sold (no code sell under live), FIRED stays, the owner is alerted loudly', async (_l, authority) => {
+    const ops = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const h = harness({ proposals: [[proposal()], []], authority });
     await armed(h);
     h.emit(8925, ms(T0, 1000));
     h.emit(8924, ms(T0, 2100));
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    expect(h.executor.execute).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r));
+    expect(h.repo.claimFire).toHaveBeenCalledTimes(1);
+    expect(h.execRepo.claim).not.toHaveBeenCalled();
+    expect(h.executor.execute).not.toHaveBeenCalled();
+    expect(ops).toHaveBeenCalledTimes(1);
+    expect(ops.mock.calls[0][0]).toBe('authority-trigger:trg1');
+    expect(String(ops.mock.calls[0][1])).toMatch(/NOTHING SOLD/);
+    expect(String(ops.mock.calls[0][1])).toContain('8930');
+    expect(h.escalation.blockedExit).toHaveBeenCalledWith(expect.objectContaining({ trackerId: 't1', symbol: TRACKER.symbol }));
   });
 
   it('a lost claim (another process fired, or it expired) executes nothing', async () => {

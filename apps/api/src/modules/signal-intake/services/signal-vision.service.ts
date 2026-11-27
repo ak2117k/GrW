@@ -15,7 +15,8 @@ import { SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig } from '../signal-intake.
 
 /** `ai_calls.job` for every image read (the daily cap counts these rows). */
 export const SIGNAL_VISION_JOB = 'signal.vision';
-const MAX_TOKENS = 1_200;
+/** 1 200 before the image description (owner 2026-11-27) was added to every reply. */
+const MAX_TOKENS = 1_600;
 /** Never send more than this to the model (the reader keeps photos ≤ ~1 MB, documents ≤ 2 MB). */
 export const VISION_MAX_BYTES = 2 * 1024 * 1024;
 const MEDIA_TYPES = new Set<TransportImage['mediaType']>(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
@@ -26,9 +27,16 @@ export interface SignalVision {
   unavailable(): string | null;
   /** `signal.vision` ai_calls rows since `since` (the daily cap). */
   usedSince(since: Date): Promise<number>;
-  classify(caption: string, image: TelegramMediaRef): Promise<VisionReply>;
+  /** `ctx.channelId` picks the model: a trusted channel's image is read with the trusted model. */
+  classify(caption: string, image: TelegramMediaRef, ctx?: { channelId?: string }): Promise<VisionReply>;
 }
 export const SIGNAL_VISION = Symbol('SIGNAL_VISION');
+
+/** The model for a channel's images: the trusted model when the title contains a trusted substring (case-insensitive). */
+export function visionModelFor(channelTitle: string | null | undefined, cfg: Pick<SignalIntakeConfig, 'visionModel' | 'visionTrustedChannels' | 'visionTrustedModel'>): string {
+  const title = String(channelTitle ?? '').toLowerCase();
+  return title && cfg.visionTrustedChannels.some((s) => title.includes(s)) ? cfg.visionTrustedModel : cfg.visionModel;
+}
 
 /**
  * Which transport can carry an image under the current config, or why none can.
@@ -75,7 +83,10 @@ export class SignalVisionService implements SignalVision, OnApplicationBootstrap
     if (!this.cfg.enabled) return;
     if (!this.cfg.visionEnabled) this.logger.log('[signal-intake] vision: off (SIGNAL_VISION=off) — image posts are not read');
     else if (this.state.reason) this.logger.warn(`[signal-intake] vision: UNAVAILABLE — ${this.state.reason}; image posts are not read`);
-    else this.logger.log(`[signal-intake] vision: on via ${this.state.via} (${this.cfg.visionModel}, cap ${this.cfg.visionDailyCap}/day)`);
+    else {
+      const trusted = this.cfg.visionTrustedChannels.length ? `; ${this.cfg.visionTrustedModel} for ${this.cfg.visionTrustedChannels.join(' / ')}` : '';
+      this.logger.log(`[signal-intake] vision: on via ${this.state.via} (${this.cfg.visionModel}${trusted}, cap ${this.cfg.visionDailyCap}/day)`);
+    }
   }
 
   unavailable(): string | null {
@@ -86,14 +97,14 @@ export class SignalVisionService implements SignalVision, OnApplicationBootstrap
     return this.repo.aiCallsSince(SIGNAL_VISION_JOB, since);
   }
 
-  async classify(caption: string, image: TelegramMediaRef): Promise<VisionReply> {
+  async classify(caption: string, image: TelegramMediaRef, ctx: { channelId?: string } = {}): Promise<VisionReply> {
     if (this.state.reason) throw new Error(`vision unavailable: ${this.state.reason}`);
     const mediaType = image.mimeType as TransportImage['mediaType'];
     if (!MEDIA_TYPES.has(mediaType)) throw new Error(`unsupported image type ${image.mimeType}`);
     const bytes = await readFile(image.path);
     if (bytes.length > VISION_MAX_BYTES) throw new Error(`image too large (${bytes.length} bytes)`);
     const request: TransportRequest = {
-      model: this.cfg.visionModel,
+      model: await this.modelFor(ctx.channelId),
       max_tokens: MAX_TOKENS,
       output_config: { effort: 'low', format: { type: 'json_schema', schema: SIGNAL_VISION_SCHEMA as unknown as Record<string, unknown> } },
       system: [{ type: 'text', text: SIGNAL_VISION_SYSTEM }],
@@ -115,6 +126,17 @@ export class SignalVisionService implements SignalVision, OnApplicationBootstrap
     const reply = readVisionReply(out);
     if (!reply) throw new Error('reply is not the vision schema JSON');
     return reply;
+  }
+
+  /** The trusted model for a trusted channel; the default model when the title is unknown or its lookup fails. */
+  private async modelFor(channelId: string | undefined): Promise<string> {
+    if (!channelId || this.cfg.visionTrustedChannels.length === 0) return this.cfg.visionModel;
+    try {
+      return visionModelFor(await this.repo.channelTitle(channelId), this.cfg);
+    } catch (e) {
+      this.logger.warn(`[signal-intake] vision: channel title lookup failed (default model): ${e instanceof Error ? e.message : String(e)}`);
+      return this.cfg.visionModel;
+    }
   }
 
   private transportOf(): MessagesTransport {

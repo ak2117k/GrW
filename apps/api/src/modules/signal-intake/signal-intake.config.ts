@@ -26,6 +26,13 @@ export interface SignalIntakeConfig {
   visionEnabled: boolean;
   /** SIGNAL_VISION_MODEL — the model for image posts (default: the cheapest image-capable one, haiku). */
   visionModel: string;
+  /**
+   * SIGNAL_VISION_TRUSTED_CHANNELS — comma list of channel-title substrings (case-insensitive, stored lower-case) whose
+   * images are read with `visionTrustedModel` (default "Mr. P Investments,Stock Gainers"; empty = nobody).
+   */
+  visionTrustedChannels: string[];
+  /** SIGNAL_VISION_TRUSTED_MODEL — the stronger model for trusted channels (default claude-sonnet-5; same job, same daily cap). */
+  visionTrustedModel: string;
   /** SIGNAL_VISION_DAILY_CAP — images per IST day, counted from ai_calls job 'signal.vision' (cache hits are free). */
   visionDailyCap: number;
   /** SIGNAL_VISION_MAX_AGE_MIN — older image posts are never sent to the model. */
@@ -44,6 +51,9 @@ export const SIGNAL_INTAKE_CONFIG = Symbol('SIGNAL_INTAKE_CONFIG');
 export const SIGNAL_PARSE_DEFAULT_MODEL = 'claude-haiku-5-5';
 /** Haiku 5.5 reads images (verified over the CLI transport 2026-10-23) and is the cheapest priced model. */
 export const SIGNAL_VISION_DEFAULT_MODEL = 'claude-haiku-5-5';
+/** Owner 2026-11-27: the channels whose images matter most are read by Sonnet (the same id the other Sonnet jobs use). */
+export const SIGNAL_VISION_DEFAULT_TRUSTED_CHANNELS = 'Mr. P Investments,Stock Gainers';
+export const SIGNAL_VISION_DEFAULT_TRUSTED_MODEL = 'claude-sonnet-5';
 
 const off = (v: string | undefined) => ['off', 'false', '0', 'no'].includes(String(v ?? '').trim().toLowerCase());
 const int = (v: string | undefined, d: number, min: number, max: number) => {
@@ -71,6 +81,11 @@ export function parseSignalIntakeConfig(env: Record<string, string | undefined>)
     ownerUserId: owner,
     visionEnabled: !off(env.SIGNAL_VISION),
     visionModel: (env.SIGNAL_VISION_MODEL ?? '').trim() || SIGNAL_VISION_DEFAULT_MODEL,
+    visionTrustedChannels: (env.SIGNAL_VISION_TRUSTED_CHANNELS ?? SIGNAL_VISION_DEFAULT_TRUSTED_CHANNELS)
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    visionTrustedModel: (env.SIGNAL_VISION_TRUSTED_MODEL ?? '').trim() || SIGNAL_VISION_DEFAULT_TRUSTED_MODEL,
     visionDailyCap: int(env.SIGNAL_VISION_DAILY_CAP, 120, 0, 10_000), // 40 ran out at 18:00 on 2026-11-09, mostly on P&L screenshots
     visionMaxAgeMs: int(env.SIGNAL_VISION_MAX_AGE_MIN, 60, 1, 7 * 24 * 60) * 60_000,
     infoLlmEnabled: !off(env.SIGNAL_INFO_LLM),

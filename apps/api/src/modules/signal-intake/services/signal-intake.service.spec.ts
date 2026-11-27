@@ -305,7 +305,7 @@ describe('SignalIntakeService — image posts (vision)', () => {
     await m.svc.handle(img(m, 'm1', 'A'));
     await flush();
     await m.svc.handle(m.msg('z', 'A', 'Good night', 1)); // drain the chain
-    expect(classify).toHaveBeenCalledWith('', IMG);
+    expect(classify).toHaveBeenCalledWith('', IMG, { channelId: 'A' });
     expect(m.mem.signals[0]).toMatchObject({ parser: 'llm', underlying: 'CRUDEOIL', strike: 5600, sl: 120, tags: ['LLM', 'VISION'] });
     expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', llmResult: expect.objectContaining({ kind: 'SIGNAL', imageSha256: IMG.sha256 }) });
     expect(m.emitted[0]).toEqual(['signal.ready', expect.objectContaining({ signalId: 'sig1' })]);
@@ -382,7 +382,7 @@ describe('SignalIntakeService — image posts (vision)', () => {
       await m.svc.handle({ ...img(m, 'm1', 'A'), backfill: true });
       await flush();
       await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
-      expect(classify).toHaveBeenCalledWith('', IMG);
+      expect(classify).toHaveBeenCalledWith('', IMG, { channelId: 'A' });
       expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL' });
       expect(m.mem.signals[0]).toMatchObject({ underlying: 'CRUDEOIL', tags: ['LLM', 'VISION'] });
       expect(m.emitted.filter((e) => e[0] === 'signal.ready')).toEqual([]); // old: never to the trader
@@ -459,6 +459,53 @@ describe('SignalIntakeService — image posts (vision)', () => {
       ['signal.vision.done', { messageId: 'm1', channelId: 'A', postedAt: T0, text: 'Crude chart for today', reading: expect.objectContaining({ kind: 'NOISE', imageSha256: IMG.sha256 }) }],
     ]);
     expect(savedAtEmit).toEqual(['NOISE']);
+  });
+
+  describe('every read image carries its description to the message reader (prod 2026-11-27 Mr. P short-side post)', () => {
+    const DESC = { description: 'NIFTY 15m chart, short active from ~25700, trailing stop 25720', instruments: ['NIFTY'], bias: 'BEAR' as const, levels: [{ kind: 'STOP' as const, price: 25720 }] };
+    const doneOf = (m: ReturnType<typeof make>) => m.emitted.filter(([e]) => e === 'signal.vision.done').map(([, p]) => p as { reading: Record<string, unknown> | null; skipped?: string });
+
+    const cases: Array<[string, VisionReply, string]> = [
+      ['NOISE', { kind: 'NOISE', isSignal: false, signals: [] }, 'NOISE'],
+      ['UPDATE', { kind: 'UPDATE', isSignal: false, signals: [] }, 'UPDATE_ORPHAN'],
+      ['SIGNAL with no valid call', { kind: 'SIGNAL', isSignal: false, signals: [] }, 'LLM_NOT_SIGNAL'],
+      ['INFO', { kind: 'INFO', isSignal: false, signals: [], items: [] }, 'INFO'],
+    ];
+    it.each(cases)('%s: the class is unchanged and vision.done carries the description', async (_n, reply, status) => {
+      const { v } = fakeVision({ ...reply, ...DESC });
+      const m = make({ vision: v });
+      await m.svc.handle(img(m, 'm1', 'A', 'A small short side trade is active! Will trail now!'));
+      await flush();
+      await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
+      expect(m.mem.classes.get('m1')).toMatchObject({ status, parser: 'vision' });
+      expect(signalEvents(m)).toEqual([]);
+      const done = doneOf(m);
+      expect(done).toHaveLength(1);
+      expect(done[0].skipped).toBeUndefined();
+      expect(done[0].reading).toMatchObject({ kind: reply.kind, ...DESC, imageSha256: IMG.sha256 });
+    });
+
+    it('a SIGNAL image: the call as before, and vision.done carries the description too', async () => {
+      const { v } = fakeVision({ kind: 'SIGNAL', isSignal: true, signals: [call], ...DESC });
+      const m = make({ vision: v });
+      await m.svc.handle(img(m, 'm1', 'A'));
+      await flush();
+      await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL' });
+      expect(doneOf(m)[0].reading).toMatchObject({ kind: 'SIGNAL', description: DESC.description });
+    });
+
+    it('a cached read (same image again) still carries the stored description', async () => {
+      const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [], ...DESC });
+      const m = make({ vision: v });
+      await m.svc.handle(img(m, 'm1', 'A', 'first'));
+      await flush();
+      await m.svc.handle(img(m, 'm2', 'B', 'second', 1));
+      await flush();
+      await m.svc.handle(m.msg('z', 'A', 'Good night', 2));
+      expect(classify).toHaveBeenCalledTimes(1);
+      expect(doneOf(m).map((d) => d.reading?.description)).toEqual([DESC.description, DESC.description]);
+    });
   });
 
   it('a vision call emits signal.ready, then signal.vision.done', async () => {

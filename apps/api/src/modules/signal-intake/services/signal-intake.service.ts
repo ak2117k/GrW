@@ -6,7 +6,7 @@ import { dedupKey, planCluster } from '../domain/cluster';
 import { findContract, listedExpiries, segmentOf } from '../domain/contract';
 import { inferExpiry } from '../domain/expiry';
 import { classifyCommentary, hasBias, recapReason, type CommentaryClass, type InfoItem, type RefPrices } from '../domain/info';
-import { CALL_AT_TAG, clockOrNull, validateInfoItems, validateLlmSignal, type InfoLlmReply, type LlmParseReply, type VisionReply } from '../domain/llm-schema';
+import { CALL_AT_TAG, clockOrNull, readImageDescription, validateInfoItems, validateLlmSignal, type InfoLlmReply, type LlmParseReply, type VisionReply } from '../domain/llm-schema';
 import { prefilter, type PrefilterResult } from '../domain/prefilter';
 import { parseSignal } from '../domain/rule-parser';
 import {
@@ -290,7 +290,7 @@ export class SignalIntakeService {
     await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
     // Outside the serial chain, like the text fallback.
     void (this.vision as SignalVision)
-      .classify(String(evt.text ?? ''), media)
+      .classify(String(evt.text ?? ''), media, { channelId: evt.channelId })
       .then(
         (reply) => this.serial(() => this.applyVision(evt, postedAt, media, reply, base, 'llm')),
         (e) =>
@@ -327,7 +327,9 @@ export class SignalIntakeService {
       return;
     }
     const shown = clockOrNull(reply.shownTime);
-    const stored = { kind: reply.kind, isSignal: reply.isSignal, signals: reply.signals, ...(reply.items ? { items: reply.items } : {}), ...(shown ? { shownTime: shown } : {}), imageSha256: media.sha256 };
+    // What the image shows, in words, is kept for EVERY kind (owner 2026-11-27): the message reader reads it even for NOISE.
+    const described = readImageDescription(reply as unknown as Record<string, unknown>);
+    const stored = { kind: reply.kind, isSignal: reply.isSignal, signals: reply.signals, ...(reply.items ? { items: reply.items } : {}), ...(shown ? { shownTime: shown } : {}), ...described, imageSha256: media.sha256 };
     // The AI message reader reads image posts from this stored result: emitted after every exit that saves one.
     const done = () => {
       const payload: VisionDoneEvent = { messageId: evt.messageId, channelId: evt.channelId, postedAt, text: String(evt.text ?? ''), reading: stored };

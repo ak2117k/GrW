@@ -240,6 +240,13 @@ export const SIGNAL_VISION_SYSTEM = [
   'For kind=INFO fill items[] (one per underlying with a view: bias, levels, OI note, condition, horizon) as described below; else items=[].',
   'shownTime: when the image is a SCREENSHOT of a chat message carrying the call, the time printed on that message bubble',
   '(e.g. "2:34 PM"), as 24-hour "HH:MM" ("14:34"); null when no such time is visible. Never the phone status-bar clock.',
+  'ALWAYS, for every kind (NOISE and UPDATE too), describe what the image shows - another reader sees only your words:',
+  'description: one or two plain sentences: the instrument(s), the direction / bias, the levels drawn or written (entry, stop, targets,',
+  'support, resistance), the timeframe if visible, and what the post says is happening (e.g. "NIFTY 15m chart, short active from ~25700,',
+  'trailing stop 25720, target 25600"; "broker P&L screenshot, +12,400 on CRUDEOIL options"). Only what is visible; never invent a level.',
+  'instruments: the exchange names of the instruments shown (as for underlying), [] when none. bias: BULL, BEAR, NEUTRAL, or NONE when',
+  'the image shows no direction. levels: every price level drawn or written, each {kind: ENTRY | STOP | TARGET | SUPPORT | RESISTANCE |',
+  'OTHER, price}; [] when none.',
   '',
   SIGNAL_PARSE_SYSTEM,
   '',
@@ -248,16 +255,48 @@ export const SIGNAL_VISION_SYSTEM = [
 
 export const SIGNAL_VISION_SCHEMA = {
   ...SIGNAL_PARSE_SCHEMA,
-  required: ['kind', ...SIGNAL_PARSE_SCHEMA.required, 'items', 'shownTime'],
+  required: ['kind', ...SIGNAL_PARSE_SCHEMA.required, 'items', 'shownTime', 'description', 'instruments', 'bias', 'levels'],
   properties: {
     kind: { type: 'string', enum: ['SIGNAL', 'UPDATE', 'INFO', 'NOISE'] },
     ...SIGNAL_PARSE_SCHEMA.properties,
     items: { type: 'array', items: INFO_ITEM_SCHEMA },
     shownTime: { type: ['string', 'null'] },
+    description: { type: 'string' },
+    instruments: { type: 'array', items: { type: 'string' } },
+    bias: { type: 'string', enum: ['BULL', 'BEAR', 'NEUTRAL', 'NONE'] },
+    levels: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['kind', 'price'],
+        properties: { kind: { type: 'string', enum: ['ENTRY', 'STOP', 'TARGET', 'SUPPORT', 'RESISTANCE', 'OTHER'] }, price: { type: 'number' } },
+      },
+    },
   },
 } as const;
 
-export interface VisionReply extends LlmParseReply {
+export type ImageLevelKind = 'ENTRY' | 'STOP' | 'TARGET' | 'SUPPORT' | 'RESISTANCE' | 'OTHER';
+const IMAGE_LEVEL_KINDS = new Set<ImageLevelKind>(['ENTRY', 'STOP', 'TARGET', 'SUPPORT', 'RESISTANCE', 'OTHER']);
+const IMAGE_BIASES = new Set(['BULL', 'BEAR', 'NEUTRAL']);
+const MAX_DESCRIPTION_CHARS = 600;
+const MAX_IMAGE_INSTRUMENTS = 5;
+const MAX_IMAGE_LEVELS = 12;
+
+/**
+ * What the image shows, in words, for EVERY kind (owner 2026-11-27: a Mr. P "short side trade is active" chart
+ * was filed NOISE and the message reader saw only the caption). The message reader renders `description` and
+ * quotes `instruments`; nothing here creates a signal. Absent on replies cached before 2026-11-27.
+ */
+export interface ImageDescription {
+  description?: string;
+  /** Upper-cased exchange names the image shows (unvalidated against the vocabulary). */
+  instruments?: string[];
+  bias?: 'BULL' | 'BEAR' | 'NEUTRAL';
+  levels?: Array<{ kind: ImageLevelKind; price: number }>;
+}
+
+export interface VisionReply extends LlmParseReply, ImageDescription {
   kind: VisionKind;
   /** kind INFO: the model's info items (unvalidated; see {@link validateInfoItems}). */
   items?: unknown[];
@@ -266,6 +305,29 @@ export interface VisionReply extends LlmParseReply {
    * COMMODITY re-posted a 14:34 premium-group call as a screenshot at 15:40 and it was traded as fresh).
    */
   shownTime?: string | null;
+}
+
+/** The description fields of a parsed reply object; only the present, valid ones (junk dropped, NONE bias dropped). */
+export function readImageDescription(o: Record<string, unknown> | null | undefined): ImageDescription {
+  const out: ImageDescription = {};
+  if (!o || typeof o !== 'object') return out;
+  if (typeof o.description === 'string' && o.description.trim()) out.description = o.description.trim().slice(0, MAX_DESCRIPTION_CHARS);
+  if (Array.isArray(o.instruments)) {
+    const names = [...new Set(o.instruments.filter((x): x is string => typeof x === 'string').map((x) => x.trim().toUpperCase()).filter(Boolean))].slice(0, MAX_IMAGE_INSTRUMENTS);
+    if (names.length) out.instruments = names;
+  }
+  if (typeof o.bias === 'string' && IMAGE_BIASES.has(o.bias)) out.bias = o.bias as ImageDescription['bias'];
+  if (Array.isArray(o.levels)) {
+    const levels: NonNullable<ImageDescription['levels']> = [];
+    for (const l of o.levels) {
+      const kind = (l as { kind?: unknown } | null)?.kind;
+      const price = (l as { price?: unknown } | null)?.price;
+      if (IMAGE_LEVEL_KINDS.has(kind as ImageLevelKind) && typeof price === 'number' && Number.isFinite(price) && price > 0) levels.push({ kind: kind as ImageLevelKind, price });
+      if (levels.length >= MAX_IMAGE_LEVELS) break;
+    }
+    if (levels.length) out.levels = levels;
+  }
+  return out;
 }
 
 /** A trade_signals tag carrying the screenshot's own call time: `CALL_AT:HH:MM` (IST clock). */
@@ -288,30 +350,18 @@ export function clockOrNull(v: unknown): string | null {
 export function readVisionReply(text: string): VisionReply | null {
   const base = readLlmReply(text);
   if (!base) return null;
-  let kind: unknown;
+  let o: Record<string, unknown>;
   try {
-    kind = (JSON.parse(text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')) as Record<string, unknown>).kind;
+    o = JSON.parse(text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')) as Record<string, unknown>;
   } catch {
     return null;
   }
+  const kind = o?.kind;
   if (!VISION_KINDS.has(kind as VisionKind)) return null;
   const k: VisionKind = kind === 'VIEW' ? 'INFO' : (kind as VisionKind);
-  if (k === 'INFO') {
-    let items: unknown[] = [];
-    try {
-      const o = JSON.parse(stripJson(text)) as Record<string, unknown>;
-      if (Array.isArray(o.items)) items = o.items;
-    } catch {
-      /* already parsed above */
-    }
-    return { kind: k, isSignal: false, signals: [], items };
-  }
-  if (k !== 'SIGNAL') return { kind: k, isSignal: false, signals: [] };
-  let shownTime: string | null = null;
-  try {
-    shownTime = clockOrNull((JSON.parse(stripJson(text)) as Record<string, unknown>).shownTime);
-  } catch {
-    /* already parsed above */
-  }
-  return { kind: k, isSignal: base.isSignal && base.signals.length > 0, signals: base.signals, shownTime };
+  // Every kind keeps what the image shows, in words (the message reader reads it).
+  const described = readImageDescription(o);
+  if (k === 'INFO') return { kind: k, isSignal: false, signals: [], items: Array.isArray(o.items) ? o.items : [], ...described };
+  if (k !== 'SIGNAL') return { kind: k, isSignal: false, signals: [], ...described };
+  return { kind: k, isSignal: base.isSignal && base.signals.length > 0, signals: base.signals, shownTime: clockOrNull(o.shownTime), ...described };
 }

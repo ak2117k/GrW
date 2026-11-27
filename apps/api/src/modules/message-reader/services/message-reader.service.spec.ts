@@ -245,6 +245,15 @@ describe('MessageReaderService', () => {
     expect(m.rows.get('m1')).toMatchObject({ status: 'READ' });
   });
 
+  it('a NOISE image reading with a description is read with it, and the instruments it names go into the packet', async () => {
+    const m = make();
+    const reading = { kind: 'NOISE', isSignal: false, signals: [], description: 'NIFTY 15m chart, short active from ~25700', instruments: ['nifty', 'BANKNIFTY'], imageSha256: 'b'.repeat(64) };
+    m.svc.onVisionDone({ messageId: 'm1', channelId: 'ch1', postedAt: new Date(NOW.getTime() - 60_000), text: 'A small short side trade is active! Will trail now!', reading });
+    await m.svc.whenIdle();
+    expect(m.packet.build).toHaveBeenCalledWith(expect.objectContaining({ underlyings: ['NIFTY', 'BANKNIFTY'] }));
+    expect(m.llm.read).toHaveBeenCalledWith(expect.objectContaining({ imageReading: reading }));
+  });
+
   it('off mode reads nothing', async () => {
     const m = make({ mode: 'off' });
     m.svc.onTelegramMessage(m.post('m1', 'Stay cautious'));

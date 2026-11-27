@@ -271,6 +271,11 @@ export class SignalIntakeRepository {
     return hit?.llmResult ?? null;
   }
 
+  /** The channel's title (vision picks the trusted-channel model by it); null when unknown. */
+  async channelTitle(channelId: string): Promise<string | null> {
+    return (await this.prisma.telegramChannel.findUnique({ where: { id: channelId }, select: { title: true } }))?.title ?? null;
+  }
+
   /** ai_calls rows of `job` since `since` (the vision daily cap). */
   async aiCallsSince(job: string, since: Date): Promise<number> {
     return this.prisma.aiCall.count({ where: { job, createdAt: { gte: since } } });

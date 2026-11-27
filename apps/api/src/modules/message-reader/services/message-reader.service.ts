@@ -89,7 +89,10 @@ function hashOf(j: ReadJob): string {
   return textHash(j.text);
 }
 
-/** Underlyings a vision result names (its calls and info items), so the packet carries their data too. */
+/**
+ * Underlyings a vision result names (its calls, info items and — for every kind, NOISE included — the instruments
+ * its image description names), so the packet carries their data too.
+ */
 function imageUnderlyings(reading: unknown): string[] {
   const out: string[] = [];
   if (!reading || typeof reading !== 'object') return out;
@@ -101,6 +104,8 @@ function imageUnderlyings(reading: unknown): string[] {
       if (typeof u === 'string' && u.trim()) out.push(u.trim().toUpperCase());
     }
   }
+  const named = (reading as Record<string, unknown>).instruments;
+  if (Array.isArray(named)) for (const u of named) if (typeof u === 'string' && u.trim()) out.push(u.trim().toUpperCase());
   return out;
 }
 

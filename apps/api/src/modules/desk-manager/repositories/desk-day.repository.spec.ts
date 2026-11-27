@@ -1,12 +1,13 @@
 import { DeskDayRepository } from './desk-day.repository';
 
-type Row = { id: string; userId: string; symbol: string; kind: string; status: string; entryPrice: number; exitPrice: number | null; qty: number; exitTime: Date | null; pnl: number | null };
+type Row = { id: string; userId: string; symbol: string; kind: string; status: string; entryPrice: number; exitPrice: number | null; qty: number; exitTime: Date | null; pnl: number | null; entryTime?: Date | null; exchange?: string; token?: string; lastLtp?: number | null };
+type Bar = { exchange: string; token: string; ts: Date; close: number };
 
 const NOW = new Date('2026-11-26T08:00:00Z'); // 13:30 IST
 const IST_MIDNIGHT = new Date('2026-11-25T18:30:00Z');
 
 /** A tiny in-memory prisma that honours the where clauses the repository sends. */
-function make(trackers: Row[], orders: Array<{ trackerId: string; source: string | null }> = [], state: Record<string, unknown> | null = null) {
+function make(trackers: Row[], orders: Array<{ trackerId: string; source: string | null }> = [], state: Record<string, unknown> | null = null, bars: Bar[] = []) {
   const match = (r: Row, w: any) =>
     r.userId === w.userId &&
     r.kind === w.kind &&
@@ -15,7 +16,7 @@ function make(trackers: Row[], orders: Array<{ trackerId: string; source: string
     (!w.exitTime || (r.exitTime !== null && r.exitTime >= w.exitTime.gte && r.exitTime <= w.exitTime.lte));
   const prisma = {
     tradeTracker: {
-      findMany: jest.fn(async ({ where }: any) => trackers.filter((r) => match(r, where)).sort((a, b) => a.exitTime!.getTime() - b.exitTime!.getTime())),
+      findMany: jest.fn(async ({ where }: any) => trackers.filter((r) => match(r, where)).sort((a, b) => (a.exitTime?.getTime() ?? 0) - (b.exitTime?.getTime() ?? 0))),
       aggregate: jest.fn(async ({ where }: any) => {
         const rs = trackers.filter((r) => match(r, where));
         return { _sum: { pnl: rs.length ? rs.reduce((s, r) => s + (r.pnl ?? 0), 0) : null } };
@@ -27,6 +28,10 @@ function make(trackers: Row[], orders: Array<{ trackerId: string; source: string
       upsert: jest.fn(async ({ create, update }: any) => (state = { ...(state ?? create), ...update })),
     },
     deskGuardEvent: { create: jest.fn(async () => ({})) },
+    // prevSessionClose: tagged-template values = [exchange, token, since, dayStart]; newest first, like the SQL.
+    $queryRaw: jest.fn(async (_q: unknown, exchange: string, token: string, since: Date, dayStart: Date) =>
+      bars.filter((b) => b.exchange === exchange && b.token === token && b.ts >= since && b.ts < dayStart).sort((a, b) => b.ts.getTime() - a.ts.getTime()),
+    ),
   };
   return { repo: new DeskDayRepository(prisma as never), prisma };
 }
@@ -102,6 +107,49 @@ describe('DeskDayRepository', () => {
     const { repo } = make([open('a', -300), open('b', 100), open('paper:p', -9999), open('h', -9999, { kind: 'HOLDING' })]);
     expect(await repo.openPnl('owner', NOW)).toBe(-200);
     expect(await make([]).repo.openPnl('owner', NOW)).toBe(0);
+  });
+
+  describe('openPnl: a position carried in from an earlier day counts only today', () => {
+    // NOW = 2026-11-26 13:30 IST. MAZDOCK-style PE: bought 11-24 at 44.9 x 225, prior session closed 40, now 22.5.
+    const carried = (over: Partial<Row> = {}): Row => ({
+      id: 'm', userId: 'owner', symbol: 'MAZDOCK29DEC261760PE', kind: 'POSITION', status: 'OPEN', entryPrice: 44.9, exitPrice: null, qty: 225,
+      exitTime: null, pnl: (22.5 - 44.9) * 225, entryTime: new Date('2026-11-24T07:43:00Z'), exchange: 'NFO', token: '137759', lastLtp: 22.5, ...over,
+    });
+    const bar = (iso: string, close: number, over: Partial<Bar> = {}): Bar => ({ exchange: 'NFO', token: '137759', ts: new Date(iso), close, ...over });
+    const prevDay = [
+      bar('2026-11-25T09:59:00Z', 40), // 15:29 IST: the last in-session minute of 11-25
+      bar('2026-11-25T10:05:00Z', 41), // 15:35 IST: off-session filler, ignored
+      bar('2026-11-25T21:00:00Z', 40.3), // 02:30 IST on 11-26: a filler bar from TODAY (after IST midnight), never the previous close
+    ];
+
+    it('counts the move from the previous session close, not the loss since entry', async () => {
+      const { repo } = make([carried()], [], null, prevDay);
+      expect(await repo.openPnl('owner', NOW)).toBeCloseTo((22.5 - 40) * 225, 6); // −3937.5, not −5040
+    });
+
+    it('a position opened today keeps its whole pnl', async () => {
+      const { repo, prisma } = make([carried({ entryTime: new Date('2026-11-26T05:00:00Z') })], [], null, prevDay);
+      expect(await repo.openPnl('owner', NOW)).toBeCloseTo((22.5 - 44.9) * 225, 6);
+      expect(prisma.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('no stored previous close (or only off-session bars) → the full pnl, never 0', async () => {
+      expect(await make([carried()]).repo.openPnl('owner', NOW)).toBeCloseTo((22.5 - 44.9) * 225, 6);
+      const offOnly = [bar('2026-11-25T10:05:00Z', 41)];
+      expect(await make([carried()], [], null, offOnly).repo.openPnl('owner', NOW)).toBeCloseTo((22.5 - 44.9) * 225, 6);
+    });
+
+    it("keeps the tracker's value factor (MCX mini: pnl is 0.1 x qty x points)", async () => {
+      const goldm = carried({ symbol: 'GOLDM27NOV26126500PE', exchange: 'MCX', token: '9', entryPrice: 1158, qty: 100, lastLtp: 1639, pnl: 4810 });
+      const { repo } = make([goldm], [], null, [bar('2026-11-25T17:00:00Z', 1500, { exchange: 'MCX', token: '9' })]); // 22:30 IST
+      expect(await repo.openPnl('owner', NOW)).toBeCloseTo((1639 - 1500) * 10, 6);
+    });
+
+    it('sums today-opened and carried positions; a bar from another exchange with the same token is ignored', async () => {
+      const today = { ...carried({ id: 't', entryTime: new Date('2026-11-26T04:00:00Z') }), pnl: 500 };
+      const { repo } = make([carried(), today], [], null, [...prevDay, bar('2026-11-25T09:58:00Z', 1, { exchange: 'BFO' })]);
+      expect(await repo.openPnl('owner', NOW)).toBeCloseTo((22.5 - 40) * 225 + 500, 6);
+    });
   });
 
   it('reset clears the pause and stamps resetAt', async () => {

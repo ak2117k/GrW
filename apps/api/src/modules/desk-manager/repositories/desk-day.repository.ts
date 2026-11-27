@@ -4,6 +4,8 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { istDayStart } from '../../signal-trader/domain/execution';
 import { istDay, underlyingOf } from '../../portfolio-review/domain/symbols';
 import type { ClosedTrade, DayPnlPath, TradeOrigin } from '../domain/desk.types';
+import { carriedTodayPnl } from '../domain/pnl-path';
+import { inVenueSession } from '../../exit-discipline/session-bars';
 
 /** The guard's stored day state, already scoped to today (a row from another IST day reads as empty). */
 export interface GuardDayState {
@@ -64,14 +66,43 @@ export class DeskDayRepository {
     }));
   }
 
-  /** The live P&L of the owner's open position trackers now (the tracker's own marked pnl). */
-  async openPnl(userId: string, _now: Date): Promise<number> {
-    const agg = await this.prisma.tradeTracker.aggregate({
+  /**
+   * TODAY's live P&L of the owner's open position trackers. A tracker opened today counts its whole marked pnl;
+   * one carried in from an earlier IST day counts only its move since the previous session's close
+   * (carriedTodayPnl). The close is the last in-session candles_1m bar before today (session-only read).
+   */
+  async openPnl(userId: string, now: Date): Promise<number> {
+    const dayStart = istDayStart(now);
+    const rows = await this.prisma.tradeTracker.findMany({
       where: { userId, kind: 'POSITION', status: 'OPEN', NOT: { id: { startsWith: 'paper:' } } },
-      _sum: { pnl: true },
+      select: { id: true, exchange: true, token: true, entryPrice: true, entryTime: true, qty: true, pnl: true, lastLtp: true },
     });
-    const v = agg._sum.pnl;
-    return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+    let sum = 0;
+    for (const r of rows) {
+      const pnl = typeof r.pnl === 'number' && Number.isFinite(r.pnl) ? r.pnl : 0;
+      if (!r.entryTime || r.entryTime.getTime() >= dayStart.getTime()) {
+        sum += pnl;
+        continue;
+      }
+      const prevClose = await this.prevSessionClose(r.exchange, r.token, dayStart).catch(() => null);
+      sum += carriedTodayPnl({ pnl, entryPrice: r.entryPrice, ltp: r.lastLtp ?? null, qty: r.qty, prevClose });
+    }
+    return sum;
+  }
+
+  /** The last in-session 1-minute close strictly before `dayStart` (within 7 days); null when none is stored. */
+  private async prevSessionClose(exchange: string | null, token: string | null, dayStart: Date): Promise<number | null> {
+    if (!exchange || !token) return null;
+    const since = new Date(dayStart.getTime() - 7 * 86_400_000);
+    const bars = await this.prisma.$queryRaw<Array<{ ts: Date; close: number }>>`
+      SELECT ts, close FROM candles_1m
+      WHERE exchange = ${exchange} AND token = ${token} AND ts >= ${since} AND ts < ${dayStart}
+      ORDER BY ts DESC LIMIT 2000`;
+    for (const b of bars) {
+      const ts = b.ts instanceof Date ? b.ts.getTime() : new Date(b.ts).getTime();
+      if (inVenueSession(ts, exchange) && Number.isFinite(Number(b.close))) return Number(b.close);
+    }
+    return null;
   }
 
   /** Today's pause / reset (a row left from an earlier IST day is ignored). */

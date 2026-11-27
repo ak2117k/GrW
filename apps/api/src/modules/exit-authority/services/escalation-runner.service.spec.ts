@@ -46,6 +46,12 @@ class FakeDb {
   async openTrackerIds(ids: string[]): Promise<Set<string>> {
     return new Set(ids.filter((i) => this.openTrackers.has(i)));
   }
+  async trackerMessageId(trackerId: string): Promise<number | null> {
+    const r = this.alarms
+      .filter((a) => a.trackerId === trackerId && ['OPEN', 'SNOOZED', 'ANSWERED'].includes(a.status) && a.telegramMessageId != null)
+      .sort((x, y) => y.lastRaisedAt.getTime() - x.lastRaisedAt.getTime())[0];
+    return r?.telegramMessageId ?? null;
+  }
   async setTrackerMessageId(trackerId: string, messageId: number): Promise<void> {
     for (const a of this.alarms) {
       if (a.trackerId === trackerId && ['OPEN', 'SNOOZED', 'ANSWERED'].includes(a.status)) a.telegramMessageId = messageId;
@@ -226,6 +232,34 @@ describe('EscalationRunner.pass', () => {
       expect(telegram.sendMessage).toHaveBeenCalledTimes(2);
       expect(telegram.deleteMessage).toHaveBeenLastCalledWith(101);
       expect(db.alarms[0]).toMatchObject({ alertCount: 3, telegramMessageId: 102 });
+    });
+
+    it('cross-container: an id persisted by another process overrides memory for the REALERT delete and the answered edit', async () => {
+      const { db, telegram, runner } = setup();
+      db.alarms.push(alarm({ alertedAt: at(0), alertCount: 1, telegramMessageId: 55 }));
+      await runner.pass(at(REALERT_EVERY_MS)); // this process: sends 101, deletes 55, memory = 101
+      expect(telegram.deleteMessage).toHaveBeenLastCalledWith(55);
+      // blockedExit in another container sends 77, deletes 101 and persists 77 on the rows.
+      await db.setTrackerMessageId('trk1', 77);
+      await runner.pass(at(2 * REALERT_EVERY_MS));
+      expect(telegram.deleteMessage).toHaveBeenLastCalledWith(77); // not the stale in-memory 101
+      expect(db.alarms[0].telegramMessageId).toBe(102);
+
+      // Again from another process, then the agent answers: the in-place edit targets the persisted id.
+      await db.setTrackerMessageId('trk1', 88);
+      db.verdicts.push({ id: 'v1', verdict: 'HOLD', createdAt: at(2 * REALERT_EVERY_MS + 1_000), trackerId: 'trk1' });
+      await runner.pass(at(2 * REALERT_EVERY_MS + 15_000));
+      expect(telegram.editMessage).toHaveBeenCalledTimes(1);
+      expect(telegram.editMessage.mock.calls[0][0]).toBe(88);
+    });
+
+    it('a failed DB read of the message id falls back to memory', async () => {
+      const { db, telegram, runner } = setup();
+      db.alarms.push(alarm({ alertedAt: at(0), alertCount: 1, telegramMessageId: 55 }));
+      await runner.pass(at(REALERT_EVERY_MS)); // memory = 101
+      jest.spyOn(db, 'trackerMessageId').mockRejectedValueOnce(new Error('db down'));
+      await runner.pass(at(2 * REALERT_EVERY_MS));
+      expect(telegram.deleteMessage).toHaveBeenLastCalledWith(101);
     });
 
     it('a failed delete of the old message is ignored (WARN); the new message stands', async () => {

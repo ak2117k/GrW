@@ -269,6 +269,14 @@ describe('OwnerButtonsService', () => {
       expect(esc.setTrackerMessageId).toHaveBeenCalledWith('trk1', 9);
     });
 
+    it('the persisted id (another container) wins over memory', async () => {
+      const { svc, telegram, messages } = setup({ trackerMessageId: 77 });
+      messages.set('trk1', 5); // stale in this process
+      await svc.blockedExit(input);
+      expect(telegram.deleteMessage).toHaveBeenCalledWith(77);
+      expect(telegram.deleteMessage).not.toHaveBeenCalledWith(5);
+    });
+
     it('a failed delete is ignored', async () => {
       const { svc, telegram, messages } = setup({ trackerMessageId: 77 });
       telegram.deleteMessage.mockRejectedValueOnce(new Error('message to delete not found'));

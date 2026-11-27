@@ -121,10 +121,6 @@ export class EscalationRunner {
         list.push(a);
         this.byTracker.set(a.trackerId, list);
       }
-      // After a restart the per-trade message is known only from the rows: newest raised alarm carrying one.
-      for (const a of [...all].sort((x, y) => y.lastRaisedAt.getTime() - x.lastRaisedAt.getTime())) {
-        if (a.telegramMessageId != null && open.has(a.trackerId)) this.messages.seed(a.trackerId, a.telegramMessageId);
-      }
       for (const a of all) {
         try {
           if (!open.has(a.trackerId)) await this.closeGone(a);
@@ -142,9 +138,10 @@ export class EscalationRunner {
   // ── per-alarm steps ──────────────────────────────────────────────────────
 
   private async closeGone(a: AlarmRow): Promise<void> {
+    // Read the live id BEFORE this row leaves the tracked statuses.
+    const messageId = (await this.currentMessageId(a.trackerId)) ?? a.telegramMessageId;
     await this.alarmRepo.update(a.id, { status: 'CLOSED' });
     this.log.log(`${LOG} alarm ${a.id} ${a.symbol} ${a.rule} CLOSED: tracker ${a.trackerId} is no longer open`);
-    const messageId = this.messages.get(a.trackerId) ?? a.telegramMessageId;
     this.messages.clear(a.trackerId);
     // Same text for every alarm of the trade, so a second edit of the same message is a harmless "not modified".
     if (messageId != null) await this.edit(messageId, `${a.symbol}: trade closed. Alarms closed, nothing to do.`);
@@ -156,7 +153,7 @@ export class EscalationRunner {
    * fails the previous message stays the trade's message. The id is persisted on every tracked alarm of the trade.
    */
   private async putTradeMessage(trackerId: string, text: string, buttons?: InlineButton[][]): Promise<number | null> {
-    const old = this.messages.get(trackerId);
+    const old = await this.currentMessageId(trackerId);
     const sent = await this.send(text, buttons);
     if (sent == null) return old;
     this.messages.set(trackerId, sent);
@@ -167,6 +164,24 @@ export class EscalationRunner {
       this.log.warn(`${LOG} could not persist message ${sent} for tracker ${trackerId}: ${(err as Error)?.message}`);
     }
     return sent;
+  }
+
+  /**
+   * The trade's live message id. The DB is the source of truth (blockedExit in another container may have
+   * replaced the message): the persisted id wins and overwrites memory; memory is only the fallback when the
+   * read fails or nothing is persisted (e.g. a trade with no tracked alarm row).
+   */
+  private async currentMessageId(trackerId: string): Promise<number | null> {
+    try {
+      const persisted = await this.esc.trackerMessageId(trackerId);
+      if (persisted != null) {
+        this.messages.set(trackerId, persisted);
+        return persisted;
+      }
+    } catch (err) {
+      this.log.warn(`${LOG} message id read failed for ${trackerId} (using memory): ${(err as Error)?.message}`);
+    }
+    return this.messages.get(trackerId);
   }
 
   /** Another unresolved, alerted alarm of the same trade currently relies on the trade message. */
@@ -183,7 +198,7 @@ export class EscalationRunner {
       if (v) {
         await this.alarms.answer(a.id, v.id, v.verdict, now);
         a.answeredAt = now; // this pass's view (otherAlertedOpen) sees it answered
-        const messageId = this.messages.get(a.trackerId);
+        const messageId = await this.currentMessageId(a.trackerId);
         // Only when no other unresolved alarm of the trade is showing its buttons on the trade message.
         if (a.alertedAt != null && messageId != null && !this.otherAlertedOpen(a)) {
           await this.edit(messageId, `${a.symbol}: the agent answered ${v.verdict} at ${istTime(v.createdAt)} IST. Alarm ${a.rule} resolved.`);
@@ -236,10 +251,11 @@ export class EscalationRunner {
       await this.throttledNotify(a, now, `BACKSTOP ${kind} exit FAILED on ${a.symbol}: ${msg}. Exit it yourself. Retrying every 15 s.`);
       return;
     }
+    // Read the live id BEFORE this row leaves the tracked statuses.
+    const messageId = (await this.currentMessageId(a.trackerId)) ?? a.telegramMessageId;
     await this.alarmRepo.update(a.id, { status: 'BACKSTOPPED' });
     this.log.warn(`${LOG} ${reason} → exit sent (${result})`);
     const line = `BACKSTOP ${kind}: code sold ${a.symbol} (${result}).\nAlarm ${a.rule}: ${a.reason}\nNo agent decision${kind === 'HARD_LOSS' ? ', no owner answer for 10 min, and still past the hard-loss limit' : ' before the broker deadline'}.`;
-    const messageId = this.messages.get(a.trackerId) ?? a.telegramMessageId;
     if (messageId != null) await this.edit(messageId, line);
     await this.send(line); // a fresh message too: an edit does not notify the owner's phone
   }

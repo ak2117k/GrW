@@ -176,14 +176,15 @@ export class OwnerButtonsService implements OwnerEscalationPort, OnApplicationBo
     ].join('\n');
     // Needs the owner's attention: a FRESH message (it rings), then the trade's previous one is deleted, so the
     // trade still has one live message (§4.5 B). The id is persisted on the trade's tracked alarms.
-    let old = this.messages.get(input.trackerId);
-    if (old == null) {
-      try {
-        old = await this.esc.trackerMessageId(input.trackerId);
-      } catch {
-        old = null;
-      }
+    // The DB is the source of truth (the runner in another container may have replaced the message); memory is
+    // the fallback when the read fails or nothing is persisted.
+    let old: number | null = null;
+    try {
+      old = await this.esc.trackerMessageId(input.trackerId);
+    } catch (err) {
+      this.log.warn(`${LOG} blocked-exit: message id read failed for ${input.trackerId} (using memory): ${(err as Error)?.message}`);
     }
+    if (old == null) old = this.messages.get(input.trackerId);
     let sent: number;
     try {
       sent = await this.telegram.sendMessage(text, blockedButtons(input.trackerId));

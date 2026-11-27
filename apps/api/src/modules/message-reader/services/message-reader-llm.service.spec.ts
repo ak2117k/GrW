@@ -130,6 +130,8 @@ describe('MessageReaderLlm.read', () => {
     const msg = req().messages[0].content;
     const block = msg.split('\n\n').find((p) => p.startsWith('Image reading')) as string;
     expect(block).toContain(`Image description: ${JSON.stringify(description)}`);
+    expect(msg.split('short active from ~25700')).toHaveLength(2); // sent once, not again inside the JSON
+    expect(block).toContain('"instruments":["NIFTY"]');
     expect(msg.split('\n').some((l) => l.startsWith('System:'))).toBe(false);
   });
 

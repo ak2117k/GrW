@@ -8,7 +8,7 @@ import type { MessagesTransport, TransportImage, TransportRequest } from '../../
 import { runInSharedSlot } from '../../ai-assist/assist-slot';
 import { judgeTransportFrom } from '../../trade-sentinel/services/llm-transport';
 import { SentinelCycleService } from '../../trade-sentinel/services/sentinel-cycle.service';
-import { readVisionReply, SIGNAL_VISION_SCHEMA, SIGNAL_VISION_SYSTEM, type VisionReply } from '../domain/llm-schema';
+import { readVisionReply, SIGNAL_VISION_SCHEMA, SIGNAL_VISION_SCHEMA_LEGACY, SIGNAL_VISION_SYSTEM, SIGNAL_VISION_SYSTEM_LEGACY, type VisionReply } from '../domain/llm-schema';
 import type { TelegramMediaRef } from '../domain/types';
 import { SignalIntakeRepository } from '../repositories/signal-intake.repository';
 import { SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig } from '../signal-intake.config';
@@ -17,6 +17,20 @@ import { SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig } from '../signal-intake.
 export const SIGNAL_VISION_JOB = 'signal.vision';
 /** 1 200 before the image description (owner 2026-11-27) was added to every reply. */
 const MAX_TOKENS = 1_600;
+/** The pre-describe budget, sent with the legacy schema (SIGNAL_VISION_DESCRIBE=off / provider fallback). */
+const LEGACY_MAX_TOKENS = 1_200;
+const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/**
+ * The provider refused the request itself (HTTP 400 / invalid_request_error) — e.g. a structured-output schema it
+ * does not accept. Busy slots, timeouts, 429 / 5xx are not this.
+ */
+export function isRequestRejected(e: unknown): boolean {
+  if (!e || typeof e !== 'object') return false;
+  if ((e as { status?: unknown }).status === 400) return true;
+  const msg = e instanceof Error ? e.message : String((e as { message?: unknown }).message ?? '');
+  return /invalid_request_error|\b400\b/.test(msg);
+}
 /** Never send more than this to the model (the reader keeps photos ≤ ~1 MB, documents ≤ 2 MB). */
 export const VISION_MAX_BYTES = 2 * 1024 * 1024;
 const MEDIA_TYPES = new Set<TransportImage['mediaType']>(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
@@ -67,6 +81,8 @@ export class SignalVisionService implements SignalVision, OnApplicationBootstrap
   private readonly logger = new Logger(SignalVisionService.name);
   private transport: MessagesTransport | null = null;
   private readonly state: ReturnType<typeof visionTransportState>;
+  /** Sticky: the provider rejected the describe schema once (400) — the legacy schema from then on. */
+  private describeRejected = false;
 
   constructor(
     private readonly config: ConfigService,
@@ -103,11 +119,12 @@ export class SignalVisionService implements SignalVision, OnApplicationBootstrap
     if (!MEDIA_TYPES.has(mediaType)) throw new Error(`unsupported image type ${image.mimeType}`);
     const bytes = await readFile(image.path);
     if (bytes.length > VISION_MAX_BYTES) throw new Error(`image too large (${bytes.length} bytes)`);
-    const request: TransportRequest = {
-      model: await this.modelFor(ctx.channelId),
-      max_tokens: MAX_TOKENS,
-      output_config: { effort: 'low', format: { type: 'json_schema', schema: SIGNAL_VISION_SCHEMA as unknown as Record<string, unknown> } },
-      system: [{ type: 'text', text: SIGNAL_VISION_SYSTEM }],
+    const model = await this.modelFor(ctx.channelId);
+    const requestOf = (describe: boolean): TransportRequest => ({
+      model,
+      max_tokens: describe ? MAX_TOKENS : LEGACY_MAX_TOKENS,
+      output_config: { effort: 'low', format: { type: 'json_schema', schema: (describe ? SIGNAL_VISION_SCHEMA : SIGNAL_VISION_SCHEMA_LEGACY) as unknown as Record<string, unknown> } },
+      system: [{ type: 'text', text: describe ? SIGNAL_VISION_SYSTEM : SIGNAL_VISION_SYSTEM_LEGACY }],
       messages: [
         {
           role: 'user',
@@ -115,10 +132,23 @@ export class SignalVisionService implements SignalVision, OnApplicationBootstrap
           images: [{ mediaType, data: bytes.toString('base64'), sha256: image.sha256 }],
         },
       ],
-    };
+    });
     const t = this.transportOf();
-    const message = await runInSharedSlot(this.cycle, () => t.messages.create(request), { maxWaitMs: this.cfg.llmMaxWaitMs, lane: 'signals', job: SIGNAL_VISION_JOB });
+    const send = (describe: boolean) =>
+      runInSharedSlot(this.cycle, () => t.messages.create(requestOf(describe)), { maxWaitMs: this.cfg.llmMaxWaitMs, lane: 'signals', job: SIGNAL_VISION_JOB });
+    const describe = this.cfg.visionDescribe && !this.describeRejected;
+    let message: Awaited<ReturnType<typeof send>>;
+    try {
+      message = await send(describe);
+    } catch (e) {
+      if (!describe || !isRequestRejected(e)) throw e;
+      // The provider refused the describe schema: never let that stop image reads — the old schema, for the rest of the process.
+      if (!this.describeRejected) this.logger.error(`[signal-intake] vision describe schema rejected — falling back to the pre-2026-11-27 schema for this process: ${errText(e)}`);
+      this.describeRejected = true;
+      message = await send(false);
+    }
     if (message.stop_reason === 'refusal') throw new Error('the model declined');
+    if (message.stop_reason === 'max_tokens') throw new Error('vision reply truncated at max_tokens');
     const out = (message.content ?? [])
       .filter((b) => b.type === 'text')
       .map((b) => b.text ?? '')
@@ -134,7 +164,7 @@ export class SignalVisionService implements SignalVision, OnApplicationBootstrap
     try {
       return visionModelFor(await this.repo.channelTitle(channelId), this.cfg);
     } catch (e) {
-      this.logger.warn(`[signal-intake] vision: channel title lookup failed (default model): ${e instanceof Error ? e.message : String(e)}`);
+      this.logger.warn(`[signal-intake] vision: channel title lookup failed (default model): ${errText(e)}`);
       return this.cfg.visionModel;
     }
   }

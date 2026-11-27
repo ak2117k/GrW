@@ -228,7 +228,7 @@ export function validateInfoItems(raw: readonly unknown[] | null | undefined, vo
 export type VisionKind = 'SIGNAL' | 'UPDATE' | 'INFO' | 'VIEW' | 'NOISE';
 const VISION_KINDS = new Set<VisionKind>(['SIGNAL', 'UPDATE', 'INFO', 'VIEW', 'NOISE']);
 
-export const SIGNAL_VISION_SYSTEM = [
+const VISION_CLASSIFY_LINES = [
   'You read ONE image posted in an Indian stock-market Telegram channel (NSE/BSE/MCX), plus its caption if any.',
   'First decide kind: SIGNAL = a fresh trade call with an explicit buy/sell instruction AND an entry AND a stop-loss or a target;',
   'UPDATE = a follow-up on an earlier call ("target done", "SL hit", "exit", "trail SL"); INFO = market information: analysis, a chart',
@@ -240,6 +240,9 @@ export const SIGNAL_VISION_SYSTEM = [
   'For kind=INFO fill items[] (one per underlying with a view: bias, levels, OI note, condition, horizon) as described below; else items=[].',
   'shownTime: when the image is a SCREENSHOT of a chat message carrying the call, the time printed on that message bubble',
   '(e.g. "2:34 PM"), as 24-hour "HH:MM" ("14:34"); null when no such time is visible. Never the phone status-bar clock.',
+];
+
+const VISION_DESCRIBE_LINES = [
   'ALWAYS, for every kind (NOISE and UPDATE too), describe what the image shows - another reader sees only your words:',
   'description: one or two plain sentences: the instrument(s), the direction / bias, the levels drawn or written (entry, stop, targets,',
   'support, resistance), the timeframe if visible, and what the post says is happening (e.g. "NIFTY 15m chart, short active from ~25700,',
@@ -247,20 +250,32 @@ export const SIGNAL_VISION_SYSTEM = [
   'instruments: the exchange names of the instruments shown (as for underlying), [] when none. bias: BULL, BEAR, NEUTRAL, or NONE when',
   'the image shows no direction. levels: every price level drawn or written, each {kind: ENTRY | STOP | TARGET | SUPPORT | RESISTANCE |',
   'OTHER, price}; [] when none.',
-  '',
-  SIGNAL_PARSE_SYSTEM,
-  '',
-  SIGNAL_INFO_SYSTEM,
-].join('\n');
+];
 
-export const SIGNAL_VISION_SCHEMA = {
+/**
+ * The pre-2026-11-27 prompt / schema (classification only, no description). Sent when SIGNAL_VISION_DESCRIBE=off,
+ * and — sticky for the process — after the provider rejected the describe schema (400), so images keep being classified.
+ */
+export const SIGNAL_VISION_SYSTEM_LEGACY = [...VISION_CLASSIFY_LINES, '', SIGNAL_PARSE_SYSTEM, '', SIGNAL_INFO_SYSTEM].join('\n');
+
+export const SIGNAL_VISION_SYSTEM = [...VISION_CLASSIFY_LINES, ...VISION_DESCRIBE_LINES, '', SIGNAL_PARSE_SYSTEM, '', SIGNAL_INFO_SYSTEM].join('\n');
+
+export const SIGNAL_VISION_SCHEMA_LEGACY = {
   ...SIGNAL_PARSE_SCHEMA,
-  required: ['kind', ...SIGNAL_PARSE_SCHEMA.required, 'items', 'shownTime', 'description', 'instruments', 'bias', 'levels'],
+  required: ['kind', ...SIGNAL_PARSE_SCHEMA.required, 'items', 'shownTime'],
   properties: {
     kind: { type: 'string', enum: ['SIGNAL', 'UPDATE', 'INFO', 'NOISE'] },
     ...SIGNAL_PARSE_SCHEMA.properties,
     items: { type: 'array', items: INFO_ITEM_SCHEMA },
     shownTime: { type: ['string', 'null'] },
+  },
+} as const;
+
+export const SIGNAL_VISION_SCHEMA = {
+  ...SIGNAL_VISION_SCHEMA_LEGACY,
+  required: [...SIGNAL_VISION_SCHEMA_LEGACY.required, 'description', 'instruments', 'bias', 'levels'],
+  properties: {
+    ...SIGNAL_VISION_SCHEMA_LEGACY.properties,
     description: { type: 'string' },
     instruments: { type: 'array', items: { type: 'string' } },
     bias: { type: 'string', enum: ['BULL', 'BEAR', 'NEUTRAL', 'NONE'] },

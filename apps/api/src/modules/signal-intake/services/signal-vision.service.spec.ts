@@ -1,9 +1,10 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readVisionReply, SIGNAL_VISION_SCHEMA, SIGNAL_VISION_SYSTEM } from '../domain/llm-schema';
+import { Logger } from '@nestjs/common';
+import { readVisionReply, SIGNAL_VISION_SCHEMA, SIGNAL_VISION_SCHEMA_LEGACY, SIGNAL_VISION_SYSTEM, SIGNAL_VISION_SYSTEM_LEGACY } from '../domain/llm-schema';
 import { parseSignalIntakeConfig } from '../signal-intake.config';
-import { SIGNAL_VISION_JOB, SignalVisionService, visionModelFor, visionTransportState } from './signal-vision.service';
+import { isRequestRejected, SIGNAL_VISION_JOB, SignalVisionService, visionModelFor, visionTransportState } from './signal-vision.service';
 
 describe('readVisionReply — strict schema', () => {
   const sig = { underlying: 'NIFTY', instrumentKind: 'CE', strike: 24000, expiry: null, side: 'BUY', entryType: 'AT', entryLow: 120, entryHigh: 120, sl: 100, targets: [150], qty: null, horizon: 'INTRADAY', confidence: 0.8 };
@@ -125,9 +126,80 @@ describe('SignalVisionService.classify', () => {
       channelTitle: jest.fn(async (id: string) => ({ mrp: 'Mr. P Investments', mcx: 'MCX Commodity' } as Record<string, string>)[id] ?? null),
     };
     const config = { get: (k: string) => env[k] };
-    const svc = new SignalVisionService(config as never, cli as never, audit as never, cycle as never, repo as never, parseSignalIntakeConfig({}));
+    const svc = new SignalVisionService(config as never, cli as never, audit as never, cycle as never, repo as never, parseSignalIntakeConfig(env));
     return { svc, cli, audit, cycle, repo };
   }
+  type SentReq = { max_tokens: number; output_config: { format: { schema: unknown } }; system: Array<{ text: string }> };
+  const sent = (cli: ReturnType<typeof make>['cli'], n: number) => (cli.createWithMeta.mock.calls[n] as unknown as [SentReq])[0];
+  const NOISE = JSON.stringify({ kind: 'NOISE', isSignal: false, signals: [] });
+  const rejected400 = () => Object.assign(new Error('400 {"type":"error","error":{"type":"invalid_request_error","message":"schema not supported"}}'), { status: 400 });
+
+  describe('containment if the provider rejects the describe schema (review 2026-11-27)', () => {
+    beforeEach(() => jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined));
+    afterEach(() => jest.restoreAllMocks());
+
+    it('default: the describe schema and prompt are sent (1 600 tokens)', async () => {
+      const { svc, cli } = make({ SENTINEL_JUDGE: 'cli' }, NOISE);
+      await svc.classify('', image);
+      expect(sent(cli, 0)).toMatchObject({ max_tokens: 1_600, output_config: { format: { schema: SIGNAL_VISION_SCHEMA } }, system: [{ text: SIGNAL_VISION_SYSTEM }] });
+    });
+
+    it('SIGNAL_VISION_DESCRIBE=off sends the pre-change schema, prompt and token budget exactly', async () => {
+      const { svc, cli } = make({ SENTINEL_JUDGE: 'cli', SIGNAL_VISION_DESCRIBE: 'off' }, NOISE);
+      await expect(svc.classify('', image)).resolves.toEqual({ kind: 'NOISE', isSignal: false, signals: [] });
+      expect(sent(cli, 0)).toMatchObject({ max_tokens: 1_200, output_config: { format: { schema: SIGNAL_VISION_SCHEMA_LEGACY } }, system: [{ text: SIGNAL_VISION_SYSTEM_LEGACY }] });
+      expect(SIGNAL_VISION_SCHEMA_LEGACY.required).toEqual(['kind', 'isSignal', 'signals', 'items', 'shownTime']);
+      expect(SIGNAL_VISION_SYSTEM_LEGACY).not.toMatch(/description/);
+      expect(SIGNAL_VISION_SYSTEM.startsWith(SIGNAL_VISION_SYSTEM_LEGACY.split('\n\n')[0])).toBe(true);
+    });
+
+    it('a 400 on the describe schema → one ERROR, retried with the old schema → classified; sticky for later images', async () => {
+      const { svc, cli } = make({ SENTINEL_JUDGE: 'cli' }, NOISE);
+      cli.createWithMeta.mockRejectedValueOnce(rejected400());
+      await expect(svc.classify('', image)).resolves.toEqual({ kind: 'NOISE', isSignal: false, signals: [] });
+      expect(cli.createWithMeta).toHaveBeenCalledTimes(2);
+      expect(sent(cli, 0).output_config.format.schema).toBe(SIGNAL_VISION_SCHEMA);
+      expect(sent(cli, 1).output_config.format.schema).toBe(SIGNAL_VISION_SCHEMA_LEGACY);
+      await svc.classify('', image);
+      expect(cli.createWithMeta).toHaveBeenCalledTimes(3);
+      expect(sent(cli, 2).output_config.format.schema).toBe(SIGNAL_VISION_SCHEMA_LEGACY);
+      expect(Logger.prototype.error).toHaveBeenCalledTimes(1);
+      expect((Logger.prototype.error as jest.Mock).mock.calls[0][0]).toMatch(/vision describe schema rejected — falling back/);
+    });
+
+    it('other failures (busy, 500, timeout) are not retried and do not switch the schema', async () => {
+      const { svc, cli } = make({ SENTINEL_JUDGE: 'cli' }, NOISE);
+      cli.createWithMeta.mockRejectedValueOnce(Object.assign(new Error('overloaded'), { status: 529 }));
+      await expect(svc.classify('', image)).rejects.toThrow(/overloaded/);
+      expect(cli.createWithMeta).toHaveBeenCalledTimes(1);
+      await svc.classify('', image);
+      expect(sent(cli, 1).output_config.format.schema).toBe(SIGNAL_VISION_SCHEMA);
+    });
+
+    it('with describe off a 400 is not retried', async () => {
+      const { svc, cli } = make({ SENTINEL_JUDGE: 'cli', SIGNAL_VISION_DESCRIBE: 'off' }, NOISE);
+      cli.createWithMeta.mockRejectedValueOnce(rejected400());
+      await expect(svc.classify('', image)).rejects.toThrow(/400/);
+      expect(cli.createWithMeta).toHaveBeenCalledTimes(1);
+    });
+
+    it('isRequestRejected: status 400 or invalid_request_error only', () => {
+      expect(isRequestRejected(rejected400())).toBe(true);
+      expect(isRequestRejected(new Error('invalid_request_error: bad schema'))).toBe(true);
+      expect(isRequestRejected(Object.assign(new Error('rate'), { status: 429 }))).toBe(false);
+      expect(isRequestRejected(new Error('timed out after 4000 ms'))).toBe(false);
+      expect(isRequestRejected(null)).toBe(false);
+    });
+  });
+
+  it('a reply cut at max_tokens is its own error', async () => {
+    const { svc, cli } = make({ SENTINEL_JUDGE: 'cli' }, NOISE);
+    cli.createWithMeta.mockResolvedValueOnce({
+      message: { stop_reason: 'max_tokens', content: [{ type: 'text', text: '{"kind":"NOI' }] },
+      meta: { inputTokens: 2, outputTokens: 1600, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, billed: false },
+    });
+    await expect(svc.classify('', image)).rejects.toThrow('vision reply truncated at max_tokens');
+  });
 
   it('sends the image as base64 over the CLI in the shared slot, records ai_calls signal.vision without the bytes', async () => {
     const { svc, cli, audit, cycle } = make({ SENTINEL_JUDGE: 'cli' }, JSON.stringify({ kind: 'NOISE', isSignal: false, signals: [] }));

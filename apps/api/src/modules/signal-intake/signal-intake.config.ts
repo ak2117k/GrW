@@ -33,6 +33,11 @@ export interface SignalIntakeConfig {
   visionTrustedChannels: string[];
   /** SIGNAL_VISION_TRUSTED_MODEL — the stronger model for trusted channels (default claude-sonnet-5; same job, same daily cap). */
   visionTrustedModel: string;
+  /**
+   * SIGNAL_VISION_DESCRIBE=off sends the pre-2026-11-27 vision prompt / schema (classification only, no image
+   * description for the message reader). Default on; a provider 400 on the describe schema also falls back (sticky).
+   */
+  visionDescribe: boolean;
   /** SIGNAL_VISION_DAILY_CAP — images per IST day, counted from ai_calls job 'signal.vision' (cache hits are free). */
   visionDailyCap: number;
   /** SIGNAL_VISION_MAX_AGE_MIN — older image posts are never sent to the model. */
@@ -86,6 +91,7 @@ export function parseSignalIntakeConfig(env: Record<string, string | undefined>)
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
     visionTrustedModel: (env.SIGNAL_VISION_TRUSTED_MODEL ?? '').trim() || SIGNAL_VISION_DEFAULT_TRUSTED_MODEL,
+    visionDescribe: !off(env.SIGNAL_VISION_DESCRIBE),
     visionDailyCap: int(env.SIGNAL_VISION_DAILY_CAP, 120, 0, 10_000), // 40 ran out at 18:00 on 2026-11-09, mostly on P&L screenshots
     visionMaxAgeMs: int(env.SIGNAL_VISION_MAX_AGE_MIN, 60, 1, 7 * 24 * 60) * 60_000,
     infoLlmEnabled: !off(env.SIGNAL_INFO_LLM),

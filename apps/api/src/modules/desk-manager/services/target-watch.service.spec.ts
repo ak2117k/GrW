@@ -139,6 +139,58 @@ describe('TargetWatchService', () => {
     expect(h.wake.wake).not.toHaveBeenCalled();
   });
 
+  describe('trade agent exit authority', () => {
+    const withAuthority = (live: boolean, o: Parameters<typeof harness>[0] = {}, raise: jest.Mock = jest.fn(async () => ({ id: 'alarm-1' }))) => {
+      const h = harness(o);
+      const cfg = parseDeskManagerConfig({ DESK_MANAGER: 'live', HUB_OWNER_USER_ID: OWNER });
+      const svc = new TargetWatchService(h.prisma as never, h.exits as never, cfg, h.market as never, h.wake, { raise }, { isLive: () => live });
+      return { ...h, svc, raise };
+    };
+
+    it('live: a crossed target with the manager silent 60 s raises TARGET_LOCK (payload.level) instead of tightening', async () => {
+      const h = withAuthority(true, { ltp: () => 3952 });
+      await h.svc.pass(T0);
+      expect(h.wake.wake).toHaveBeenCalledWith('target_crossed', T0);
+      await h.svc.pass(at(TARGET_LOCK_AFTER_MS));
+      expect(h.exits.tighten).not.toHaveBeenCalled();
+      expect(h.prisma.deskManagerDecision.create).not.toHaveBeenCalled();
+      expect(h.raise).toHaveBeenCalledTimes(1);
+      const [alarm, when] = h.raise.mock.calls[0] as [Record<string, any>, Date];
+      expect(alarm).toEqual(expect.objectContaining({ userId: OWNER, trackerId: 't1', symbol: 'BSE30DEC253900CE', rule: 'TARGET_LOCK', urgency: 'normal', sourceRef: 'd-open' }));
+      expect(alarm.payload).toEqual(expect.objectContaining({ level: 3890, target: 3950, reached: 1 }));
+      expect(alarm.reason).toMatch(/target lock: BSE crossed target 1 \(3950\)/);
+      expect(when).toEqual(at(TARGET_LOCK_AFTER_MS));
+      // Once per crossing, as the lock.
+      await h.svc.pass(at(5_000 + TARGET_LOCK_AFTER_MS));
+      expect(h.raise).toHaveBeenCalledTimes(1);
+    });
+
+    it('live: the alarm failing locks by code as today', async () => {
+      const h = withAuthority(true, { ltp: () => 3952 }, jest.fn(async () => { throw new Error('db down'); }));
+      await h.svc.pass(T0);
+      await h.svc.pass(at(TARGET_LOCK_AFTER_MS));
+      expect((h.exits.tighten.mock.calls[0] as unknown[])[1]).toBe(3890);
+    });
+
+    it('live: the manager paper trades keep the code lock', async () => {
+      const paperOpen = openRow({ trackerId: null, orderRowId: null, tradeId: 'tr1' });
+      const trade = { id: 'tr1', status: 'OPEN', side: 'BUY', quantity: 375, entryPrice: 80, instrument: { symbol: 'BSE30DEC253900CE', exchange: 'NFO' } };
+      const h = withAuthority(true, { rows: [paperOpen], trade, ltp: () => 3952 });
+      await h.svc.pass(T0);
+      await h.svc.pass(at(TARGET_LOCK_AFTER_MS));
+      expect(h.raise).not.toHaveBeenCalled();
+      expect(h.exits.tighten).toHaveBeenCalledTimes(1);
+    });
+
+    it('off (isLive false): today\'s lock, no alarm', async () => {
+      const h = withAuthority(false, { ltp: () => 3952 });
+      await h.svc.pass(T0);
+      await h.svc.pass(at(TARGET_LOCK_AFTER_MS));
+      expect(h.raise).not.toHaveBeenCalled();
+      expect(h.exits.tighten).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('mode off does nothing', async () => {
     const h = harness();
     const svc = new TargetWatchService(h.prisma as never, h.exits as never, parseDeskManagerConfig({ HUB_OWNER_USER_ID: OWNER }), h.market as never, h.wake);

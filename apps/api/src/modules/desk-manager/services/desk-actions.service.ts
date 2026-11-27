@@ -3,6 +3,7 @@ import { ModuleRef } from '@nestjs/core';
 import { contractValueFactor } from '@td/shared';
 import { engineContract } from '../../entry-engine/domain/engine-contract';
 import { EntryEnginePaperService } from '../../entry-engine/entry-engine-paper.service';
+import { AUTHORITY_STATE, TRADE_BRIEFS, type AuthorityStatePort, type TradeBriefsPort } from '../../exit-authority/exit-authority.tokens';
 import { segmentFor } from '../../signal-trader/domain/contract-resolver';
 import { slEnforceability } from '../../signal-trader/domain/execution';
 import { marginPosition, parseMarginResponse, type BrokerMargin } from '../../signal-trader/domain/funds';
@@ -13,6 +14,7 @@ import { preSendChecks } from '../../signal-trader/services/pre-send-checks';
 import { SignalExecutorService } from '../../signal-trader/services/signal-executor.service';
 import { SIGNAL_FUNDS, SIGNAL_QUOTES, SIGNAL_TRADER_CONFIG, type FundsLike, type QuotesLike } from '../../signal-trader/services/signal-trader.service';
 import { DESK_MANAGER_CONFIG, type DeskManagerConfig } from '../desk-manager.config';
+import { authorityLive } from '../domain/authority';
 import type { ActionContext, ActionResult, DeskActionsPort, DeskMode, DeskPacket, ManagerDecision } from '../domain/desk.types';
 import { ceilingFor, estimatePremiumLoss, estimateSpread, pickContractSpec, premiumStop } from '../domain/premium-risk';
 import { DeskActionsRepository, type PendingEntryRow } from '../repositories/desk-actions.repository';
@@ -119,6 +121,9 @@ export class DeskActionsService implements DeskActionsPort {
     // Typed as the class (not a Pick) so Nest's emitted metadata resolves it.
     @Optional() private readonly moduleRef?: ModuleRef,
     @Optional() @Inject(DESK_ACTIONS_ENV) env?: Env,
+    // Trade agent exit authority (Task 7 wires): the BRIEF action writes through TRADE_BRIEFS when live.
+    @Optional() @Inject(TRADE_BRIEFS) private readonly briefs?: Pick<TradeBriefsPort, 'write'> | null,
+    @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
   ) {
     this.env = env ?? process.env;
   }
@@ -141,6 +146,8 @@ export class DeskActionsService implements DeskActionsPort {
         case 'PAUSE_ENTRIES':
         case 'RESUME':
           return await this.pauseOrResume(d, ctx);
+        case 'BRIEF':
+          return await this.brief(d, ctx);
         default:
           return { status: 'RECORDED', detail: `${d.action} recorded` };
       }
@@ -161,6 +168,18 @@ export class DeskActionsService implements DeskActionsPort {
     if (d.action === 'PAUSE_ENTRIES') await this.guard.pause(owner, d.scope, d.minutes, ctx.now);
     else await this.guard.resume(owner, ctx.now);
     return { status: 'DONE', detail: what };
+  }
+
+  /** Trade agent exit authority: the supreme's trade brief for one position (validated against the packet). */
+  private async brief(d: Extract<ManagerDecision, { action: 'BRIEF' }>, ctx: ActionContext): Promise<ActionResult> {
+    if (ctx.cfg.mode === 'off') return refused('mode off');
+    if (!authorityLive(this.authority)) return refused('trade agent authority is off: briefs are not used');
+    if (ctx.cfg.mode !== 'live') return { status: 'RECORDED', detail: `shadow: brief for ${d.trackerId} recorded only` };
+    if (!this.briefs) return failed('trade briefs not wired');
+    const owner = ctx.cfg.ownerUserId;
+    if (!owner) return refused('no owner (HUB_OWNER_USER_ID)');
+    await this.briefs.write(d.trackerId, owner, d.text.trim(), 'MANAGER');
+    return { status: 'DONE', detail: `brief written for ${d.trackerId} (${d.text.trim().length} chars)` };
   }
 
   // ---- OPEN ----------------------------------------------------------------------------------------------------

@@ -36,7 +36,7 @@ function open(over: Partial<OpenDecision> = {}): OpenDecision {
   } as OpenDecision;
 }
 
-function setup(o: { mode?: 'live' | 'shadow' | 'off'; spot?: number; premium?: number; guard?: Partial<GuardState>; entries?: number; busy?: Map<string, string>; minutesToClose?: number | null; health?: boolean; place?: jest.Mock } = {}) {
+function setup(o: { mode?: 'live' | 'shadow' | 'off'; spot?: number; premium?: number; guard?: Partial<GuardState>; entries?: number; busy?: Map<string, string>; minutesToClose?: number | null; health?: boolean; place?: jest.Mock; authority?: boolean } = {}) {
   const cfg = cfgOf(o.mode ?? 'live');
   const rows = new Map<string, PendingEntryRow>();
   let seq = 0;
@@ -90,10 +90,14 @@ function setup(o: { mode?: 'live' | 'shadow' | 'off'; spot?: number; premium?: n
   const exits = { exit: jest.fn(async () => ({ status: 'DONE' as const, detail: 'exit sent' })), tighten: jest.fn(async () => ({ status: 'RECORDED' as const, detail: 'trigger armed', ref: 'v-1' })) };
   const moduleRef = { get: jest.fn(() => ({ opensBlocked: () => o.health === true })) };
   const traderCfg = parseSignalTraderConfig({});
-  const svc = new DeskActionsService(cfg, traderCfg, store as never, market, { place } as never, paper as never, quotes, funds, guard, exits, undefined, moduleRef as never, ENV);
+  // Trade agent exit authority: undefined = ports absent (today), true / false = AUTHORITY_STATE.isLive().
+  const briefs = { write: jest.fn(async () => undefined) };
+  const authority = o.authority === undefined ? undefined : { isLive: () => o.authority as boolean };
+  const briefPort = o.authority === undefined ? undefined : briefs;
+  const svc = new DeskActionsService(cfg, traderCfg, store as never, market, { place } as never, paper as never, quotes, funds, guard, exits, undefined, moduleRef as never, ENV, briefPort, authority);
   const ctx = (decisionId = 'dec-1'): ActionContext => ({ runId: 'run-1', decisionId, now: NOW, packet: watchPacket(NOW, cfg.mode), cfg });
-  const watch = new PendingEntryWatchService(cfg, store as never, market, svc, exits);
-  return { svc, store, market, place, paper, guard, exits, moduleRef, rows, ctx, watch, cfg };
+  const watch = new PendingEntryWatchService(cfg, store as never, market, svc, exits, briefPort, authority);
+  return { svc, store, market, place, paper, guard, exits, moduleRef, rows, ctx, watch, cfg, briefs };
 }
 
 describe('DeskActionsService OPEN', () => {
@@ -321,5 +325,64 @@ describe('other actions', () => {
   it('WATCH / NO_ACTION are recorded', async () => {
     const t = setup();
     expect((await t.svc.execute({ action: 'NO_ACTION', ...why } as ManagerDecision, t.ctx())).status).toBe('RECORDED');
+  });
+});
+
+describe('trade briefs (trade agent exit authority)', () => {
+  const TEXT = 'Plan: hold for 26080 while 15m closes stay above 25980; book at 26140.';
+  const brief = (trackerId = 'trk-1'): ManagerDecision => ({ action: 'BRIEF', trackerId, text: TEXT, reason: 'trade brief', evidence: [] });
+
+  it('a DONE live OPEN writes a brief composed from the decision once its tracker exists (by OPEN)', async () => {
+    const t = setup({ authority: true });
+    const r = await t.svc.execute(open({ proposalRef: 'reading:42' }), t.ctx());
+    expect(r.status).toBe('DONE');
+    await t.watch.pass(new Date(NOW.getTime() + 5_000));
+    expect(t.briefs.write).toHaveBeenCalledTimes(1);
+    const [trackerId, userId, text, by] = t.briefs.write.mock.calls[0] as unknown as [string, string, string, string];
+    expect([trackerId, userId, by]).toEqual(['trk-1', OWNER, 'OPEN']);
+    for (const s of ['BUY_CE NIFTY', 'NIFTY02DEC2626000CE', 'NOW on NIFTY', 'Stop (underlying): 25980', 'Targets (underlying): 26080 / 26140', 'break and hold above 26000', 'ltp 26020; level 26000', 'Lead: reading:42', 'decision dec-1']) {
+      expect(text).toContain(s);
+    }
+    expect(([...t.rows.values()][0].result as any).brief).toEqual({ state: 'WRITTEN' });
+    // The stop is still armed; the next pass writes nothing again.
+    expect(t.exits.tighten).toHaveBeenCalledTimes(1);
+    await t.watch.pass(new Date(NOW.getTime() + 10_000));
+    expect(t.briefs.write).toHaveBeenCalledTimes(1);
+  });
+
+  it('a brief write failure never blocks the stop', async () => {
+    const t = setup({ authority: true });
+    t.briefs.write.mockRejectedValueOnce(new Error('db down') as never);
+    await t.svc.execute(open(), t.ctx());
+    await t.watch.pass(new Date(NOW.getTime() + 5_000));
+    const res = [...t.rows.values()][0].result as any;
+    expect(res.stop.state).toBe('ARMED');
+    expect(res.brief).toEqual(expect.objectContaining({ state: 'FAILED' }));
+  });
+
+  it('off (isLive false or ports absent) and shadow paper OPENs: no brief', async () => {
+    for (const t of [setup({ authority: false }), setup(), setup({ mode: 'shadow', authority: true })]) {
+      await t.svc.execute(open(), t.ctx());
+      await t.watch.pass(new Date(NOW.getTime() + 5_000));
+      expect(t.briefs.write).not.toHaveBeenCalled();
+      expect(([...t.rows.values()][0].result as any).brief).toBeUndefined();
+    }
+  });
+
+  it('the BRIEF action writes via TRADE_BRIEFS by MANAGER (live)', async () => {
+    const t = setup({ authority: true });
+    const r = await t.svc.execute(brief(), t.ctx());
+    expect(r.status).toBe('DONE');
+    expect(t.briefs.write).toHaveBeenCalledWith('trk-1', OWNER, TEXT, 'MANAGER');
+  });
+
+  it('the BRIEF action: authority off → REFUSED, desk shadow → RECORDED, nothing written', async () => {
+    const off = setup({ authority: false });
+    expect((await off.svc.execute(brief(), off.ctx())).status).toBe('REFUSED');
+    const none = setup();
+    expect((await none.svc.execute(brief(), none.ctx())).status).toBe('REFUSED');
+    const shadow = setup({ mode: 'shadow', authority: true });
+    expect((await shadow.svc.execute(brief(), shadow.ctx())).status).toBe('RECORDED');
+    for (const t of [off, none, shadow]) expect(t.briefs.write).not.toHaveBeenCalled();
   });
 });

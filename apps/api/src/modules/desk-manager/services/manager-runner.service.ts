@@ -25,7 +25,7 @@ const WATCH_MIN = 1;
 const WATCH_MAX = 60;
 
 /** Acting order: protect first (EXIT / BOOK / TIGHTEN), then PAUSE / RESUME, then OPEN, then the record-only ones. */
-const ORDER: Record<ManagerDecision['action'], number> = { EXIT: 0, BOOK: 0, TIGHTEN: 0, PAUSE_ENTRIES: 1, RESUME: 1, OPEN: 2, WATCH: 3, FLAG_DATA_HOLE: 3, NO_ACTION: 3 };
+const ORDER: Record<ManagerDecision['action'], number> = { EXIT: 0, BOOK: 0, TIGHTEN: 0, PAUSE_ENTRIES: 1, RESUME: 1, OPEN: 2, WATCH: 3, FLAG_DATA_HOLE: 3, NO_ACTION: 3, BRIEF: 3 };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 500);
 const istMidnight = (now: Date) => new Date(Date.parse(`${istYmd(now)}T00:00:00.000+05:30`));

@@ -81,4 +81,14 @@ describe('validateDecision', () => {
     expect(validateDecision(pz(391), packet()).join()).toMatch(/minutes/);
     expect(validateDecision(pz(30), packet())).toEqual([]);
   });
+
+  it('BRIEF: an open tracker in the packet with 20–1500 chars is valid (no evidence needed); unknown / closed or bad length refused', () => {
+    const b = (trackerId: string, text: string): ManagerDecision => ({ action: 'BRIEF', trackerId, text, reason: 'trade brief', evidence: [] });
+    const ok = 'Plan: hold for 2900 above 2820 on 15m closes.';
+    expect(validateDecision(b('t1', ok), packet())).toEqual([]);
+    expect(validateDecision(b('t9', ok), packet()).join()).toMatch(/t9 not in packet.positions/);
+    expect(validateDecision(b('t1', ok), packet([])).join()).toMatch(/not in packet.positions/); // closed: no longer listed
+    expect(validateDecision(b('t1', 'too short'), packet()).join()).toMatch(/outside 20–1500/);
+    expect(validateDecision(b('t1', 'x'.repeat(1501)), packet()).join()).toMatch(/outside 20–1500/);
+  });
 });

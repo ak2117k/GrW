@@ -1,4 +1,4 @@
-import type { DeskPacket, InstrumentView, ManagerDecision, PositionView } from './desk.types';
+import { BRIEF_MAX_CHARS, BRIEF_MIN_CHARS, type DeskPacket, type InstrumentView, type ManagerDecision, type PositionView } from './desk.types';
 
 /** Reward ≥ 1.2 × risk on the underlying (Global Constraints; cfg.minRewardRisk is the same literal). */
 export const MIN_REWARD_RISK = 1.2;
@@ -36,9 +36,17 @@ function underlyingDir(p: PositionView): 1 | -1 {
  */
 export function validateDecision(d: ManagerDecision, packet: DeskPacket): string[] {
   const problems: string[] = [];
-  if (!Array.isArray(d.evidence) || d.evidence.filter((e) => typeof e === 'string' && e.trim()).length === 0) problems.push('no evidence: every decision must cite numbers from the packet');
+  // A BRIEF is the supreme's plan text, not a trading call: no evidence needed.
+  if (d.action !== 'BRIEF' && (!Array.isArray(d.evidence) || d.evidence.filter((e) => typeof e === 'string' && e.trim()).length === 0)) problems.push('no evidence: every decision must cite numbers from the packet');
 
   switch (d.action) {
+    case 'BRIEF': {
+      // Only an OPEN position in this packet (unknown or closed trackers are not listed there).
+      if (!positionsOf(packet).some((x) => x.trackerId === d.trackerId)) problems.push(`tracker ${d.trackerId} not in packet.positions (unknown or closed)`);
+      const n = typeof d.text === 'string' ? d.text.trim().length : 0;
+      if (n < BRIEF_MIN_CHARS || n > BRIEF_MAX_CHARS) problems.push(`BRIEF text ${n} chars outside ${BRIEF_MIN_CHARS}–${BRIEF_MAX_CHARS}`);
+      break;
+    }
     case 'OPEN': {
       const view = instrumentsOf(packet)[d.underlying];
       if (!view) {

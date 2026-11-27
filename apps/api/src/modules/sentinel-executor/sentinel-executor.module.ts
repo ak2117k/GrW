@@ -37,6 +37,10 @@ import { FLOOR_SL_CANDLES, FloorBrokerSlService } from './services/floor-broker-
 import { N15Reader, TRIGGER_N15_READER } from './repositories/n15.reader';
 import { CHART_CONFIRM_READER, ChartConfirmReader } from './repositories/chart-confirm.reader';
 import { ExitNoiseRepository } from '../exit-noise/exit-noise.repository';
+import { ExitAuthorityModule } from '../exit-authority/exit-authority.module';
+import { OWNER_EXIT } from '../exit-authority/services/escalation-runner.service';
+import { ManualOwnerExit } from './services/owner-exit.adapter';
+import { ExecutorAuthorityBootCheck } from './services/authority-boot-check.service';
 
 /**
  * Sentinel auto-exit (docs/superpowers/specs/2026-10-12-sentinel-auto-exit-design.md).
@@ -46,15 +50,22 @@ import { ExitNoiseRepository } from '../exit-noise/exit-noise.repository';
  */
 @Module({
   // MbmModule: MBM_EXIT_SHADOW's fail-open, cached client (inert while the flags are off).
-  imports: [PrismaModule, MarketDataModule, CredentialDecryptorModule, MbmModule],
+  // ExitAuthorityModule (2026-11-27): AUTHORITY_STATE / TRADE_ALARMS / TRADE_BRIEFS / OWNER_ESCALATION and the
+  // late-bound SUPREME_CONFIRM for the router, poller, trigger-watch and executor. Inert while TRADE_AGENT_AUTHORITY=off.
+  imports: [PrismaModule, MarketDataModule, CredentialDecryptorModule, MbmModule, ExitAuthorityModule],
   controllers: [SentinelExecutorController],
   providers: [
     AiExitExecutionRepository,
     OwnerBrokerSessionProvider,
     SentinelExitExecutor,
     SentinelExitPoller,
-    // Trade agent exit authority: inert unless AUTHORITY_STATE is bound and live (Task 7 wires the ports).
+    // Trade agent exit authority: inert unless AUTHORITY_STATE is live (ExitAuthorityModule, imported above).
     ExitAuthorityRouter,
+    // OWNER_EXIT for the authority's backstops, supreme exits and the owner's Telegram Exit: ManualExitService as
+    // the owner (backstops honour AI_AUTO_EXIT_USER_IDS). ExitAuthorityModule's late-bound forwarder finds it.
+    { provide: OWNER_EXIT, useFactory: (manual: ManualExitService) => new ManualOwnerExit(manual), inject: [ManualExitService] },
+    // Boot ERROR when live is requested and a port is unbound here, or FLOOR_BROKER_SL=live (forced to shadow).
+    ExecutorAuthorityBootCheck,
     ExitFillSettler,
     ExitUncertainResolver,
     AiExitOutcomeRepository,

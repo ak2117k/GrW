@@ -4,6 +4,7 @@ import { AiGatewayModule } from '../ai-gateway/ai-gateway.module';
 import { AiSetupsModule } from '../ai-setups/ai-setups.module';
 import { SETUP_WATCH_MARKET } from '../ai-setups/services/setup-watch.service';
 import { EntryEngineModule } from '../entry-engine/entry-engine.module';
+import { ExitAuthorityModule } from '../exit-authority/exit-authority.module';
 import { SUPREME_CONFIRM } from '../exit-authority/exit-authority.tokens';
 import { SentinelExecutorModule } from '../sentinel-executor/sentinel-executor.module';
 import { SignalTraderModule } from '../signal-trader/signal-trader.module';
@@ -47,6 +48,10 @@ import { DESK_WAKE as TARGET_WATCH_WAKE, TargetWatchService } from './services/t
     SignalTraderModule,
     TradeEngineModule,
     TradeSentinelModule,
+    // Trade agent exit authority (2026-11-27): TRADE_ALARMS / TRADE_BRIEFS / AUTHORITY_STATE for DeskExitActions,
+    // TargetWatchService, DeskActionsService, PendingEntryWatchService, DeskStateService and ManagerLlmService.
+    // SUPREME_CONFIRM stays this module's own binding below (a local provider wins over the imported forwarder).
+    ExitAuthorityModule,
   ],
   controllers: [DeskManagerController],
   providers: [

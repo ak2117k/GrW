@@ -770,6 +770,9 @@ export class SentinelCycleService {
    */
   private readonly managerTracked = new Map<string, ReadonlySet<string>>();
 
+  /** The latest roster entry per tracker (refreshed every user pass), for the exit authority's HARD_LOSS_PROBE. */
+  private readonly rosterEntries = new Map<string, RosterEntry>();
+
   /** When the concurrency cap was last reported, so a full cap logs once a minute, not per tick. */
   private capReportedAt = 0;
 
@@ -991,6 +994,7 @@ export class SentinelCycleService {
     now: Date = new Date(),
   ): Promise<{ report: CycleReport; pending: number; settled: Promise<CycleReport> }> {
     const entries = await this.roster.build(userId);
+    this.rememberRoster(userId, entries);
     await this.refreshManagerTracked(userId, entries);
     const report: CycleReport = { evaluated: 0, skipped: 0, failed: 0, unwatched: 0 };
     const jobs: Array<Promise<JudgeOutcome>> = [];
@@ -1591,6 +1595,44 @@ export class SentinelCycleService {
    * verdict row). Same scope as hardLossFor: SENTINEL-owned real derivatives, never paper, HOLD list
    * respected. Never rejects.
    */
+  private rememberRoster(userId: string, entries: RosterEntry[]): void {
+    const ids = new Set(entries.map((e) => e.trackerId));
+    for (const [id, e] of this.rosterEntries) if (e.userId === userId && !ids.has(id)) this.rosterEntries.delete(id);
+    for (const e of entries) this.rosterEntries.set(e.trackerId, e);
+  }
+
+  /**
+   * HARD_LOSS_PROBE for the exit authority's hard-loss backstop (bound in TradeSentinelModule): is this REAL
+   * position STILL past today's hard-loss limit, read NOW from the contract price alone — the fast guard's reading
+   * (rescueHardLoss: per-underlying limit, class ceiling, desk-manager cap, the underlying unmeasured ⇒ the plain
+   * ₹limit rule) without its confirmation memo, verdict or alarm. Paper / not sentinel-owned / no limit ⇒ false.
+   * THROWS when it cannot read (tracker not on this process's roster yet, no quick price, timeout): the backstop
+   * then does not sell on a guess.
+   */
+  async hardLossStillPast(trackerId: string): Promise<boolean> {
+    const entry = this.rosterEntries.get(trackerId);
+    if (!entry) throw new Error(`tracker ${trackerId} is not on the sentinel roster in this process`);
+    if (entry.ownership !== 'SENTINEL' || isPaperTracker(trackerId)) return false;
+    if (!this.ticks.quickPrice) throw new Error('the tick source has no quick price read');
+    const q = await withTimeout(this.ticks.quickPrice(trackerId), QUICK_PRICE_TIMEOUT_MS, () => new Error('quick price read timed out'));
+    if (!isDerivativeSegment(q.segment)) return false;
+    const vf = valueFactorOf(entry);
+    const cfg = this.hardLossCfgFor(entry, hardLossConfig(process.env, lossLimitForTrade(entry.symbol, q.entryPrice * Math.abs(q.qty) * vf, entry.exchange)));
+    if (cfg.limit === null) return false;
+    const green = computeGreenFloor({ segment: q.segment, entryPrice: q.entryPrice, ltp: q.ltp, qty: q.qty, side: q.side, valueFactor: vf });
+    const loss = hardLossReading({
+      netPnl: green.netPnl,
+      cfg,
+      exposure: exposureOf(entry.symbol, q.side),
+      underlying: null,
+      entryUnderlying: null,
+      bestUnderlying: null,
+      nUnderlying: null,
+      noise: null,
+    });
+    return loss.trip;
+  }
+
   private async rescueHardLoss(entry: RosterEntry, now: Date): Promise<void> {
     try {
       if (entry.ownership !== 'SENTINEL' || isPaperTracker(entry.trackerId) || !this.ticks.quickPrice) return;

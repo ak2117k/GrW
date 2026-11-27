@@ -3,7 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { runInSharedSlot } from '../../ai-assist/assist-slot';
 import { withAiCallContext } from '../../ai-gateway/audit/ai-call-context';
 import { AiCallRepository } from '../../ai-gateway/audit/ai-call.repository';
-import { aiCallsRecordingOn, directRecordedTransport } from '../../ai-gateway/audit/recorded-transport';
+import { directOrFailoverTransport } from '../../ai-gateway/audit/failover-transport';
+import { aiCallsRecordingOn } from '../../ai-gateway/audit/recorded-transport';
 import { ClaudeCliTransport } from '../../ai-gateway/providers/claude-cli.provider';
 import type { MessagesTransport, TransportRequest } from '../../ai-gateway/transport.types';
 import { AUTHORITY_STATE, type AuthorityStatePort } from '../../exit-authority/exit-authority.tokens';
@@ -17,8 +18,8 @@ import { managerSystemPrompt, managerUserMessage } from '../domain/manager-promp
 /** `ai_calls.job` for every manager call; config/ai-agents.json routes it to the trading agent (1 at once, 120 s). */
 export const MANAGER_JOB = 'desk.manager';
 /**
- * `ai_calls.job` of the supreme confirm call (trade agent exit authority). Not in config/ai-agents.json: with AI
- * agents on, an unknown job gets its own default semaphore, so a confirm never waits behind a manager run.
+ * `ai_calls.job` of the supreme confirm call (trade agent exit authority). config/ai-agents.json routes it to the
+ * trading agent with its own semaphore and a 30 s timeout, so a confirm never waits behind a manager run.
  */
 export const SUPREME_CONFIRM_JOB = 'desk.confirm';
 /** Slot wait + call (matches config/ai-agents.json desk.manager timeoutMs). */
@@ -116,14 +117,27 @@ export class ManagerLlmService {
     return { text, ms: Date.now() - started, model: this.cfg.model };
   }
 
+  /**
+   * The recorded direct transport, with ROUTE FAILOVER (trade agent exit authority Task 2/7) when `AI_FAILOVER` is on
+   * (default on when TRADE_AGENT_AUTHORITY=live): AI_FAILOVER_CHAIN routes (default vertex,cli; +api with a key), the
+   * first answer wins. Off: exactly `directRecordedTransport(...)` as before. Serves decide() and send() (the supreme
+   * confirm), so neither is lost to one provider's outage.
+   */
   private recorded(job: string = MANAGER_JOB): MessagesTransport {
-    return directRecordedTransport({
+    return directOrFailoverTransport({
       judge: judgeTransportFrom(this.config.get<string>('SENTINEL_JUDGE')),
       cli: this.cli,
       apiKey: this.config.get<string>('ANTHROPIC_API_KEY'),
       record: aiCallsRecordingOn(this.config.get<string>('AI_CALLS_RECORD')),
       audit: this.calls,
       jobOf: () => job,
+      env: {
+        AI_FAILOVER: this.config.get<string>('AI_FAILOVER'),
+        AI_FAILOVER_CHAIN: this.config.get<string>('AI_FAILOVER_CHAIN'),
+        TRADE_AGENT_AUTHORITY: this.config.get<string>('TRADE_AGENT_AUTHORITY'),
+        ANTHROPIC_API_KEY: this.config.get<string>('ANTHROPIC_API_KEY'),
+      },
+      caller: job,
     });
   }
 }

@@ -84,7 +84,9 @@ describe('agent registry', () => {
 
   it('the shipped config/ai-agents.json matches design 4.2 / 4.4', () => {
     const r = loadAgentRegistry({});
-    expect(r.jobsOf('trading').sort()).toEqual(['desk.manager', 'entry.judge', 'sentinel.judge', 'sentinel.thesis', 'signal.judge']);
+    // desk.confirm (trade agent exit authority): the supreme confirm, its own 30 s semaphore beside desk.manager.
+    expect(r.jobsOf('trading').sort()).toEqual(['desk.confirm', 'desk.manager', 'entry.judge', 'sentinel.judge', 'sentinel.thesis', 'signal.judge']);
+    expect(r.profile('desk.confirm')).toMatchObject({ agent: 'trading', concurrency: 2, timeoutMs: 30_000 });
     expect(r.jobsOf('reading').sort()).toEqual(['news.impact', 'news.sentiment', 'setup.build', 'signal.image-setup', 'signal.info', 'signal.parse', 'signal.read', 'signal.vision']);
     expect(r.jobsOf('background').sort()).toEqual([
       'assist.advisor',

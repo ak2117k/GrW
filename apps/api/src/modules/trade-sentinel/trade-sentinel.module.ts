@@ -84,6 +84,11 @@ import { PrismaLadderPlanReader } from './repositories/ladder-plan.reader';
 import { parseLadderMode } from '../exit-discipline/target-ladder';
 import { CLOSE_PRODUCTS } from './ports/close-products.port';
 import { CloseProductBook } from '../intraday-carry/close-product-book';
+import { ExitAuthorityModule } from '../exit-authority/exit-authority.module';
+import { TRACKER_WAKE } from '../exit-authority/exit-authority.tokens';
+import { HARD_LOSS_PROBE, type HardLossProbe } from '../exit-authority/services/escalation-runner.service';
+import { ALARM_CHART_READER } from './services/alarm-chart';
+import { alarmChartReaderFor } from './repositories/alarm-chart.reader';
 
 /**
  * Trade Sentinel — Stage 0 (shadow). Watches open Angel One positions and
@@ -143,6 +148,11 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
     MarketEventsModule,
     // MBM M3 (MBM_PACKET): the fail-open, cached market-behaviour client for the packet block.
     MbmModule,
+    // Trade agent exit authority (2026-11-27): TRADE_ALARMS / AUTHORITY_STATE / TRADE_BRIEFS for the cycle, the
+    // agent. Inert while TRADE_AGENT_AUTHORITY=off. The cycle sees only the port interfaces (the structural spec
+    // still holds); the authority's own backstop exits go through its late-bound OWNER_EXIT (ManualExitService,
+    // bound in SentinelExecutorModule), named there in the open, not here.
+    ExitAuthorityModule,
   ],
   controllers: [SentinelController, NightAnalysisController],
   providers: [
@@ -314,6 +324,16 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
     OiWallSnapshotService,
     SentinelCycleService,
     SentinelRunnerService,
+    // Trade agent exit authority ports IMPLEMENTED here (ExitAuthorityModule's late-bound forwarders find them):
+    // TRACKER_WAKE = the runner's per-tracker wake; HARD_LOSS_PROBE = the fast guard's hard-loss reading on a quick
+    // price (the backstop's "still past the limit?"); ALARM_CHART_READER = closed 5m/15m bars + N15 for the alarm look.
+    { provide: TRACKER_WAKE, useExisting: SentinelRunnerService },
+    {
+      provide: HARD_LOSS_PROBE,
+      useFactory: (cycle: SentinelCycleService): HardLossProbe => ({ stillPastLimit: (trackerId: string) => cycle.hardLossStillPast(trackerId) }),
+      inject: [SentinelCycleService],
+    },
+    { provide: ALARM_CHART_READER, useFactory: alarmChartReaderFor, inject: [PrismaService] },
     // Part B — tick-driven price sensors. The hub is reached ONLY through this
     // port binding (composition root), so the cycle's walk never reaches it.
     TickSensorBook,

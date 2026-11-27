@@ -1,6 +1,7 @@
 // apps/api/src/modules/sentinel-executor/domain/floor-broker-sl.ts
 import { contractValueFactor } from '@td/shared';
 import { classCeilingFor } from '../../../common/utils/loss-limit';
+import { parseAuthorityMode } from '../../exit-authority/exit-authority.config';
 import type { AutoExitConfig } from './auto-exit.types';
 import { isDeadOrderStatus, isTerminalOrderStatus } from './exit-order';
 
@@ -59,6 +60,13 @@ export function parseFloorBrokerSlConfig(env: Record<string, string | undefined>
   let mode: FloorBrokerSlMode = 'shadow';
   if (raw === 'off' || raw === 'live') mode = raw;
   else if (raw !== '' && raw !== 'shadow') problems.push(`FLOOR_BROKER_SL=${raw} is not off|shadow|live — using shadow`);
+  // Trade agent exit authority (2026-11-27): under TRADE_AGENT_AUTHORITY=live the resting broker SL is a code seller
+  // outside the authority and would block confirmed AI exits (live never cancels protective orders) ⇒ shadow.
+  // ExecutorAuthorityBootCheck logs it as ERROR at boot.
+  if (mode === 'live' && parseAuthorityMode(env) === 'live') {
+    problems.push('FLOOR_BROKER_SL=live is not allowed while TRADE_AGENT_AUTHORITY=live — running shadow');
+    mode = 'shadow';
+  }
   if (mode === 'live') {
     const missing = [
       !exit.enabled ? 'AI_AUTO_EXIT_ENABLED=true' : null,

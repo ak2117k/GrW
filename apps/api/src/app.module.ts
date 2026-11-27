@@ -48,6 +48,7 @@ import { MarketHubModule } from './modules/market-hub/market-hub.module';
 import { TradeSentinelModule } from './modules/trade-sentinel/trade-sentinel.module';
 import { SentinelExecutorModule } from './modules/sentinel-executor/sentinel-executor.module';
 import { IntradayCarryModule } from './modules/intraday-carry/intraday-carry.module';
+import { ExitAuthorityModule } from './modules/exit-authority/exit-authority.module';
 import { MbmModule } from './modules/mbm/mbm.module';
 import { NightReportModule } from './modules/night-report/night-report.module';
 import { SignalBoardModule } from './modules/signal-board/signal-board.module';
@@ -277,6 +278,11 @@ import { PortfolioReviewModule } from './modules/portfolio-review/portfolio-revi
     // Angel convertPosition (verified on the position book) or an EXIT_NOW for the executor above;
     // paper simulated. INTRADAY_CARRY=live|off (default live); live only for INTRADAY_CARRY_USERS.
     IntradayCarryModule,
+
+    // Trade agent exit authority (2026-11-27, docs/superpowers/specs/2026-11-27-trade-agent-exit-authority-design.md):
+    // rule sellers become alarms the trade agent answers, supreme confirm, Telegram owner escalation, backstops.
+    // TRADE_AGENT_AUTHORITY=off (default) changes nothing. Imported by its consumers too; listed here so it is visible.
+    ExitAuthorityModule,
 
     // Market-behaviour model M2 (observe only): 1m bar refresher + fail-open proxy to the
     // MBM service. Inert unless MBM_ENABLED=observe|on.

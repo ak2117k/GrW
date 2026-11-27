@@ -230,7 +230,8 @@ export class OwnerButtonsService implements OwnerEscalationPort, OnApplicationBo
     }
     let result: string;
     try {
-      result = await this.ownerExit.exitAsOwner(a.userId, a.trackerId, 'OWNER via Telegram');
+      // The owner's own tap: owner-initiated (the only kind of exit allowed to cancel the owner's orders under live).
+      result = await this.ownerExit.exitAsOwner(a.userId, a.trackerId, 'OWNER via Telegram', { ownerInitiated: true });
     } catch (err) {
       const msg = (err as Error)?.message ?? 'error';
       this.log.error(`${LOG} owner Exit via Telegram FAILED on ${a.symbol} (${a.trackerId}): ${msg}`);
@@ -264,7 +265,7 @@ export class OwnerButtonsService implements OwnerEscalationPort, OnApplicationBo
       return;
     }
     try {
-      const result = await this.ownerExit.exitAsOwner(t.userId, t.id, 'OWNER via Telegram (exit blocked by resting order)');
+      const result = await this.ownerExit.exitAsOwner(t.userId, t.id, 'OWNER via Telegram (exit blocked by resting order)', { ownerInitiated: true });
       this.blocked.delete(trackerId);
       await this.answer(cq, 'Exit sent');
       if (messageId != null) await this.edit(messageId, `${t.symbol}: Exit sent (you, via Telegram; ${result}).`);

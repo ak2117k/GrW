@@ -391,7 +391,11 @@ export class IntradayCarryService implements OnModuleInit, OnModuleDestroy {
     // Trade agent exit authority (live): a CODE exit — not the judge's own close verdict ("judge …") — becomes a
     // `deadline` alarm on the broker's MIS square-off: the trade agent decides, and an unanswered alarm is exited
     // by code just before the deadline (exit-authority escalation). No EXIT_NOW is written.
-    if (this.alarms && this.authority?.isLive() === true && !o.reason.startsWith(JUDGE_REASON_PREFIX)) {
+    // The judge's own EXIT also raises that deadline alarm (then records its EXIT_NOW as before): its rule:intraday-carry
+    // stamp makes the router turn the EXIT_NOW into an alarm, and the router finds this one — with the deadline — open,
+    // instead of raising an urgent CARRY alarm with no deadline (final review 5a).
+    const judgeExit = o.reason.startsWith(JUDGE_REASON_PREFIX);
+    if (this.alarms && this.authority?.isLive() === true) {
       const w = this.windowFor(t.exchange, now);
       // The square-off: the window's end. Unknown (the clock says the venue is shut) ⇒ now, the safe direction.
       const deadline = w ? new Date(w.openedAt.getTime() + this.cfg.windowMin * 60_000) : now;
@@ -412,12 +416,12 @@ export class IntradayCarryService implements OnModuleInit, OnModuleDestroy {
         }, now);
         this.logger.warn(
           `[carry] EXIT ${p.symbol} (tracker ${t.id}): CARRY alarm ${row ? `raised (${row.id})` : 'deduped'} with deadline ${deadline.toISOString()} — ` +
-            'no EXIT_NOW written, the trade agent decides (TRADE_AGENT_AUTHORITY=live)',
+            (judgeExit ? "the judge's EXIT_NOW is recorded too; the trade agent decides (TRADE_AGENT_AUTHORITY=live)" : 'no EXIT_NOW written, the trade agent decides (TRADE_AGENT_AUTHORITY=live)'),
         );
       } catch (err) {
         this.logger.error(`[carry] could not raise the CARRY alarm for ${p.symbol} (tracker ${t.id}): ${errText(err)} — the broker squares it off`);
       }
-      return;
+      if (!judgeExit) return;
     }
     const packet = (verdict?.packet ?? (await this.latestPacket(t.id, now)) ?? { intradayCarry: { decisionId: p.id } }) as Prisma.InputJsonValue;
     const money = (packet as { money?: { netPnl?: unknown } } | null)?.money;

@@ -121,7 +121,8 @@ describe('OwnerButtonsService', () => {
     const { rows, svc, telegram, ownerExit } = setup();
     rows.push(alarm());
     await svc.handleCallback(tap('x:a1'), NOW);
-    expect(ownerExit.exitAsOwner).toHaveBeenCalledWith('owner1', 'trk1', 'OWNER via Telegram');
+    // The owner's own tap is owner-initiated (owner ruling 2026-11-27: only it may cancel the owner's orders).
+    expect(ownerExit.exitAsOwner).toHaveBeenCalledWith('owner1', 'trk1', 'OWNER via Telegram', { ownerInitiated: true });
     expect(rows[0].status).toBe('CLOSED');
     expect(telegram.answerCallback).toHaveBeenCalledWith('cq1', 'Exit sent');
     expect(telegram.editMessage.mock.calls[0][0]).toBe(55);
@@ -300,7 +301,7 @@ describe('OwnerButtonsService', () => {
       expect(telegram.editMessage).toHaveBeenCalledTimes(1); // only the Hold confirmation edit
 
       await svc.handleCallback(tap('bx:trk1', CHAT, { date: Math.floor(Date.now() / 1000) }), new Date());
-      expect(ownerExit.exitAsOwner).toHaveBeenCalledWith('owner1', 'trk1', expect.stringMatching(/^OWNER via Telegram/));
+      expect(ownerExit.exitAsOwner).toHaveBeenCalledWith('owner1', 'trk1', expect.stringMatching(/^OWNER via Telegram/), { ownerInitiated: true });
     });
 
     it('bx on a closed tracker → "already handled"', async () => {

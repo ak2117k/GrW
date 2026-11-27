@@ -4,6 +4,7 @@ import { ExitAuthorityRouter, RAISE_ATTEMPTS, RULE_STAMPS, ruleAlarmFor } from '
 import { FLOOR_HARD_EXIT_STAMP, TARGET_LADDER_STAMP, isPaperTrackerId, isRuleStamp } from '../domain/exit-authority';
 import { CARRY_EXIT_STAMP } from '../../intraday-carry/intraday-carry.service';
 import { CONFIRM_TIMEOUT_MS } from '../../exit-authority/domain/timings';
+import { isExitAnswer } from '../../exit-authority/domain/agent-verdict';
 import type { AlarmRow, ConfirmResult } from '../../exit-authority/exit-authority.tokens';
 import * as opsAlert from '../../../common/utils/ops-alert';
 
@@ -153,7 +154,7 @@ describe('ExitAuthorityRouter', () => {
       expect(supreme.confirm).toHaveBeenCalledWith(expect.objectContaining({
         userId: 'owner', trackerId: 'trk1', agentDecision: 'EXIT', agentReason: 'thesis broken', brief: 'plan: ride to 24100', alarm: open[0],
       }));
-      expect(alarms.answer).toHaveBeenCalledWith('al1', 'v1', `EXIT (supreme ${decision})`);
+      expect(alarms.answer).toHaveBeenCalledWith('al1', 'v1', `EXIT_NOW (supreme ${decision})`);
       expect(repo.claim).not.toHaveBeenCalled();
     });
 
@@ -174,7 +175,7 @@ describe('ExitAuthorityRouter', () => {
       await p;
       expect(done).toEqual({ kind: 'EXECUTE' });
       expect(warn.mock.calls.map((c) => String(c[0])).some((l) => l.includes('TIMEOUT'))).toBe(true);
-      expect(alarms.answer).toHaveBeenCalledWith('al1', 'v1', 'EXIT (supreme TIMEOUT)');
+      expect(alarms.answer).toHaveBeenCalledWith('al1', 'v1', 'EXIT_NOW (supreme TIMEOUT)');
     });
 
     it('OVERRIDE_HOLD → HELD_BY_SUPREME: row SKIPPED SUPREME_HOLD:<reason>, open alarm answered, brief note written', async () => {
@@ -202,8 +203,20 @@ describe('ExitAuthorityRouter', () => {
       const { router, supreme, alarms, repo } = make({ open: [ask] });
       await expect(router.route(verdict())).resolves.toEqual({ kind: 'EXECUTE' });
       expect(supreme.confirm).not.toHaveBeenCalled();
-      expect(alarms.answer).toHaveBeenCalledWith('al-sx', 'v1', expect.any(String));
+      expect(alarms.answer).toHaveBeenCalledWith('al-sx', 'v1', 'EXIT_NOW (supreme asked)');
+      // The answer is the verdict word the escalation runner reads as the agent AGREEING (no second confirm).
+      expect(isExitAnswer(alarms.answer.mock.calls[0][2])).toBe(true);
       expect(repo.claim).not.toHaveBeenCalled();
+    });
+
+    it('a CARRY rule EXIT_NOW (the carry judge) while the deadline CARRY alarm is open → not re-raised (deadline kept), row SKIPPED', async () => {
+      const deadline = new Date(T0.getTime() + 30 * 60_000);
+      const carry = alarmRow({ id: 'al-carry', rule: 'CARRY', urgency: 'deadline', deadline });
+      const { router, repo, alarms } = make({ open: [carry] });
+      const v = verdict({ promptVersion: CARRY_EXIT_STAMP, reason: 'INTRADAY_CARRY EXIT (close decision, code rule): judge EXIT_NOW' });
+      await expect(router.route(v, { mode: 'live', hold: [] })).resolves.toEqual({ kind: 'ALARM', alarmId: 'al-carry' });
+      expect(alarms.raise).not.toHaveBeenCalled();
+      expect(repo.update).toHaveBeenCalledWith('row1', { status: 'SKIPPED', reason: 'AUTHORITY_ALARM' });
     });
 
     it('a paper tracker → EXECUTE (today\'s rules)', async () => {

@@ -62,7 +62,7 @@ import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig, withSessionExitTunin
 import { SESSION_TUNING } from '../self-review/tuning/tunables';
 import { REJUDGE_CONFIG, parseRejudgeConfig } from './services/rejudge-suppression';
 import { EXIT_ATTEMPTS, FUTILE_REJUDGE_CONFIG, parseFutileRejudgeConfig } from './services/futile-rejudge';
-import { JUDGE_GATE_CONFIG, parseJudgeGateConfig } from './services/judge-gate';
+import { isIntradayProduct, JUDGE_GATE_CONFIG, parseJudgeGateConfig } from './services/judge-gate';
 import { PrismaExitAttemptReader } from './repositories/exit-attempt.reader';
 import { MinuteBarsReader } from './adapters/minute-bars.reader';
 import { NewsEventsCoreModule } from '../news-events/news-events-core.module';
@@ -330,8 +330,16 @@ import { alarmChartReaderFor } from './repositories/alarm-chart.reader';
     { provide: TRACKER_WAKE, useExisting: SentinelRunnerService },
     {
       provide: HARD_LOSS_PROBE,
-      useFactory: (cycle: SentinelCycleService): HardLossProbe => ({ stillPastLimit: (trackerId: string) => cycle.hardLossStillPast(trackerId) }),
-      inject: [SentinelCycleService],
+      // productIntraday: the broker product the carry engine last read (CloseProductBook, ≤5 min old, else unknown) —
+      // the deadline backstop does not sell a position converted to carry-forward.
+      useFactory: (cycle: SentinelCycleService, products: CloseProductBook): HardLossProbe => ({
+        stillPastLimit: (trackerId: string) => cycle.hardLossStillPast(trackerId),
+        productIntraday: (trackerId: string) => {
+          const p = products.productTypeOf(trackerId);
+          return p === null ? null : isIntradayProduct(p);
+        },
+      }),
+      inject: [SentinelCycleService, CloseProductBook],
     },
     { provide: ALARM_CHART_READER, useFactory: alarmChartReaderFor, inject: [PrismaService] },
     // Part B — tick-driven price sensors. The hub is reached ONLY through this

@@ -41,7 +41,10 @@ export function shouldReRaise(open: AlarmRow, next: RaiseAlarm, now: Date): bool
     return true;
   }
   const every = isUrgent(open.urgency, next.urgency) ? REALARM_URGENT_EVERY_MS : REALARM_EVERY_MS;
-  return now.getTime() - open.lastRaisedAt.getTime() >= every;
+  // Counted from the later of the last raise and the agent's answer: an alarm the agent just answered (HOLD) is
+  // not re-raised at once because its raise is old.
+  const since = Math.max(open.lastRaisedAt.getTime(), open.answeredAt?.getTime() ?? Number.NEGATIVE_INFINITY);
+  return now.getTime() - since >= every;
 }
 
 /** What the owner should be told about an alarm now, if anything. */
@@ -60,20 +63,25 @@ export function escalationDue(a: AlarmRow, now: Date): 'ALERT' | 'REALERT' | 'DE
 
 /**
  * The only two code sells left (design §4.5a):
- * - DEADLINE: a `deadline` alarm with no agent answer by deadline − DEADLINE_EXIT_LEAD_MS;
+ * - DEADLINE: a `deadline` alarm still on the trade at deadline − DEADLINE_EXIT_LEAD_MS. Owner ruling 2026-11-27
+ *   ("code exits a couple of minutes before the broker deadline so Angel never squares off at the bell"): an agent
+ *   HOLD (ANSWERED) does NOT disarm it. Only a running owner Hold snooze (capped at this time), a position converted
+ *   to carry (`ctx.stillIntraday === false`: the product is no longer intraday) or a closed tracker (the runner closes
+ *   the alarm) stop it;
  * - HARD_LOSS: a hard-loss alarm, the AI down (or the agent silent ≥ ESCALATE_URGENT_AFTER_MS), the owner
  *   silent ≥ BACKSTOP_OWNER_SILENT_MS after the alert, and the trade still past its limit.
  */
 export function backstopDue(
   a: AlarmRow,
-  ctx: { aiDown: boolean; stillPastLimit: boolean },
+  ctx: { aiDown: boolean; stillPastLimit: boolean; stillIntraday?: boolean },
   now: Date,
 ): 'DEADLINE' | 'HARD_LOSS' | null {
-  if (!isUnansweredActive(a, now)) return null;
   const t = now.getTime();
   if (a.urgency === 'deadline' && a.deadline != null && t >= a.deadline.getTime() - DEADLINE_EXIT_LEAD_MS) {
-    return 'DEADLINE';
+    const onTrade = isUnansweredActive(a, now) || a.status === 'ANSWERED';
+    return onTrade && ctx.stillIntraday !== false ? 'DEADLINE' : null;
   }
+  if (!isUnansweredActive(a, now)) return null;
   if (!HARD_LOSS_RULES.has(a.rule)) return null;
   const agentSilent = ctx.aiDown || t - a.raisedAt.getTime() >= ESCALATE_URGENT_AFTER_MS;
   const ownerSilent = a.alertedAt != null && a.alertedAt.getTime() <= t - BACKSTOP_OWNER_SILENT_MS;

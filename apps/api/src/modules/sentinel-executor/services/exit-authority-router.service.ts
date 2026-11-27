@@ -9,6 +9,7 @@ import {
   ruleAlarmFor as ruleAlarmForStamp,
 } from '../domain/exit-authority';
 import { CONFIRM_TIMEOUT_MS } from '../../exit-authority/domain/timings';
+import { exitAnswer } from '../../exit-authority/domain/agent-verdict';
 import {
   AUTHORITY_STATE,
   OWNER_ESCALATION,
@@ -115,6 +116,17 @@ export class ExitAuthorityRouter {
       this.tellOwner(v, `no-store:${v.id}`, `rule ${rule} would have exited ${v.symbol}, but no alarm store is bound — nothing sold, nobody alarmed. Check the position.`);
       return { kind: 'ALARM', alarmId: null };
     }
+    if (rule === 'CARRY') {
+      // The carry engine raised (or will raise) its own CARRY alarm WITH the broker deadline. A rule:intraday-carry
+      // EXIT_NOW (the carry judge's own EXIT) must not replace it with a deadline-less urgent one: while a deadline
+      // alarm is open it covers this exit. (A raise that does go through keeps an existing deadline: TradeAlarmsService.)
+      const covering = (await this.openAlarms(v.trackerId)).find((a) => a.rule === 'CARRY' && a.deadline != null);
+      if (covering) {
+        await this.skipRow(v, mode, AUTHORITY_ALARM);
+        this.logger.warn(`[exit-authority] CARRY exit covered by the open deadline alarm ${covering.id} — not re-raised — ${v.symbol} verdict ${v.id}`);
+        return { kind: 'ALARM', alarmId: covering.id };
+      }
+    }
     let alarm: AlarmRow | null;
     try {
       alarm = await this.alarms.raise({
@@ -162,7 +174,9 @@ export class ExitAuthorityRouter {
     const asked = open.find((a) => a.rule === 'SUPREME_EXIT');
     if (asked) {
       this.logger.warn(`[exit-authority] agent EXIT on the supreme's own request (alarm ${asked.id}) — executing, no confirm — ${v.symbol} verdict ${v.id}`);
-      await this.answerAll(open, v.id, 'EXIT (supreme asked)');
+      // Stored as the verdict word EXIT_NOW (exit-authority/domain/agent-verdict.ts): the escalation runner reads it as the
+      // agent AGREEING with the supreme (isExitAnswer) and follows this exit, never a disagreement round trip.
+      await this.answerAll(open, v.id, exitAnswer('supreme asked'));
       return EXECUTE;
     }
     if (!this.supreme) return EXECUTE;
@@ -173,7 +187,7 @@ export class ExitAuthorityRouter {
     this.logger.warn(`[exit-authority] supreme confirm ${res.decision} in ${res.latencyMs} ms — ${v.symbol} verdict ${v.id}: ${res.reason}`);
 
     if (res.decision !== 'OVERRIDE_HOLD') {
-      await this.answerAll(open, v.id, `EXIT (supreme ${res.decision})`);
+      await this.answerAll(open, v.id, exitAnswer(`supreme ${res.decision}`));
       return EXECUTE;
     }
     const why = String(res.reason ?? '').slice(0, 300);

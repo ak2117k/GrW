@@ -2,6 +2,7 @@ import { Logger, UnprocessableEntityException } from '@nestjs/common';
 import { parseDeskManagerConfig } from '../desk-manager.config';
 import type { ActionContext, DeskPacket, PositionView } from '../domain/desk.types';
 import { DeskExitActions, bullishExposure, isTighter } from './desk-exit-actions.service';
+import * as opsAlert from '../../../common/utils/ops-alert';
 
 const NOW = new Date('2026-11-26T05:30:00Z'); // 11:00 IST
 const OWNER = 'owner';
@@ -128,11 +129,24 @@ describe('DeskExitActions', () => {
         expect(h.manual.request).not.toHaveBeenCalled();
       });
 
-      it('live: the alarm failing falls back to the manual exit (the supreme wins)', async () => {
+      it('live: the alarm failing falls back to the manual exit (the supreme wins) — visibly, and not owner-initiated', async () => {
+        const ops = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true);
         const h = withAuthority(true, jest.fn(async () => { throw new Error('db down'); }));
         const r = await h.svc.exit('t1', 'EXIT', 'x', ctx('live'));
         expect(r.status).toBe('DONE');
+        expect(r.detail).toMatch(/^SUPREME_EXIT alarm failed, sent directly \(db down\): EXIT sent through the exit executor/);
         expect(h.manual.request).toHaveBeenCalledTimes(1);
+        // No ownerInitiated: under live the executor never cancels the owner's resting order for this exit.
+        expect((h.manual.request.mock.calls[0] as unknown[])[2]).toEqual({ now: NOW, reason: 'DESK_MANAGER EXIT: x' });
+        expect(ops).toHaveBeenCalledWith('desk-supreme-exit-direct:t1', expect.stringContaining('SUPREME_EXIT alarm failed (db down), sent directly'));
+      });
+
+      it('off: no alarm, no ops alert, the detail exactly as today', async () => {
+        const ops = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true);
+        const h = withAuthority(false);
+        const r = await h.svc.exit('t1', 'EXIT', 'x', ctx('live'));
+        expect(r).toEqual({ status: 'DONE', detail: 'EXIT sent through the exit executor (attempt man_t1_1)', ref: 'exec1' });
+        expect(ops).not.toHaveBeenCalled();
       });
 
       it('off (isLive false, or no ports): today\'s manual exit, no alarm', async () => {

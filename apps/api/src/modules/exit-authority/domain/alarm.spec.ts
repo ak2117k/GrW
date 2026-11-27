@@ -87,6 +87,14 @@ describe('shouldReRaise', () => {
     expect(shouldReRaise(open, next({ severityN: 0.5 }), at(REALARM_EVERY_MS + 1))).toBe(false);
   });
 
+  it('measures the interval from the agent answer when that is later than the last raise', () => {
+    const answered = row({ status: 'ANSWERED', answeredAt: at(200_000), answerVerdictId: 'v1', answer: 'HOLD' });
+    expect(shouldReRaise(answered, next({ severityN: 0.5 }), at(REALARM_EVERY_MS + 1))).toBe(false);
+    expect(shouldReRaise(answered, next({ severityN: 0.5 }), at(200_000 + REALARM_EVERY_MS))).toBe(true);
+    // still re-raised at once when ≥ 1 N15 worse
+    expect(shouldReRaise(answered, next({ severityN: 1.5 }), at(210_000))).toBe(true);
+  });
+
   it('is false while SNOOZED, even when much worse or overdue', () => {
     const open = row({ status: 'SNOOZED', snoozedUntil: at(900_000) });
     expect(shouldReRaise(open, next({ severityN: 9 }), at(REALARM_EVERY_MS + 1))).toBe(false);
@@ -144,17 +152,35 @@ describe('backstopDue', () => {
     expect(backstopDue(a, quiet, at(10_000))).toBe('DEADLINE');
   });
 
-  it('is not DEADLINE once the agent answered', () => {
-    const a = row({
+  describe('owner ruling 2026-11-27: an agent HOLD does not disarm the deadline backstop', () => {
+    const answered = row({
       urgency: 'deadline',
       rule: 'CARRY',
-      deadline: at(DEADLINE_EXIT_LEAD_MS),
+      deadline: at(DEADLINE_EXIT_LEAD_MS + 10_000),
       status: 'ANSWERED',
       answeredAt: at(1),
       answerVerdictId: 'v1',
       answer: 'HOLD',
     });
-    expect(backstopDue(a, quiet, at(60_000))).toBeNull();
+
+    it('answered HOLD → still DEADLINE at deadline − 2 min (not before)', () => {
+      expect(backstopDue(answered, quiet, at(9_999))).toBeNull();
+      expect(backstopDue(answered, quiet, at(10_000))).toBe('DEADLINE');
+    });
+
+    it('converted to carry (product no longer intraday) → no backstop, answered or not', () => {
+      expect(backstopDue(answered, { ...quiet, stillIntraday: false }, at(10_000))).toBeNull();
+      expect(backstopDue({ ...answered, status: 'OPEN', answeredAt: null }, { ...quiet, stillIntraday: false }, at(10_000))).toBeNull();
+    });
+
+    it('a closed / backstopped alarm (tracker closed) → no backstop', () => {
+      expect(backstopDue({ ...answered, status: 'CLOSED' }, quiet, at(10_000))).toBeNull();
+      expect(backstopDue({ ...answered, status: 'BACKSTOPPED' }, quiet, at(10_000))).toBeNull();
+    });
+
+    it('a running owner Hold snooze still holds it', () => {
+      expect(backstopDue({ ...answered, status: 'SNOOZED', answeredAt: null, snoozedUntil: at(20_000) }, quiet, at(10_000))).toBeNull();
+    });
   });
 
   describe('HARD_LOSS', () => {

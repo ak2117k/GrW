@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { TRACKER_WAKE } from './exit-authority.tokens';
-import { LATE_PORT, LateBinding, lateBindingOf, lateOwnerExit, lateTrackerWake, PortUnboundError } from './late-ports';
+import { LATE_PORT, LateBinding, lateBindingOf, lateHardLossProbe, lateOwnerExit, lateTrackerWake, PortUnboundError } from './late-ports';
+import { HARD_LOSS_PROBE, OWNER_EXIT } from './services/escalation-runner.service';
 
 /** ModuleRef.get(token, { strict: false, each: true }) over a fixed registry. */
 const refOver = (registry: Map<unknown, unknown[]>) => ({
@@ -37,6 +38,22 @@ describe('late-bound exit-authority ports', () => {
     expect(() => fwd.exitAsOwner('u', 't', 'x')).toThrow('[exit-authority] OWNER_EXIT is not bound in this process');
     expect(error).toHaveBeenCalledTimes(1);
     expect(lateBindingOf(fwd)?.resolve()).toBeNull();
+  });
+
+  it('OWNER_EXIT forwards the ownerInitiated option; HARD_LOSS_PROBE forwards productIntraday (null when unbound / absent)', async () => {
+    const registry = new Map<unknown, unknown[]>();
+    const exitFwd = lateOwnerExit(refOver(registry) as never);
+    const realExit = { exitAsOwner: jest.fn(async () => 'man_1') };
+    registry.set(OWNER_EXIT, [exitFwd, realExit]);
+    await exitFwd.exitAsOwner('u', 't', 'OWNER via Telegram', { ownerInitiated: true });
+    expect(realExit.exitAsOwner).toHaveBeenCalledWith('u', 't', 'OWNER via Telegram', { ownerInitiated: true });
+
+    const probeFwd = lateHardLossProbe(refOver(registry) as never);
+    expect(probeFwd.productIntraday!('t')).toBeNull(); // unbound: unknown, never a throw
+    registry.set(HARD_LOSS_PROBE, [probeFwd, { stillPastLimit: jest.fn() }]);
+    expect(probeFwd.productIntraday!('t')).toBeNull(); // bound without the facet: unknown
+    const probe2 = lateHardLossProbe(refOver(new Map([[HARD_LOSS_PROBE, [{ stillPastLimit: jest.fn(), productIntraday: () => false }]]])) as never);
+    expect(probe2.productIntraday!('t')).toBe(false);
   });
 
   it('a binding that appears later (after boot) is picked up on the next call', () => {

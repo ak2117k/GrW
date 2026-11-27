@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, type TradeAlarm } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { isAgentVerdictStamp, SENTINEL_JUDGE_STAMP_PREFIX } from '../domain/agent-verdict';
 import type { AlarmRow, AlarmRule, AlarmStatus, AlarmUrgency } from '../exit-authority.tokens';
 
 /** Statuses that still need the agent or the owner. */
@@ -10,14 +11,15 @@ export const DEDUPE_STATUSES: AlarmStatus[] = ['OPEN', 'SNOOZED', 'ANSWERED'];
 
 export type TradeAlarmPatch = Partial<Omit<AlarmRow, 'id' | 'userId' | 'trackerId' | 'rule'>>;
 
-/** The newest LLM verdict for a tracker (code-rule stamps, promptVersion 'rule:…', excluded). */
+/** The newest trade-agent verdict for a tracker (only the sentinel judge's stamp; see domain/agent-verdict.ts). */
 export interface AgentVerdictRef {
   id: string;
   verdict: string;
   createdAt: Date;
 }
 
-const RULE_STAMP_PREFIX = 'rule:';
+/** Newest sentinel-judge-prefixed rows read per lookup (the regex then picks the first agent stamp). */
+const AGENT_VERDICT_SCAN = 20;
 
 function toRow(r: TradeAlarm): AlarmRow {
   return {
@@ -110,16 +112,35 @@ export class TradeAlarmRepository {
     return toRow(r);
   }
 
-  /** Newest sentinel_verdicts row for the tracker after `since` that an LLM wrote (promptVersion not 'rule:…'). */
+  /**
+   * Newest sentinel_verdicts row for the tracker after `since` that the TRADE AGENT wrote: the live sentinel judge's
+   * stamp only (domain/agent-verdict.ts isAgentVerdictStamp). Desk TIGHTEN rows, signal SL rows and code-rule stamps
+   * are not an agent look and never answer an alarm.
+   */
   async latestAgentVerdict(trackerId: string, since: Date): Promise<AgentVerdictRef | null> {
-    return this.prisma.sentinelVerdict.findFirst({
+    const rows = await this.prisma.sentinelVerdict.findMany({
       where: {
         trackerId,
         createdAt: { gt: since },
-        NOT: { promptVersion: { startsWith: RULE_STAMP_PREFIX } },
+        promptVersion: { startsWith: SENTINEL_JUDGE_STAMP_PREFIX },
       },
       orderBy: { createdAt: 'desc' },
-      select: { id: true, verdict: true, createdAt: true },
+      take: AGENT_VERDICT_SCAN,
+      select: { id: true, verdict: true, createdAt: true, promptVersion: true },
     });
+    const r = rows.find((x) => isAgentVerdictStamp(x.promptVersion));
+    return r ? { id: r.id, verdict: r.verdict, createdAt: r.createdAt } : null;
+  }
+
+  /**
+   * Answer an alarm only while it still needs one (OPEN / SNOOZED): a conditional update, so a late answer can never
+   * resurrect a BACKSTOPPED / CLOSED / already ANSWERED row. True when this call answered it.
+   */
+  async answerIfOpen(id: string, patch: { answeredAt: Date; answerVerdictId: string; answer: string }): Promise<boolean> {
+    const r = await this.prisma.tradeAlarm.updateMany({
+      where: { id, status: { in: OPEN_STATUSES } },
+      data: { status: 'ANSWERED', ...patch },
+    });
+    return r.count > 0;
   }
 }

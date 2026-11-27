@@ -67,7 +67,8 @@ describe('SentinelExecutorController — manual exit', () => {
     const ctl = new SentinelExecutorController({} as never, {} as never, manual as never, OUT as never);
     const user = { userId: 'owner', role: 'ADMIN', email: 'o@x' };
     const out = await ctl.exit(user, 't1');
-    expect(manual.request).toHaveBeenCalledWith(user, 't1');
+    // The app's Exit button is the owner's own action: owner-initiated (may cancel the owner's orders under live).
+    expect(manual.request).toHaveBeenCalledWith(user, 't1', { ownerInitiated: true });
     expect(out).toEqual(expect.objectContaining({ status: 'CLAIMED', trigger: 'MANUAL', verdictId: 'man_t1_1' }));
     finish({ status: 'FILLED' });
   });

@@ -58,6 +58,12 @@ export class TradeAlarmsService implements TradeAlarmsPort {
     const reason = (a.reason ?? '').slice(0, ALARM_REASON_CAP);
     const latest = await this.repo.findLatestLive(a.trackerId, a.rule);
 
+    // A deadline is never lost: a raise without one (e.g. the router's CARRY alarm from a rule EXIT_NOW) keeps the
+    // deadline (and the `deadline` urgency, which arms the broker-deadline backstop) of the alarm it refreshes/follows.
+    const inherit = latest != null && latest.deadline != null && a.deadline == null;
+    const deadline = inherit ? latest!.deadline : a.deadline ?? null;
+    const urgency = inherit && latest!.urgency === 'deadline' ? 'deadline' : a.urgency;
+
     let row: AlarmRow;
     if (latest && !shouldReRaise(latest, a, now)) {
       return null;
@@ -70,8 +76,8 @@ export class TradeAlarmsService implements TradeAlarmsPort {
         severityN: a.severityN ?? null,
         reason,
         wouldHave: a.wouldHave,
-        urgency: a.urgency,
-        deadline: a.deadline ?? null,
+        urgency,
+        deadline,
         sourceRef: a.sourceRef ?? null,
         payload: a.payload,
         symbol: a.symbol,
@@ -83,10 +89,10 @@ export class TradeAlarmsService implements TradeAlarmsPort {
         trackerId: a.trackerId,
         symbol: a.symbol,
         rule: a.rule,
-        urgency: a.urgency,
+        urgency,
         reason,
         wouldHave: a.wouldHave,
-        deadline: a.deadline ?? null,
+        deadline,
         severityN: a.severityN ?? null,
         sourceRef: a.sourceRef ?? null,
         payload: a.payload,
@@ -131,13 +137,13 @@ export class TradeAlarmsService implements TradeAlarmsPort {
     return this.repo.findOpenForTrackers(trackerIds);
   }
 
+  /**
+   * Conditional (WHERE status IN OPEN/SNOOZED): an answer that arrives after the runner backstopped / closed the
+   * alarm, or after another answer, changes nothing (never resurrects a BACKSTOPPED / CLOSED row).
+   */
   async answer(alarmId: string, verdictId: string, answer: string, now: Date = new Date()): Promise<void> {
-    await this.repo.update(alarmId, {
-      status: 'ANSWERED',
-      answeredAt: now,
-      answerVerdictId: verdictId,
-      answer,
-    });
+    const done = await this.repo.answerIfOpen(alarmId, { answeredAt: now, answerVerdictId: verdictId, answer });
+    if (!done) this.log.log(`[exit-authority] alarm ${alarmId} no longer open: answer ${answer} (verdict ${verdictId}) not applied`);
   }
 
   /** Best effort: the alarm is already persisted, so a failed wake is caught by the next pass / escalation. */

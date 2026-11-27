@@ -15,7 +15,7 @@ import { TelegramBotClient as RealTelegramBotClient, type TelegramBotClient } fr
 import { TrackerMessages } from '../telegram/tracker-messages';
 import { holdUntil } from '../telegram/owner-buttons.service';
 import type { AuthorityStateService } from './authority-state.service';
-import { EscalationRunner, type HardLossProbe, type OwnerExitPort } from './escalation-runner.service';
+import { BackstopRehearsal, EscalationRunner, type HardLossProbe, type OwnerExitPort } from './escalation-runner.service';
 
 const T0 = new Date('2026-11-27T05:00:00.000Z');
 const at = (ms: number): Date => new Date(T0.getTime() + ms);
@@ -56,6 +56,16 @@ class FakeDb {
     for (const a of this.alarms) {
       if (a.trackerId === trackerId && ['OPEN', 'SNOOZED', 'ANSWERED'].includes(a.status)) a.telegramMessageId = messageId;
     }
+  }
+  /** ai_exit_executions by verdictId. */
+  executions = new Map<string, { status: string; reason: string | null }>();
+  async executionForVerdict(verdictId: string): Promise<{ status: string; reason: string | null } | null> {
+    return this.executions.get(verdictId) ?? null;
+  }
+  /** intraday_carry_decisions CONVERTED trackers. */
+  converted = new Set<string>();
+  async carryConverted(trackerId: string): Promise<boolean> {
+    return this.converted.has(trackerId);
   }
 }
 
@@ -382,6 +392,76 @@ describe('EscalationRunner.pass', () => {
       expect(String(telegram.sendMessage.mock.calls.at(-1)?.[0])).toMatch(/CANNOT exit/);
     });
 
+    it('backstops are never owner-initiated (they do not cancel the owner\'s resting order)', async () => {
+      const { db, ownerExit, runner } = setup();
+      db.alarms.push(alarm({ rule: 'CARRY', urgency: 'deadline', deadline, alertedAt: at(0), alertCount: 1 }));
+      await runner.pass(new Date(deadline.getTime() - DEADLINE_EXIT_LEAD_MS));
+      expect(ownerExit.exitAsOwner.mock.calls[0][3]).toEqual({ ownerInitiated: false });
+    });
+
+    it('AI_AUTO_EXIT_MODE=dry-run (BackstopRehearsal): recorded BACKSTOPPED + rehearsed, owner told "would exit", not retried', async () => {
+      const { db, ownerExit, telegram, runner } = setup();
+      ownerExit.exitAsOwner.mockRejectedValue(new BackstopRehearsal('AI_AUTO_EXIT_MODE=dry-run'));
+      db.alarms.push(alarm({ rule: 'CARRY', urgency: 'deadline', deadline, alertedAt: at(0), alertCount: 1 }));
+      await runner.pass(new Date(deadline.getTime() - DEADLINE_EXIT_LEAD_MS));
+      expect(db.alarms[0].status).toBe('BACKSTOPPED');
+      expect(db.alarms[0].payload).toMatchObject({ rehearsed: true });
+      expect(String(telegram.sendMessage.mock.calls.at(-1)?.[0])).toMatch(/BACKSTOP DEADLINE \(dry-run\): would exit/);
+      await runner.pass(new Date(deadline.getTime() - DEADLINE_EXIT_LEAD_MS + 15_000));
+      expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(1);
+    });
+
+    describe('owner ruling: an agent HOLD does not disarm the deadline backstop', () => {
+      const held = () => alarm({ rule: 'CARRY', urgency: 'deadline', deadline, status: 'ANSWERED', answeredAt: at(60_000), answer: 'HOLD', answerVerdictId: 'v1' });
+
+      it('answered HOLD → no exit before deadline − 2 min; exit at deadline − 2 min (BACKSTOP DEADLINE)', async () => {
+        const { db, ownerExit, runner } = setup();
+        db.alarms.push(held());
+        await runner.pass(new Date(deadline.getTime() - DEADLINE_EXIT_LEAD_MS - 1_000));
+        expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+        await runner.pass(new Date(deadline.getTime() - DEADLINE_EXIT_LEAD_MS));
+        expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(1);
+        expect(ownerExit.exitAsOwner.mock.calls[0][2]).toMatch(/^BACKSTOP DEADLINE: /);
+        expect(db.alarms[0].status).toBe('BACKSTOPPED');
+      });
+
+      it('converted to carry (the product read says CARRYFORWARD) → no backstop; the alarm is closed', async () => {
+        const { db, ownerExit, probe, runner } = setup();
+        (probe as HardLossProbe).productIntraday = jest.fn(() => false);
+        db.alarms.push(held());
+        await runner.pass(new Date(deadline.getTime() - DEADLINE_EXIT_LEAD_MS));
+        expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+        expect(db.alarms[0].status).toBe('CLOSED');
+      });
+
+      it('converted to carry (the carry engine confirmed CONVERTED) → no backstop', async () => {
+        const { db, ownerExit, runner } = setup();
+        db.converted.add('trk1');
+        db.alarms.push(held());
+        await runner.pass(new Date(deadline.getTime() - DEADLINE_EXIT_LEAD_MS));
+        expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+      });
+
+      it('the product still intraday or unknown → backstop', async () => {
+        for (const p of [true, null]) {
+          const { db, ownerExit, probe, runner } = setup();
+          (probe as HardLossProbe).productIntraday = jest.fn(() => p);
+          db.alarms.push(held());
+          await runner.pass(new Date(deadline.getTime() - DEADLINE_EXIT_LEAD_MS));
+          expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(1);
+        }
+      });
+
+      it('the tracker closed → CLOSED, no backstop', async () => {
+        const { db, ownerExit, runner } = setup();
+        db.openTrackers.clear();
+        db.alarms.push(held());
+        await runner.pass(new Date(deadline.getTime() - DEADLINE_EXIT_LEAD_MS));
+        expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+        expect(db.alarms[0].status).toBe('CLOSED');
+      });
+    });
+
     it('a failed exit leaves the alarm open (retried next pass) and tells the owner', async () => {
       const { db, ownerExit, telegram, runner } = setup();
       ownerExit.exitAsOwner.mockRejectedValueOnce(new Error('QTY_UNIT_UNCONFIGURED:MCX'));
@@ -576,14 +656,94 @@ describe('EscalationRunner.pass', () => {
       expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(1);
     });
 
-    it('agent EXIT_NOW agrees → no confirm, no owner-path exit (its own exit runs), marked', async () => {
+    it('agent EXIT_NOW agrees → no confirm, no owner-path exit (its own exit runs), marked pending on the executor', async () => {
       const { db, supreme, ownerExit, runner } = setup();
       db.alarms.push(supremeAlarm());
       db.verdicts.push({ id: 'v1', verdict: 'EXIT_NOW', createdAt: at(20_000), trackerId: 'trk1' });
       await runner.pass(at(30_000));
       expect(supreme.confirm).not.toHaveBeenCalled();
       expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
-      expect(db.alarms[0].payload?.roundTrip).toBe(true);
+      expect(db.alarms[0].payload).toMatchObject({ roundTrip: true, awaitExecutor: true, exitPending: true, agentVerdictId: 'v1' });
+    });
+
+    describe('the agent agreed: its exit is followed until it fills (item 3)', () => {
+      // The router answered the SUPREME_EXIT alarm EXIT_NOW (supreme asked) with the agent's verdict id.
+      const agreed = () => supremeAlarm({ status: 'ANSWERED', answeredAt: at(20_000), answer: 'EXIT_NOW (supreme asked)', answerVerdictId: 'v1' });
+
+      it('executor row FILLED → done, no owner-path exit, no confirm', async () => {
+        const { db, ownerExit, supreme, runner } = setup();
+        db.alarms.push(agreed());
+        db.executions.set('v1', { status: 'FILLED', reason: null });
+        await runner.pass(at(25_000));
+        await runner.pass(at(200_000));
+        expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+        expect(supreme.confirm).not.toHaveBeenCalled();
+        expect(db.alarms[0].payload).toMatchObject({ awaitExecutor: false, exitPending: false, executor: 'FILLED' });
+      });
+
+      it('executor row CLAIMED / PLACED → waits (no exit)', async () => {
+        for (const status of ['CLAIMED', 'PLACED']) {
+          const { db, ownerExit, runner } = setup();
+          db.alarms.push(agreed());
+          db.executions.set('v1', { status, reason: null });
+          await runner.pass(at(400_000));
+          expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+        }
+      });
+
+      it.each([
+        ['SKIPPED', 'USER_NOT_ENABLED'],
+        ['DRY_RUN', 'would SELL 75 …'],
+        ['SKIPPED', 'DAILY_CAP'],
+        ['SKIPPED', 'STALE_VERDICT'],
+        ['FAILED', 'BROKER_READ'],
+        ['REJECTED', 'RMS'],
+      ])('executor row %s %s → the supreme exit via the owner path (not owner-initiated) + the owner told', async (status, reason) => {
+        const { db, ownerExit, supreme, telegram, runner } = setup();
+        db.alarms.push(agreed());
+        db.executions.set('v1', { status, reason });
+        await runner.pass(at(25_000));
+        expect(supreme.confirm).not.toHaveBeenCalled();
+        expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(1);
+        expect(ownerExit.exitAsOwner.mock.calls[0][2]).toMatch(/^SUPREME_EXIT \(agent agreed, its exit not sent\): /);
+        expect(ownerExit.exitAsOwner.mock.calls[0][3]).toEqual({ ownerInitiated: false });
+        expect(telegram.sendMessage.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/agent agreed but its exit was not sent/);
+        expect(db.alarms[0].status).toBe('CLOSED');
+        await runner.pass(at(40_000));
+        expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(1);
+      });
+
+      it('no execution row at all: waits SUPREME_EXIT_AGENT_LOOK_MS after the agreement, then exits for the supreme', async () => {
+        const { db, ownerExit, runner } = setup();
+        db.alarms.push(supremeAlarm());
+        db.verdicts.push({ id: 'v1', verdict: 'EXIT_NOW', createdAt: at(20_000), trackerId: 'trk1' });
+        await runner.pass(at(30_000));
+        await runner.pass(at(30_000 + SUPREME_EXIT_AGENT_LOOK_MS - 1));
+        expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+        await runner.pass(at(30_000 + SUPREME_EXIT_AGENT_LOOK_MS));
+        expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(1);
+      });
+
+      it('the owner-path exit failing stays pending and is retried every pass', async () => {
+        const { db, ownerExit, runner } = setup();
+        ownerExit.exitAsOwner.mockRejectedValueOnce(new Error('broker 500'));
+        db.alarms.push(agreed());
+        db.executions.set('v1', { status: 'SKIPPED', reason: 'USER_NOT_ENABLED' });
+        await runner.pass(at(25_000));
+        expect(db.alarms[0].payload).toMatchObject({ exitPending: true, awaitExecutor: false });
+        await runner.pass(at(40_000));
+        expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(2);
+        expect(db.alarms[0].status).toBe('CLOSED');
+      });
+
+      it('the trade closes while waiting → CLOSED, no exit', async () => {
+        const { db, ownerExit, runner } = setup();
+        db.alarms.push(agreed());
+        db.openTrackers.clear();
+        await runner.pass(at(400_000));
+        expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+        expect(db.alarms[0].status).toBe('CLOSED');
+      });
     });
   });
 

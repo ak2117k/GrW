@@ -66,6 +66,13 @@ export class ManualExitService {
        * email: 'desk-manager' }`) names itself here; it is the same MANUAL trigger: no thesis gate, no AI daily cap.
        */
       reason?: string;
+      /**
+       * The OWNER asked for this exit (the app's Exit button, the Telegram Exit / bx tap). Under
+       * TRADE_AGENT_AUTHORITY=live only an owner-initiated exit may cancel the owner's resting orders (owner ruling
+       * 2026-11-27 "keep me alerting"); any other caller (backstops, supreme exits, the desk manager) leaves them and
+       * ends OPEN_ORDER_EXISTS → the owner is alerted. Explicit, never inferred from the MANUAL trigger. Off ⇒ no effect.
+       */
+      ownerInitiated?: boolean;
     } = {},
   ): Promise<ManualExitResult> {
     const now = opts.now ?? new Date();
@@ -115,7 +122,7 @@ export class ManualExitService {
     const row = await this.repo.findById(id);
     if (!row) throw new Error(`manual exit row ${id} vanished after its claim`);
     this.logger.warn(`[manual-exit] ${user.userId} requested Exit now on ${tracker.symbol} (${exchange}) — attempt ${v.id}`);
-    const done = this.executor.execute(id, v, cfg, now, 'MANUAL');
+    const done = this.executor.execute(id, v, cfg, now, 'MANUAL', { ownerInitiated: opts.ownerInitiated === true });
     return { row, started: true, done };
   }
 }

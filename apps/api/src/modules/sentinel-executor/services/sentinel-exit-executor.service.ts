@@ -69,6 +69,14 @@ const DISABLED_CFG = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false
 export type Sleep = (ms: number) => Promise<void>;
 export type AiExitOutcome = { status: AiExitStatus | 'DUPLICATE'; reason?: string };
 
+export interface ExecuteOptions {
+  /**
+   * MANUAL only: the OWNER asked for this exit (the app's Exit button, the Telegram Exit / bx tap). Under
+   * TRADE_AGENT_AUTHORITY=live only such an exit may cancel the owner's resting orders (owner ruling 2026-11-27).
+   */
+  ownerInitiated?: boolean;
+}
+
 /** FLOOR_BROKER_SL live: one position's stop request (FloorBrokerSlService builds it from the cycle's floor). */
 export interface FloorStopIntent {
   trackerId: string; symbol: string; exchange: string; token: string; trackerQty: number; entryTime: Date | null;
@@ -278,6 +286,7 @@ export class SentinelExitExecutor {
    */
   async execute(
     id: string, v: PendingVerdict, aiCfg: AutoExitConfig, now: Date = new Date(), trigger: ExitTrigger = 'AI',
+    opts: ExecuteOptions = {},
   ): Promise<AiExitOutcome> {
     // FLOOR_BROKER_SL: an exit and a floor-stop change never overlap on one position. The exit marks the
     // tracker busy (syncFloorStops leaves it alone) and first waits — bounded, exits are never blocked — for
@@ -288,7 +297,7 @@ export class SentinelExitExecutor {
       for (let waited = 0; this.stopBusy.has(key) && waited < STOP_IDLE_WAIT_MS; waited += STOP_IDLE_POLL_MS) {
         await this.sleep(STOP_IDLE_POLL_MS);
       }
-      return await this.executeAttempt(id, v, aiCfg, now, trigger);
+      return await this.executeAttempt(id, v, aiCfg, now, trigger, opts.ownerInitiated === true);
     } finally {
       const n = (this.exitBusy.get(key) ?? 1) - 1;
       if (n > 0) this.exitBusy.set(key, n);
@@ -297,14 +306,16 @@ export class SentinelExitExecutor {
   }
 
   private async executeAttempt(
-    id: string, v: PendingVerdict, aiCfg: AutoExitConfig, now: Date, trigger: ExitTrigger,
+    id: string, v: PendingVerdict, aiCfg: AutoExitConfig, now: Date, trigger: ExitTrigger, ownerInitiated: boolean,
   ): Promise<AiExitOutcome> {
     let cfg: AutoExitConfig = trigger === 'MANUAL' ? { ...aiCfg, mode: 'live' } : aiCfg;
-    // TRADE_AGENT_AUTHORITY=live (spec §4.5b, owner 2026-11-27 "keep me alerting"): an AI / price-trigger exit
-    // never cancels the owner's order — EXIT_CANCEL_OWNER_ORDERS and AI_AUTO_EXIT_CANCEL_PROTECTIVE are both
-    // ignored, so OPEN_ORDER_EXISTS goes to the owner (blockedExit). MANUAL (the owner's own Exit, Telegram Exit,
-    // backstop via the owner path) keeps today's behaviour.
-    if (trigger !== 'MANUAL' && (cfg.cancelOwnerOrders === true || cfg.cancelProtective) && this.authorityLive(v.trackerId)) {
+    // TRADE_AGENT_AUTHORITY=live (spec §4.5b, owner 2026-11-27 "keep me alerting"): only an OWNER-initiated exit (the
+    // app's Exit button, the Telegram Exit / bx tap: MANUAL + ownerInitiated) may cancel the owner's order. Every other
+    // exit — AI, price trigger, and MANUAL without ownerInitiated (backstops, supreme exits, the desk manager's direct
+    // fallback) — ignores EXIT_CANCEL_OWNER_ORDERS and AI_AUTO_EXIT_CANCEL_PROTECTIVE, so OPEN_ORDER_EXISTS goes to the
+    // owner (blockedExit). Off ⇒ unchanged for every caller.
+    const ownerAction = trigger === 'MANUAL' && ownerInitiated;
+    if (!ownerAction && (cfg.cancelOwnerOrders === true || cfg.cancelProtective) && this.authorityLive(v.trackerId)) {
       cfg = { ...cfg, cancelOwnerOrders: false, cancelProtective: false };
     }
 
@@ -366,7 +377,7 @@ export class SentinelExitExecutor {
           throw new SessionTokenExpiredError(first.detail ?? 'AG8001');
         }
         if (first.kind === 'skip' && first.reason === OWNER_ORDER_CANCEL_FAILED) return this.ownerCancelFailed(run, first.detail ?? '');
-        if (first.kind === 'skip' && first.reason === 'OPEN_ORDER_EXISTS' && trigger !== 'MANUAL' && this.escalation && this.authorityLive(v.trackerId)) {
+        if (first.kind === 'skip' && first.reason === 'OPEN_ORDER_EXISTS' && !ownerAction && this.escalation && this.authorityLive(v.trackerId)) {
           const out = await this.finish(id, v, 'SKIPPED', first.reason);
           this.escalateBlocked(id, v, first.detail);
           return out;

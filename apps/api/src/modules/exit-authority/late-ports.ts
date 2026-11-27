@@ -9,7 +9,7 @@ import {
   type SupremeConfirmPort,
   type TrackerWakePort,
 } from './exit-authority.tokens';
-import { HARD_LOSS_PROBE, OWNER_EXIT, type HardLossProbe, type OwnerExitPort } from './services/escalation-runner.service';
+import { HARD_LOSS_PROBE, OWNER_EXIT, type HardLossProbe, type OwnerExitOptions, type OwnerExitPort } from './services/escalation-runner.service';
 
 /**
  * LATE-BOUND PORTS (Task 7 wiring). Five ports the exit authority CONSUMES are IMPLEMENTED in modules that themselves
@@ -106,12 +106,18 @@ export function lateSupremeConfirm(ref: Pick<ModuleRef, 'get'>): Late<SupremeCon
 
 export function lateHardLossProbe(ref: Pick<ModuleRef, 'get'>): Late<HardLossProbe> {
   const b = new LateBinding<HardLossProbe>(ref, HARD_LOSS_PROBE, 'HARD_LOSS_PROBE');
-  return mark({ stillPastLimit: (trackerId: string) => b.require().stillPastLimit(trackerId) }, b);
+  return mark({
+    stillPastLimit: (trackerId: string) => b.require().stillPastLimit(trackerId),
+    // Optional facet: unbound or not implemented ⇒ unknown (null).
+    productIntraday: (trackerId: string) => b.resolve()?.productIntraday?.(trackerId) ?? null,
+  }, b);
 }
 
 export function lateOwnerExit(ref: Pick<ModuleRef, 'get'>): Late<OwnerExitPort> {
   const b = new LateBinding<OwnerExitPort>(ref, OWNER_EXIT, 'OWNER_EXIT');
-  return mark({ exitAsOwner: (userId: string, trackerId: string, reason: string) => b.require().exitAsOwner(userId, trackerId, reason) }, b);
+  return mark({
+    exitAsOwner: (userId: string, trackerId: string, reason: string, opts?: OwnerExitOptions) => b.require().exitAsOwner(userId, trackerId, reason, opts),
+  }, b);
 }
 
 export function lateAiHealth(ref: Pick<ModuleRef, 'get'>): Late<AiHealthPort> {

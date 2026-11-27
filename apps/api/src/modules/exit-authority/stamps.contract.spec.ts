@@ -8,6 +8,30 @@ import { CARRY_EXIT_STAMP } from '../intraday-carry/intraday-carry.service';
 import * as executor from '../sentinel-executor/domain/exit-authority';
 import { isPaperTracker, PAPER_TRACKER_PREFIX } from '../trade-sentinel/paper/paper-tracker';
 import { FLOOR_HARD_EXIT_STAMP, TARGET_LADDER_STAMP } from '../trade-sentinel/services/sentinel-cycle.service';
+import { DESK_TIGHTEN_PROMPT_VERSION } from '../desk-manager/services/desk-exit-actions.service';
+import {
+  SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION,
+  SENTINEL_OVERNIGHT_SCORECARD_COMPOSITE_PROMPT_VERSION,
+} from '../trade-sentinel/prompts/sentinel-overnight-prompt';
+import { sentinelCompositePromptVersion } from '../trade-sentinel/prompts/sentinel-system-prompt';
+import { isAgentVerdictStamp } from './domain/agent-verdict';
+
+describe('agent verdict stamp contract: only the live sentinel judge answers an alarm', () => {
+  it('every live sentinel judge stamp (all option combos, with and without +x1) is an agent stamp', () => {
+    const flags = ['cues', 'triggers', 'discipline', 'news', 'lessons', 'delta', 'equity', 'squareOff', 'anchors', 'authority'] as const;
+    for (let m = 0; m < 1 << flags.length; m++) {
+      const o = Object.fromEntries(flags.map((f, i) => [f, (m & (1 << i)) !== 0])) as never;
+      const stamp = sentinelCompositePromptVersion(o);
+      expect([stamp, isAgentVerdictStamp(stamp)]).toEqual([stamp, true]);
+    }
+  });
+  it('code-rule, desk TIGHTEN, signal SL and overnight stamps are not', () => {
+    for (const s of [FLOOR_HARD_EXIT_STAMP, TARGET_LADDER_STAMP, CARRY_EXIT_STAMP, DESK_TIGHTEN_PROMPT_VERSION, 'signal-trader-v1',
+      SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION, SENTINEL_OVERNIGHT_SCORECARD_COMPOSITE_PROMPT_VERSION, '', null]) {
+      expect([s, isAgentVerdictStamp(s)]).toEqual([s, false]);
+    }
+  });
+});
 
 describe('exit-authority stamp contract: executor copies == trade-sentinel exports', () => {
   it('FLOOR_HARD_EXIT_STAMP', () => expect(executor.FLOOR_HARD_EXIT_STAMP).toBe(FLOOR_HARD_EXIT_STAMP));

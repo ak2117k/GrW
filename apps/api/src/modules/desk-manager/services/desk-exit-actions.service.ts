@@ -1,6 +1,7 @@
 import { HttpException, Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { SETUP_WATCH_MARKET, type SetupWatchMarket, type WatchRef } from '../../ai-setups/services/setup-watch.service';
 import { AUTHORITY_STATE, TRADE_ALARMS, type AuthorityStatePort, type TradeAlarmsPort } from '../../exit-authority/exit-authority.tokens';
 import { parseAutoExitConfig } from '../../sentinel-executor/domain/auto-exit.config';
@@ -90,6 +91,7 @@ export class DeskExitActions implements ManagerTrackerLookup {
 
       // Trade agent exit authority (spec §4.4): the supreme's EXIT / BOOK on a live trade is an instruction alarm to
       // that trade's agent, not a sell. Off / not wired ⇒ today's manual-exit path below.
+      let alarmFailed: string | null = null;
       if (this.alarms && authorityLive(this.authority)) {
         try {
           await this.alarms.raise({
@@ -106,10 +108,18 @@ export class DeskExitActions implements ManagerTrackerLookup {
           this.logger.warn(`[desk-manager] ${kind} ${pos?.symbol ?? trackerId}: asked the trade agent (SUPREME_EXIT alarm)`);
           return { status: 'PENDING', detail: 'asked the trade agent' };
         } catch (err) {
-          // The alarm could not be raised: the supreme wins disagreements, so its exit goes ahead the old way.
-          this.logger.error(`[desk-manager] ${kind} ${pos?.symbol ?? trackerId}: SUPREME_EXIT alarm failed (${errText(err)}) — sending through the exit executor`);
+          // The alarm could not be raised: the supreme wins disagreements, so its exit goes ahead the old way — made
+          // visible (result detail + ops alert). It is NOT owner-initiated, so under live it never cancels the owner's
+          // resting order (OPEN_ORDER_EXISTS → the owner is alerted instead).
+          alarmFailed = errText(err);
+          this.logger.error(`[desk-manager] ${kind} ${pos?.symbol ?? trackerId}: SUPREME_EXIT alarm failed (${alarmFailed}) — sending through the exit executor`);
+          void sendOpsAlert(
+            `desk-supreme-exit-direct:${trackerId}`,
+            `GrW ALERT: desk manager ${kind} on ${pos?.symbol ?? trackerId}: SUPREME_EXIT alarm failed (${alarmFailed.slice(0, 200)}), sent directly through the exit executor (the trade agent was not asked).`,
+          ).catch(() => undefined);
         }
       }
+      const direct = alarmFailed !== null ? `SUPREME_EXIT alarm failed, sent directly (${alarmFailed.slice(0, 200)}): ` : '';
 
       const r = await this.manual.request(
         { userId: owner, role: 'ADMIN', email: DESK_MANAGER_CALLER_EMAIL },
@@ -117,12 +127,12 @@ export class DeskExitActions implements ManagerTrackerLookup {
         { now: ctx.now, reason: why },
       );
       if (!r.started) {
-        return { status: 'PENDING', detail: `an exit attempt is already working (${r.row.status}, ${r.row.verdictId})`, ref: r.row.id };
+        return { status: 'PENDING', detail: `${direct}an exit attempt is already working (${r.row.status}, ${r.row.verdictId})`, ref: r.row.id };
       }
       void r.done
         .then((o) => this.logger.warn(`[desk-manager] ${kind} ${pos?.symbol ?? trackerId}: ${o ? o.status : 'no outcome'} (attempt ${r.row.id})`))
         .catch((err) => this.logger.error(`[desk-manager] ${kind} ${pos?.symbol ?? trackerId} attempt ${r.row.id}: ${errText(err)}`));
-      return { status: 'DONE', detail: `${kind} sent through the exit executor (attempt ${r.row.verdictId})`, ref: r.row.id };
+      return { status: 'DONE', detail: `${direct}${kind} sent through the exit executor (attempt ${r.row.verdictId})`, ref: r.row.id };
     } catch (err) {
       // ManualExitService refuses with 403/404/422 (closed tracker, not F&O, no qty unit): a refusal, not a crash.
       if (err instanceof HttpException) return refused(errText(err));

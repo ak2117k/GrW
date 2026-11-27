@@ -1714,9 +1714,9 @@ describe('SentinelExitExecutor — trade agent exit authority (TRADE_AGENT_AUTHO
     expect(h.escalation.blockedExit).not.toHaveBeenCalled();
   });
 
-  it('live: the owner\'s own MANUAL exit blocked by an open order is not escalated (it is the owner)', async () => {
+  it('live: the owner\'s own (owner-initiated) MANUAL exit blocked by an open order is not escalated (it is the owner)', async () => {
     const h = harness({ authority: { live: true }, books: [OWNER_ORDER_BOOK] });
-    await h.ex.execute('row1', { ...V, id: 'man_x' }, LIVE, NOW, 'MANUAL');
+    await h.ex.execute('row1', { ...V, id: 'man_x' }, LIVE, NOW, 'MANUAL', { ownerInitiated: true });
     await flush();
     expect(h.escalation.blockedExit).not.toHaveBeenCalled();
   });
@@ -1784,18 +1784,48 @@ describe('SentinelExitExecutor — trade agent exit authority (TRADE_AGENT_AUTHO
         expect(h.escalation.blockedExit).not.toHaveBeenCalled();
       });
 
-      it('live MANUAL: the protective SL is cancelled as today', async () => {
+      it('live MANUAL owner-initiated (the owner\'s own Exit): the protective SL is cancelled as today', async () => {
         const h = harness({ tracker: TRK, authority: { live: true }, positions: [pos('40'), pos('40'), pos('0')], books: [env([sl()]), slGone, slGone, slFilled] });
-        await h.ex.execute('row1', { ...SV, id: 'man_x' }, CP, NOW, 'MANUAL');
+        await h.ex.execute('row1', { ...SV, id: 'man_x' }, CP, NOW, 'MANUAL', { ownerInitiated: true });
         expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('STOPLOSS', 'SL1');
         expect(h.escalation.blockedExit).not.toHaveBeenCalled();
       });
+
+      it('live MANUAL NOT owner-initiated (backstop / supreme exit): the protective SL is NOT cancelled → OPEN_ORDER_EXISTS + blockedExit', async () => {
+        const h = harness({ tracker: TRK, authority: { live: true }, positions: [pos('40')], books: [env([sl()])] });
+        await expect(h.ex.execute('row1', { ...SV, id: 'man_x' }, CP, NOW, 'MANUAL')).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+        await flush();
+        expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+        expect(h.escalation.blockedExit).toHaveBeenCalledTimes(1);
+      });
     });
 
-    it('live MANUAL (owner path): keeps today\'s behaviour — the owner order is cancelled and the exit sent', async () => {
+    it('live MANUAL owner-initiated (app Exit button / Telegram Exit or bx): the owner order is cancelled and the exit sent', async () => {
       const h = harness({ tracker: TRK, authority: { live: true }, positions: [pos('40'), pos('40'), pos('0')], books: [env([own()]), cancelled, cancelled, filled] });
+      await expect(h.ex.execute('row1', { ...SV, id: 'man_x' }, CFG, NOW, 'MANUAL', { ownerInitiated: true })).resolves.toEqual({ status: 'FILLED' });
+      expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('NORMAL', 'OWN1');
+      await flush();
+      expect(h.escalation.blockedExit).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['no options (backstop / supreme exit / desk fallback)', undefined],
+      ['ownerInitiated false', { ownerInitiated: false }],
+    ])('owner ruling 2026-11-27: live MANUAL %s → the owner order is NOT cancelled; SKIPPED OPEN_ORDER_EXISTS → blockedExit', async (_n, opts) => {
+      const h = harness({ tracker: TRK, authority: { live: true }, positions: [pos('40')], books: [env([own()])] });
+      await expect(h.ex.execute('row1', { ...SV, id: 'man_x' }, CFG, NOW, 'MANUAL', opts)).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+      await flush();
+      expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+      expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+      expect(h.escalation.blockedExit).toHaveBeenCalledTimes(1);
+    });
+
+    it('off: MANUAL without ownerInitiated (today\'s desk manager / any caller) cancels the owner order exactly as today', async () => {
+      const h = harness({ tracker: TRK, authority: { live: false }, positions: [pos('40'), pos('40'), pos('0')], books: [env([own()]), cancelled, cancelled, filled] });
       await expect(h.ex.execute('row1', { ...SV, id: 'man_x' }, CFG, NOW, 'MANUAL')).resolves.toEqual({ status: 'FILLED' });
       expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('NORMAL', 'OWN1');
+      await flush();
+      expect(h.escalation.blockedExit).not.toHaveBeenCalled();
     });
   });
 });

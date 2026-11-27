@@ -1,4 +1,5 @@
 import type { AlarmRow, AlarmRule, AlarmUrgency } from '../../exit-authority/exit-authority.tokens';
+import { isAgentVerdictStamp } from '../../exit-authority/domain/agent-verdict';
 import { TRACKER_WAKE_MIN_GAP_MS } from '../../exit-authority/domain/timings';
 import type { TripwireFire } from '../tripwires/types';
 import type { PacketAlarmChart } from './alarm-chart';
@@ -65,9 +66,13 @@ export function leadAlarm(rows: readonly AlarmRow[] | undefined, nowMs: number):
   return [...live].sort((a, b) => URGENCY_RANK[a.urgency] - URGENCY_RANK[b.urgency] || alarmRaisedMs(b) - alarmRaisedMs(a))[0];
 }
 
-/** The newest verdict the AGENT wrote (never a `rule:` stamp), from the cycle's recent live rows. */
+/**
+ * The newest verdict the AGENT wrote, from the cycle's recent live rows: the sentinel judge's stamp only
+ * (exit-authority/domain/agent-verdict.ts). A `rule:` stamp, a desk TIGHTEN row or a signal SL row is not a look,
+ * so it never suppresses the forced look.
+ */
 export function lastAgentVerdictMs(recent: ReadonlyArray<{ createdAt: Date; promptVersion?: string | null }>): number | null {
-  const row = recent.find((r) => !String(r.promptVersion ?? '').startsWith('rule:'));
+  const row = recent.find((r) => isAgentVerdictStamp(r.promptVersion));
   return row ? ms(row.createdAt) : null;
 }
 

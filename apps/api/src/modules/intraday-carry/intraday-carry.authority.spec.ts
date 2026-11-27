@@ -97,8 +97,18 @@ describe('IntradayCarryService — exit authority (live)', () => {
     expect(h.raise.mock.calls[0][0].deadline).toEqual(SQUARE_OFF);
   });
 
-  it('the judge\'s own EXIT (an LLM verdict) is unchanged: EXIT_NOW recorded, no alarm', async () => {
+  it("the judge's own EXIT: EXIT_NOW recorded as before AND the deadline CARRY alarm raised first (the router then finds it, deadline intact)", async () => {
     const h = harness({ book: () => [row('INTRADAY')], verdict: 'EXIT_NOW' });
+    await h.svc.runOnce(ist(15, 6));
+    expect(h.raise).toHaveBeenCalledTimes(1);
+    expect(h.raise.mock.calls[0][0]).toMatchObject({ rule: 'CARRY', urgency: 'deadline', deadline: SQUARE_OFF });
+    expect(h.raise.mock.calls[0][0].reason).toMatch(/^judge /);
+    expect(h.verdicts.record).toHaveBeenCalledWith(expect.objectContaining({ verdict: 'EXIT_NOW', promptVersion: CARRY_EXIT_STAMP }));
+    expect(h.raise.mock.invocationCallOrder[0]).toBeLessThan(h.verdicts.record.mock.invocationCallOrder[0]);
+  });
+
+  it("off: the judge's own EXIT records the EXIT_NOW exactly as today, no alarm", async () => {
+    const h = harness({ book: () => [row('INTRADAY')], verdict: 'EXIT_NOW', live: false });
     await h.svc.runOnce(ist(15, 6));
     expect(h.raise).not.toHaveBeenCalled();
     expect(h.verdicts.record).toHaveBeenCalledWith(expect.objectContaining({ verdict: 'EXIT_NOW', promptVersion: CARRY_EXIT_STAMP }));

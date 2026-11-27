@@ -33,6 +33,12 @@ class FakeRepo {
     Object.assign(r, patch);
     return { ...r };
   }
+  async answerIfOpen(id: string, patch: { answeredAt: Date; answerVerdictId: string; answer: string }): Promise<boolean> {
+    const r = this.rows.find((x) => x.id === id && ['OPEN', 'SNOOZED'].includes(x.status));
+    if (!r) return false;
+    Object.assign(r, { status: 'ANSWERED', ...patch });
+    return true;
+  }
 }
 
 const T0 = new Date('2026-11-27T05:00:00.000Z');
@@ -139,7 +145,9 @@ describe('TradeAlarmsService', () => {
     const first = await svc.raise(floor(), T0);
     await svc.answer(first!.id, 'v1', 'HOLD', at(20_000));
     expect(await svc.raise(floor(), at(60_000))).toBeNull();
-    const fresh = await svc.raise(floor(), at(REALARM_EVERY_MS));
+    // The interval runs from the agent's answer (20 s), not from the raise: nothing yet at REALARM_EVERY_MS.
+    expect(await svc.raise(floor(), at(REALARM_EVERY_MS))).toBeNull();
+    const fresh = await svc.raise(floor(), at(20_000 + REALARM_EVERY_MS));
     expect(fresh).not.toBeNull();
     expect(fresh!.id).not.toBe(first!.id);
     expect(fresh!.status).toBe('OPEN');
@@ -205,6 +213,53 @@ describe('TradeAlarmsService', () => {
       answeredAt: at(15_000),
       answerVerdictId: 'verdict-9',
       answer: 'HOLD: VWAP holds',
+    });
+  });
+
+  it.each(['BACKSTOPPED', 'CLOSED'] as const)('a late answer never resurrects a %s alarm', async (status) => {
+    const { repo, svc } = setup();
+    const row = await svc.raise(floor(), T0);
+    repo.rows[0].status = status;
+    await svc.answer(row!.id, 'verdict-9', 'HOLD', at(30_000));
+    expect(repo.rows[0]).toMatchObject({ status, answeredAt: null, answerVerdictId: null, answer: null });
+  });
+
+  it('a second answer does not overwrite the first', async () => {
+    const { repo, svc } = setup();
+    const row = await svc.raise(floor(), T0);
+    await svc.answer(row!.id, 'v1', 'EXIT_NOW (supreme asked)', at(10_000));
+    await svc.answer(row!.id, 'v2', 'HOLD', at(20_000));
+    expect(repo.rows[0]).toMatchObject({ answerVerdictId: 'v1', answer: 'EXIT_NOW (supreme asked)', answeredAt: at(10_000) });
+  });
+
+  describe('a deadline is never lost (CARRY)', () => {
+    const deadline = at(30 * 60_000);
+    const carryDeadline = floor({ rule: 'CARRY', urgency: 'deadline', deadline, severityN: null, reason: 'EXPIRY_DAY' });
+    const routerCarry = floor({ rule: 'CARRY', urgency: 'urgent', severityN: null, reason: 'judge EXIT: premium decaying' });
+
+    it("a refresh without a deadline (the router's urgent CARRY) keeps the open alarm's deadline and deadline urgency", async () => {
+      const { repo, svc } = setup();
+      await svc.raise(carryDeadline, T0);
+      const r = await svc.raise(routerCarry, at(REALARM_EVERY_MS));
+      expect(r).not.toBeNull();
+      expect(repo.rows).toHaveLength(1);
+      expect(repo.rows[0]).toMatchObject({ deadline, urgency: 'deadline', reason: 'judge EXIT: premium decaying' });
+    });
+
+    it('a fresh alarm after an answered deadline alarm inherits its deadline', async () => {
+      const { svc } = setup();
+      const first = await svc.raise(carryDeadline, T0);
+      await svc.answer(first!.id, 'v1', 'HOLD', at(10_000));
+      const fresh = await svc.raise(routerCarry, at(10_000 + REALARM_EVERY_MS));
+      expect(fresh).toMatchObject({ deadline, urgency: 'deadline' });
+    });
+
+    it('a raise that carries its own deadline still sets it', async () => {
+      const { repo, svc } = setup();
+      await svc.raise(carryDeadline, T0);
+      const later = at(40 * 60_000);
+      await svc.raise({ ...carryDeadline, deadline: later }, at(REALARM_EVERY_MS));
+      expect(repo.rows[0].deadline).toEqual(later);
     });
   });
 

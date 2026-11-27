@@ -392,6 +392,23 @@ describe('exit authority — the forced alarm look', () => {
     expect(t.judge).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['a desk-manager TIGHTEN row', 'desk-manager/1'],
+    ['a signal-trader SL row', 'signal-trader-v1'],
+    ['an overnight review row', 'o4/t2'],
+  ])('%s newer than the alarm does not count as the agent\'s answer (the forced look still runs)', async (_n, promptVersion) => {
+    const other = { verdict: 'HOLD', createdAt: ist('21:19:58'), promptVersion, packet: {} };
+    const t = makeSvc({ open: [alarm()], recent: [other, lastHold] });
+    await t.pass('21:20:00', tick(370, 9540));
+    expect(t.judge).toHaveBeenCalledTimes(1);
+  });
+
+  it('a sentinel verdict with the +x1 authority stamp newer than the alarm IS the answer', async () => {
+    const t = makeSvc({ open: [alarm()], recent: [{ ...lastHold, createdAt: ist('21:19:55'), promptVersion: 'v9+l1+d1+e1+s1+a1+x1/t2' }] });
+    await t.pass('21:20:00', tick(370, 9540));
+    expect(t.judge).not.toHaveBeenCalled();
+  });
+
   it('a snoozed alarm (owner tapped Hold) forces nothing while the snooze runs', async () => {
     const t = makeSvc({ open: [alarm({ status: 'SNOOZED', snoozedUntil: ist('21:30:00') })], recent: [lastHold] });
     await t.pass('21:20:00', tick(370, 9540));
@@ -430,5 +447,22 @@ describe('exit authority — the forced alarm look', () => {
     const r = await t.pass('21:20:00', tick(370, 9540));
     expect(r.failed).toBe(0);
     expect(t.judge).not.toHaveBeenCalled();
+  });
+});
+
+describe('exit authority — HARD_LOSS_PROBE (hardLossStillPast) honours the owner hold list', () => {
+  beforeEach(quiet);
+  afterEach(() => jest.restoreAllMocks());
+
+  it('a position on AI_AUTO_EXIT_HOLD is never "still past the limit" (the backstop cannot sell it), as in rescueHardLoss', async () => {
+    const held = makeSvc({ gate: parseJudgeGateConfig({ AI_AUTO_EXIT_HOLD: SYMBOL }) });
+    await held.pass('21:00:00', tick(380.4, 9531));
+    await expect(held.svc.hardLossStillPast('t-pe')).resolves.toBe(false);
+  });
+
+  it('a position NOT on the hold list goes on to the price read (here: none bound → refuses to guess)', async () => {
+    const free = makeSvc({ gate: parseJudgeGateConfig({}) });
+    await free.pass('21:00:00', tick(380.4, 9531));
+    await expect(free.svc.hardLossStillPast('t-pe')).rejects.toThrow(/quick price/);
   });
 });

@@ -1613,6 +1613,9 @@ export class SentinelCycleService {
     const entry = this.rosterEntries.get(trackerId);
     if (!entry) throw new Error(`tracker ${trackerId} is not on the sentinel roster in this process`);
     if (entry.ownership !== 'SENTINEL' || isPaperTracker(trackerId)) return false;
+    // The owner hold list (AI_AUTO_EXIT_HOLD) is untouched, exactly as in rescueHardLoss: never "past the limit".
+    const hold = this.gateCfg?.hold ?? this.futileCfg?.hold;
+    if (hold && isHeldPosition(hold, entry)) return false;
     if (!this.ticks.quickPrice) throw new Error('the tick source has no quick price read');
     const q = await withTimeout(this.ticks.quickPrice(trackerId), QUICK_PRICE_TIMEOUT_MS, () => new Error('quick price read timed out'));
     if (!isDerivativeSegment(q.segment)) return false;

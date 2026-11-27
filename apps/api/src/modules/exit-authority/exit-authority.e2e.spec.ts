@@ -23,6 +23,7 @@ import { SentinelExitPoller } from '../sentinel-executor/services/sentinel-exit-
 import type { RosterEntry } from '../trade-sentinel/services/roster.service';
 import { SentinelCycleService, type TickReading } from '../trade-sentinel/services/sentinel-cycle.service';
 import * as opsAlert from '../../common/utils/ops-alert';
+import { isAgentVerdictStamp } from './domain/agent-verdict';
 import { BACKSTOP_OWNER_SILENT_MS } from './domain/timings';
 import type { AlarmRow, AlarmRule, ConfirmResult } from './exit-authority.tokens';
 import type { AgentVerdictRef, TradeAlarmPatch } from './repositories/trade-alarm.repository';
@@ -66,9 +67,15 @@ class Db {
     Object.assign(r, patch);
     return { ...r };
   }
+  async answerIfOpen(id: string, patch: { answeredAt: Date; answerVerdictId: string; answer: string }): Promise<boolean> {
+    const r = this.alarms.find((a) => a.id === id && ['OPEN', 'SNOOZED'].includes(a.status));
+    if (!r) return false;
+    Object.assign(r, { status: 'ANSWERED', ...patch });
+    return true;
+  }
   async latestAgentVerdict(trackerId: string, since: Date): Promise<AgentVerdictRef | null> {
     const v = this.verdicts
-      .filter((x) => x.trackerId === trackerId && x.createdAt > since && !x.promptVersion.startsWith('rule:'))
+      .filter((x) => x.trackerId === trackerId && x.createdAt > since && isAgentVerdictStamp(x.promptVersion))
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
     return v ? { id: v.id, verdict: v.verdict, createdAt: v.createdAt } : null;
   }
@@ -84,6 +91,13 @@ class Db {
   }
   async setTrackerMessageId(trackerId: string, id: number): Promise<void> {
     for (const a of this.alarms) if (a.trackerId === trackerId && ['OPEN', 'SNOOZED', 'ANSWERED'].includes(a.status)) a.telegramMessageId = id;
+  }
+  async executionForVerdict(verdictId: string): Promise<{ status: string; reason: string | null } | null> {
+    const c = [...this.claimed.values()].find((x) => x.verdictId === verdictId);
+    return c ? { status: c.status, reason: c.reason ?? null } : null;
+  }
+  async carryConverted(): Promise<boolean> {
+    return false;
   }
   // ── sentinel_verdicts (the cycle's verdict repository) ──
   verdictStore(clock: () => Date) {
@@ -277,6 +291,8 @@ describe('exit authority e2e — every AI route down 10 min, past the hard loss,
     delete process.env.HARD_LOSS_CEILING_BY_CLASS;
     process.env.AI_AUTO_EXIT_ENABLED = 'true';
     process.env.AI_AUTO_EXIT_USER_IDS = USER;
+    // Backstops honour the executor's mode (dry-run rehearses, never sells): this account is live.
+    process.env.AI_AUTO_EXIT_MODE = 'live';
   });
   afterEach(() => {
     process.env = { ...ENV };
@@ -340,5 +356,70 @@ describe('exit authority e2e — every AI route down 10 min, past the hard loss,
     expect(trackerId).toBe('t-nifty');
     expect(opts.reason).toMatch(/^BACKSTOP HARD_LOSS: /);
     expect(db.alarms[0].status).toBe('BACKSTOPPED');
+  });
+});
+
+describe('exit authority seam — SUPREME_EXIT: the router answers, the runner reads it as agreement and follows the agent\'s exit', () => {
+  const T = new Date('2026-11-27T06:00:00Z');
+  const sec = (s: number) => new Date(T.getTime() + s * 1000);
+
+  beforeEach(quiet);
+  afterEach(() => jest.restoreAllMocks());
+
+  async function seam() {
+    const db = new Db();
+    db.open.add('t1');
+    const state = { isLive: () => true };
+    const alarms = new TradeAlarmsService(db as never, { wakeTracker: jest.fn() }, state);
+    // The desk manager's EXIT became a SUPREME_EXIT alarm (Task 5); the agent then answered EXIT_NOW.
+    const ask = await alarms.raise({
+      userId: USER, trackerId: 't1', symbol: 'NIFTY25DEC26000CE', rule: 'SUPREME_EXIT', urgency: 'normal',
+      reason: 'supreme asks EXIT: sector rolling over', wouldHave: 'MANUAL EXIT (desk manager → manual exit)',
+    }, T);
+    db.verdicts.push({ id: 'v-agent', userId: USER, trackerId: 't1', symbol: 'NIFTY25DEC26000CE', verdict: 'EXIT_NOW', reason: 'agree', promptVersion: 'v9+x1/t2', createdAt: sec(20) });
+    const repo = db.execRepo();
+    const routerConfirm = { confirm: jest.fn() };
+    const router = new ExitAuthorityRouter(repo as never, state, alarms, routerConfirm, undefined, { blockedExit: jest.fn() });
+    const routed = await router.route({ id: 'v-agent', userId: USER, trackerId: 't1', symbol: 'NIFTY25DEC26000CE', reason: 'agree', createdAt: sec(20), promptVersion: 'v9+x1/t2' }, { mode: 'live', hold: [] });
+
+    const telegram = { sendMessage: jest.fn(async () => 7), editMessage: jest.fn(async () => undefined), deleteMessage: jest.fn(async () => undefined) };
+    const ownerExit = { exitAsOwner: jest.fn(async (..._args: unknown[]) => 'man_t1_1') };
+    const runnerConfirm = { confirm: jest.fn() };
+    const runner = new EscalationRunner(
+      db as never, db as never, alarms, state as unknown as AuthorityStateService, telegram as never, new TrackerMessages(),
+      ownerExit, undefined, undefined, runnerConfirm, undefined,
+    );
+    return { db, ask: ask!, routed, routerConfirm, runner, runnerConfirm, ownerExit, telegram };
+  }
+
+  it('router EXECUTE + answer EXIT_NOW → runner: agreed — no second confirm, no owner exit while the executor works / after it fills', async () => {
+    const { db, ask, routed, routerConfirm, runner, runnerConfirm, ownerExit } = await seam();
+    expect(routed).toEqual({ kind: 'EXECUTE' });
+    expect(routerConfirm.confirm).not.toHaveBeenCalled();
+    expect(db.alarms.find((a) => a.id === ask.id)).toMatchObject({ status: 'ANSWERED', answer: 'EXIT_NOW (supreme asked)', answerVerdictId: 'v-agent' });
+
+    db.claimed.set('row-v-agent', { verdictId: 'v-agent', status: 'CLAIMED' });
+    await runner.pass(sec(25));
+    await runner.pass(sec(200));
+    expect(runnerConfirm.confirm).not.toHaveBeenCalled();
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+
+    db.claimed.get('row-v-agent')!.status = 'FILLED';
+    await runner.pass(sec(215));
+    db.open.delete('t1');
+    await runner.pass(sec(230));
+    expect(runnerConfirm.confirm).not.toHaveBeenCalled();
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+    expect(db.alarms.find((a) => a.id === ask.id)?.status).toBe('CLOSED');
+  });
+
+  it('the executor skips the agent\'s exit (e.g. user not on the AI allow-list) → the runner exits for the supreme via the owner path, not cancelling owner orders', async () => {
+    const { db, runner, runnerConfirm, ownerExit, telegram } = await seam();
+    db.claimed.set('row-v-agent', { verdictId: 'v-agent', status: 'SKIPPED', reason: 'USER_NOT_ENABLED' });
+    await runner.pass(sec(25));
+    expect(runnerConfirm.confirm).not.toHaveBeenCalled();
+    expect(ownerExit.exitAsOwner).toHaveBeenCalledTimes(1);
+    expect(ownerExit.exitAsOwner.mock.calls[0]).toEqual([USER, 't1', expect.stringMatching(/^SUPREME_EXIT \(agent agreed, its exit not sent\)/), { ownerInitiated: false }]);
+    expect(telegram.sendMessage.mock.calls.map((c) => String((c as unknown[])[0])).join('\n')).toMatch(/USER_NOT_ENABLED/);
   });
 });

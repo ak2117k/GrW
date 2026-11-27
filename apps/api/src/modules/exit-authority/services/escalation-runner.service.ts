@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { AI_HEALTH, type AiHealthPort } from '../../ai-gateway/audit/failover-transport';
+import { isExitAnswer } from '../domain/agent-verdict';
 import { backstopDue, escalationDue, isSnoozed } from '../domain/alarm';
 import { REALERT_EVERY_MS, SUPREME_EXIT_AGENT_LOOK_MS } from '../domain/timings';
 import {
@@ -30,20 +31,52 @@ import { AuthorityStateService } from './authority-state.service';
 export const HARD_LOSS_PROBE = Symbol('HARD_LOSS_PROBE');
 export interface HardLossProbe {
   stillPastLimit(trackerId: string): Promise<boolean>;
+  /**
+   * The position's broker product is intraday (MIS/INTRADAY): true / false, or null when unknown (no fresh read).
+   * Optional: absent or null ⇒ unknown. Only a positive `false` (converted to carry-forward) disarms the deadline backstop.
+   */
+  productIntraday?(trackerId: string): boolean | null;
 }
 
 export const OWNER_EXIT = Symbol('OWNER_EXIT');
+export interface OwnerExitOptions {
+  /**
+   * The OWNER asked for this exit (the Telegram Exit / bx tap). Only an owner-initiated exit may cancel the owner's
+   * resting orders under TRADE_AGENT_AUTHORITY=live (owner ruling 2026-11-27 "keep me alerting"). Backstops and supreme
+   * exits leave it false: an order on the contract ends OPEN_ORDER_EXISTS and goes to the owner (blockedExit).
+   */
+  ownerInitiated?: boolean;
+}
 export interface OwnerExitPort {
   /** Places the owner-path exit; resolves a short result (e.g. the attempt id). Throws when refused. */
-  exitAsOwner(userId: string, trackerId: string, reason: string): Promise<string>;
+  exitAsOwner(userId: string, trackerId: string, reason: string, opts?: OwnerExitOptions): Promise<string>;
+}
+
+/**
+ * Thrown by OWNER_EXIT for a BACKSTOP while AI_AUTO_EXIT_MODE=dry-run: nothing was sold, the backstop is rehearsed
+ * (recorded on the alarm, the owner told "would exit"), like the executor's own dry-run.
+ */
+export class BackstopRehearsal extends Error {
+  constructor(readonly detail: string) {
+    super(detail);
+    this.name = 'BackstopRehearsal';
+  }
 }
 
 export const ESCALATION_PASS_MS = 15_000;
 /** "Cannot act" Telegram lines repeat at most this often per alarm (the ERROR log is every pass). */
 const CANNOT_ACT_REPEAT_MS = 300_000;
+/** A carry conversion counts for a deadline alarm when it was decided up to this long before the alarm was raised. */
+const CARRY_LOOKBACK_MS = 18 * 3_600_000;
 const HARD_LOSS_RULES = new Set(['HARD_LOSS', 'HARD_LOSS_FAST']);
-/** A sentinel verdict that is an exit (the agent agrees with a supreme exit request). */
-const isExitVerdict = (v: string): boolean => /^EXIT_NOW\b/i.test(v.trim());
+/**
+ * The agent's own exit for a supreme request, read from its ai_exit_executions row: FILLED = done; CLAIMED / PLACED =
+ * still working (PLACED is followed to its fill, since a placed order can still come back REJECTED); any of
+ * EXEC_ENDED = the executor will not sell it (not on the AI allow-list, dry-run, daily cap, stale, gate, rejected…),
+ * so the runner exits for the supreme through the owner path.
+ */
+const EXEC_DONE = new Set(['FILLED']);
+const EXEC_ENDED = new Set(['SKIPPED', 'FAILED', 'DRY_RUN', 'REJECTED']);
 const LOG = '[exit-authority]';
 
 export const alarmButtons = (alarmId: string): InlineButton[][] => [
@@ -126,6 +159,7 @@ export class EscalationRunner {
           if (!open.has(a.trackerId)) await this.closeGone(a);
           else if (a.rule === 'SUPREME_EXIT') await this.supremeExit(a, now);
           else if (a.status !== 'ANSWERED') await this.openAlarm(a, now, aiDown);
+          else if (a.urgency === 'deadline') await this.answeredDeadline(a, now);
         } catch (err) {
           this.log.error(`${LOG} escalation pass failed on alarm ${a.id} (${a.symbol} ${a.rule}): ${(err as Error)?.message}`);
         }
@@ -209,7 +243,7 @@ export class EscalationRunner {
 
     // Backstop (the only two code sells). Probe the hard loss only when everything else already says due.
     const pre = backstopDue(a, { aiDown, stillPastLimit: true }, now);
-    if (pre === 'DEADLINE') return this.backstop(a, 'DEADLINE', now);
+    if (pre === 'DEADLINE') return this.deadlineBackstop(a, now);
     if (pre === 'HARD_LOSS' && (await this.stillPastLimit(a))) return this.backstop(a, 'HARD_LOSS', now);
 
     // Escalate to the owner.
@@ -239,13 +273,55 @@ export class EscalationRunner {
     await this.alarmRepo.update(a.id, { alertedAt: now, alertCount: 1, telegramMessageId: messageId });
   }
 
+  /**
+   * Owner ruling 2026-11-27 (§4.5a.2): an ANSWERED `deadline` alarm (the agent said HOLD, or its EXIT did not go
+   * through) is still exited at deadline − DEADLINE_EXIT_LEAD_MS, unless converted to carry or the tracker closed.
+   */
+  private async answeredDeadline(a: AlarmRow, now: Date): Promise<void> {
+    if (backstopDue(a, { aiDown: false, stillPastLimit: false }, now) === 'DEADLINE') await this.deadlineBackstop(a, now);
+  }
+
+  /** The broker-deadline backstop, unless the position was converted to carry-forward (then the alarm is moot). */
+  private async deadlineBackstop(a: AlarmRow, now: Date): Promise<void> {
+    if (!(await this.stillIntraday(a))) {
+      const messageId = (await this.currentMessageId(a.trackerId)) ?? a.telegramMessageId;
+      await this.alarmRepo.update(a.id, { status: 'CLOSED' });
+      this.log.warn(`${LOG} alarm ${a.id} ${a.symbol} ${a.rule} CLOSED: converted to carry-forward, the broker deadline no longer applies`);
+      if (messageId != null && !this.otherAlertedOpen(a)) await this.edit(messageId, `${a.symbol}: converted to carry-forward. Deadline alarm ${a.rule} closed, no exit.`);
+      return;
+    }
+    return this.backstop(a, 'DEADLINE', now);
+  }
+
+  /**
+   * Still an intraday (MIS) position? False only on positive evidence of a carry conversion: the sentinel's fresh
+   * product read says not intraday, or the carry engine confirmed CONVERTED today. Unknown ⇒ true (the backstop runs,
+   * so Angel never squares off at the bell).
+   */
+  private async stillIntraday(a: AlarmRow): Promise<boolean> {
+    try {
+      if (this.probe?.productIntraday?.(a.trackerId) === false) return false;
+    } catch (err) {
+      this.log.warn(`${LOG} product read failed for ${a.symbol} (${a.trackerId}): ${(err as Error)?.message}`);
+    }
+    try {
+      if (await this.esc.carryConverted(a.trackerId, new Date(a.raisedAt.getTime() - CARRY_LOOKBACK_MS))) return false;
+    } catch (err) {
+      this.log.warn(`${LOG} carry conversion read failed for ${a.symbol} (${a.trackerId}): ${(err as Error)?.message}`);
+    }
+    return true;
+  }
+
   private async backstop(a: AlarmRow, kind: 'DEADLINE' | 'HARD_LOSS', now: Date): Promise<void> {
     const reason = `BACKSTOP ${kind}: ${a.symbol} ${a.rule}: ${a.reason}`.slice(0, 480);
     if (!this.ownerExit) return this.cannotAct(a, `backstop ${kind}`, now);
     let result: string;
     try {
-      result = await this.ownerExit.exitAsOwner(a.userId, a.trackerId, reason);
+      // Never owner-initiated: under live a backstop does not cancel the owner's resting order (OPEN_ORDER_EXISTS →
+      // the owner is alerted with Exit / Hold instead).
+      result = await this.ownerExit.exitAsOwner(a.userId, a.trackerId, reason, { ownerInitiated: false });
     } catch (err) {
+      if (err instanceof BackstopRehearsal) return this.rehearsed(a, kind, err.detail);
       const msg = (err as Error)?.message ?? 'error';
       this.log.error(`${LOG} backstop ${kind} exit FAILED on ${a.symbol} (${a.trackerId}): ${msg}`);
       await this.throttledNotify(a, now, `BACKSTOP ${kind} exit FAILED on ${a.symbol}: ${msg}. Exit it yourself. Retrying every 15 s.`);
@@ -260,9 +336,20 @@ export class EscalationRunner {
     await this.send(line); // a fresh message too: an edit does not notify the owner's phone
   }
 
+  /** AI_AUTO_EXIT_MODE=dry-run: the backstop is recorded on the alarm (BACKSTOPPED, payload.rehearsed) and told, never sold. */
+  private async rehearsed(a: AlarmRow, kind: 'DEADLINE' | 'HARD_LOSS', detail: string): Promise<void> {
+    a.payload = { ...(a.payload ?? {}), rehearsed: true, rehearsal: detail.slice(0, 300) };
+    await this.alarmRepo.update(a.id, { status: 'BACKSTOPPED', payload: a.payload });
+    this.log.warn(`${LOG} BACKSTOP ${kind} DRY-RUN on ${a.symbol} (${a.trackerId}): ${detail}`);
+    await this.send(`BACKSTOP ${kind} (dry-run): would exit ${a.symbol}. Nothing sold (${detail}).\nAlarm ${a.rule}: ${a.reason}`);
+  }
+
   /** §4.4: the agent gets one look at a supreme exit request; a non-exit answer goes back to the supreme once. */
   private async supremeExit(a: AlarmRow, now: Date): Promise<void> {
     if (a.payload?.roundTrip === true) {
+      // The agent agreed: follow its own exit until it fills (or the trade closes: closeGone); if the executor
+      // will not sell it, the supreme's exit goes through the owner path.
+      if (a.payload.awaitExecutor === true) return this.followAgentExit(a, now);
       // The decision is made (confirm called at most once); only a failed exit is retried, every pass,
       // until it goes through or the trade closes (closeGone).
       if (a.payload.exitPending === true && a.status !== 'CLOSED') {
@@ -292,10 +379,19 @@ export class EscalationRunner {
       return;
     }
 
-    if (isExitVerdict(verdict.verdict)) {
-      // The agent agrees: its own EXIT goes through the executor (and the supreme confirm) as usual.
-      await this.markRoundTrip(a, { agent: verdict.verdict });
-      return;
+    if (isExitAnswer(verdict.verdict)) {
+      // The agent agrees: its own EXIT goes through the executor (the router executes it without a confirm). The
+      // supreme's exit stays PENDING until that exit fills or the trade closes: the executor can still skip it (user
+      // not on the AI allow-list, dry-run, daily cap, stale verdict…), and then the runner exits via the owner path.
+      await this.markRoundTrip(a, {
+        agent: verdict.verdict,
+        agentVerdictId: verdict.id,
+        agreedAt: now.toISOString(),
+        awaitExecutor: true,
+        exitPending: true,
+        exitReason: `SUPREME_EXIT (agent agreed, its exit not sent): ${a.reason}`,
+      });
+      return this.followAgentExit(a, now);
     }
 
     if (!this.ownerExit) return this.cannotAct(a, 'SUPREME_EXIT (final)', now);
@@ -311,6 +407,40 @@ export class EscalationRunner {
       return;
     }
     await this.markRoundTrip(a, { supreme: result.decision });
+    await this.supremeExitNow(a, reason, now);
+  }
+
+  /**
+   * The agent agreed with a supreme exit (EXIT_NOW): read its execution row (ai_exit_executions by the agent's verdict
+   * id). FILLED → done. CLAIMED / PLACED → still working. Ended without a sale (EXEC_ENDED), or no row at all
+   * SUPREME_EXIT_AGENT_LOOK_MS after the agreement → the supreme's exit goes through the owner path now (never
+   * cancelling the owner's order) and the owner is told.
+   */
+  private async followAgentExit(a: AlarmRow, now: Date): Promise<void> {
+    const p = a.payload ?? {};
+    const verdictId = typeof p.agentVerdictId === 'string' && p.agentVerdictId ? p.agentVerdictId : null;
+    let row: { status: string; reason: string | null } | null = null;
+    try {
+      row = verdictId ? await this.esc.executionForVerdict(verdictId) : null;
+    } catch (err) {
+      this.log.warn(`${LOG} SUPREME_EXIT ${a.symbol}: execution row of verdict ${verdictId} unreadable (retrying): ${(err as Error)?.message}`);
+      return;
+    }
+    if (row && EXEC_DONE.has(row.status)) {
+      await this.markRoundTrip(a, { awaitExecutor: false, exitPending: false, executor: row.status });
+      this.log.warn(`${LOG} SUPREME_EXIT ${a.symbol}: the agent's own exit ${row.status} (verdict ${verdictId})`);
+      return;
+    }
+    const agreedMs = typeof p.agreedAt === 'string' ? Date.parse(p.agreedAt) : NaN;
+    const waited = now.getTime() - (Number.isFinite(agreedMs) ? agreedMs : a.raisedAt.getTime());
+    if (!row ? waited < SUPREME_EXIT_AGENT_LOOK_MS : !EXEC_ENDED.has(row.status)) return;
+
+    const why = row ? `${row.status}${row.reason ? ` ${row.reason}` : ''}` : `no execution row ${Math.round(waited / 1000)} s after it agreed`;
+    if (!this.ownerExit) return this.cannotAct(a, `SUPREME_EXIT (agent's exit not sent: ${why})`, now);
+    const reason = typeof p.exitReason === 'string' ? p.exitReason : `SUPREME_EXIT (agent agreed, its exit not sent): ${a.reason}`;
+    this.log.error(`${LOG} SUPREME_EXIT ${a.symbol}: the agent agreed but its exit was not sent (${why}) — exiting through the owner path`);
+    await this.markRoundTrip(a, { awaitExecutor: false, executor: why.slice(0, 300) });
+    await this.send(`Supreme exit on ${a.symbol}: the agent agreed but its exit was not sent (${why.slice(0, 200)}). Exiting through the owner path now (your resting orders are not cancelled).`);
     await this.supremeExitNow(a, reason, now);
   }
 
@@ -341,7 +471,8 @@ export class EscalationRunner {
 
   private async supremeExitNow(a: AlarmRow, reason: string, now: Date): Promise<void> {
     try {
-      const result = await this.ownerExit!.exitAsOwner(a.userId, a.trackerId, reason.slice(0, 480));
+      // A supreme exit is not owner-initiated: it never cancels the owner's resting order (→ OPEN_ORDER_EXISTS + alert).
+      const result = await this.ownerExit!.exitAsOwner(a.userId, a.trackerId, reason.slice(0, 480), { ownerInitiated: false });
       a.payload = { ...(a.payload ?? {}), exitPending: false };
       await this.alarmRepo.update(a.id, { status: 'CLOSED', payload: a.payload });
       this.log.warn(`${LOG} ${reason} → exit sent on ${a.symbol} (${result})`);

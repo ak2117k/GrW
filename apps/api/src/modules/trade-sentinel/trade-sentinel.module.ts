@@ -42,7 +42,8 @@ import { AiGatewayModule } from '../ai-gateway/ai-gateway.module';
 import { AI_GATEWAY, type AiGateway } from '../ai-gateway/ai-gateway.service';
 import { jobFor, SentinelGatewayTransport } from '../ai-gateway/sentinel/sentinel-gateway.transport';
 import { AiCallRepository } from '../ai-gateway/audit/ai-call.repository';
-import { aiCallsRecordingOn, directRecordedTransport } from '../ai-gateway/audit/recorded-transport';
+import { aiCallsRecordingOn } from '../ai-gateway/audit/recorded-transport';
+import { AI_HEALTH, aiHealthOf, directOrFailoverTransport } from '../ai-gateway/audit/failover-transport';
 import { judgeTransportFrom, type MessagesTransport } from './services/llm-transport';
 import { SentinelNewsAdapter } from './adapters/news.adapter';
 import { SentinelOiWallSource } from './adapters/oi-wall.adapter';
@@ -195,6 +196,12 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
        * reply text capped at ~60 KB each, CLI/API token usage, latency, error),
        * fire-and-forget: the provider, request and reply objects are unchanged.
        * `AI_CALLS_RECORD=off` binds exactly the unwrapped transport.
+       *
+       * ROUTE FAILOVER (2026-11-27, trade agent exit authority Task 2). `AI_FAILOVER=on` (default on
+       * when TRADE_AGENT_AUTHORITY=live, else off) serves the direct path from `AI_FAILOVER_CHAIN`
+       * (default vertex,cli; +api when ANTHROPIC_API_KEY is set) — one recorded transport per route,
+       * the first answer wins, and SENTINEL_JUDGE is superseded by the chain. Off: exactly today's
+       * transport. The gateway path (AI_GATEWAY_SENTINEL=true) is unchanged either way.
        */
       useFactory: (
         config: ConfigService,
@@ -204,16 +211,26 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
       ): MessagesTransport =>
         config.get<string>('AI_GATEWAY_SENTINEL')?.trim().toLowerCase() === 'true'
           ? new SentinelGatewayTransport(gateway)
-          : directRecordedTransport({
+          : directOrFailoverTransport({
               judge: judgeTransportFrom(config.get<string>('SENTINEL_JUDGE')),
               cli,
               apiKey: config.get<string>('ANTHROPIC_API_KEY'),
               record: aiCallsRecordingOn(config.get<string>('AI_CALLS_RECORD')),
               audit: calls,
               jobOf: jobFor,
+              env: {
+                AI_FAILOVER: config.get<string>('AI_FAILOVER'),
+                AI_FAILOVER_CHAIN: config.get<string>('AI_FAILOVER_CHAIN'),
+                TRADE_AGENT_AUTHORITY: config.get<string>('TRADE_AGENT_AUTHORITY'),
+                ANTHROPIC_API_KEY: config.get<string>('ANTHROPIC_API_KEY'),
+              },
+              caller: 'sentinel',
             }),
       inject: [ConfigService, ClaudeCliTransport, AI_GATEWAY, AiCallRepository],
     },
+    // AI_HEALTH (exit authority): the sentinel's failover instance — allDownSince() is the first time
+    // every route failed, null once any answers. Failover off / gateway path: a stub that is never down.
+    { provide: AI_HEALTH, useFactory: (client: MessagesTransport) => aiHealthOf(client), inject: [ANTHROPIC_CLIENT] },
 
     // Adapters — the narrow ports, bound to the real services.
     { provide: OPEN_POSITIONS, useClass: OpenPositionsRepository },
@@ -347,6 +364,7 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
     JUDGE_GATE_CONFIG,
     MARKET_EVENTS,
     CloseProductBook,
+    AI_HEALTH,
   ],
 })
 export class TradeSentinelModule {}

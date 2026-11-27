@@ -69,6 +69,14 @@ describe('TelegramBotClient', () => {
     await expect(c.editMessage(42, 'updated')).resolves.toBeUndefined();
   });
 
+  it('deleteMessage posts deleteMessage for the configured chat', async () => {
+    const f = jest.fn().mockResolvedValue(reply({ ok: true, result: true }));
+    await client(f).deleteMessage(42);
+    const [url, init] = f.mock.calls[0];
+    expect(url).toBe(`https://api.telegram.org/bot${TOKEN}/deleteMessage`);
+    expect(JSON.parse(init.body)).toEqual({ chat_id: '-100777', message_id: 42 });
+  });
+
   it('answerCallback posts answerCallbackQuery', async () => {
     const f = jest.fn().mockResolvedValue(reply({ ok: true, result: true }));
     await client(f).answerCallback('cq1', 'Exit sent');

@@ -116,6 +116,10 @@ export class TelegramBotClient {
     }
   }
 
+  async deleteMessage(messageId: number): Promise<void> {
+    await this.call('deleteMessage', { chat_id: this.chatId(), message_id: messageId });
+  }
+
   async answerCallback(callbackQueryId: string, text?: string): Promise<void> {
     await this.call('answerCallbackQuery', {
       callback_query_id: callbackQueryId,

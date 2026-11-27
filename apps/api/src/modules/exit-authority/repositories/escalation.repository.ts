@@ -80,6 +80,14 @@ export class EscalationRepository {
     return r?.telegramMessageId ?? null;
   }
 
+  /** The trade's live owner message is now `messageId`: stamp it on every still-tracked alarm of the trade. */
+  async setTrackerMessageId(trackerId: string, messageId: number): Promise<void> {
+    await this.prisma.tradeAlarm.updateMany({
+      where: { trackerId, status: { in: RUNNER_STATUSES } },
+      data: { telegramMessageId: messageId },
+    });
+  }
+
   async tracker(id: string): Promise<TrackerRef | null> {
     return this.prisma.tradeTracker.findUnique({
       where: { id },

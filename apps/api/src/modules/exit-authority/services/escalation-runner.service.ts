@@ -53,6 +53,15 @@ export const alarmButtons = (alarmId: string): InlineButton[][] => [
   ],
 ];
 
+/** Deletes a superseded owner message; a failure (too old, already gone) is a WARN and otherwise ignored. */
+export async function deleteQuietly(telegram: TelegramBotClient, messageId: number, log: Logger): Promise<void> {
+  try {
+    await telegram.deleteMessage(messageId);
+  } catch (err) {
+    log.warn(`${LOG} Telegram delete of ${messageId} failed (ignored): ${(err as Error)?.message}`);
+  }
+}
+
 export function istTime(d: Date): string {
   return d.toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false });
 }
@@ -141,13 +150,23 @@ export class EscalationRunner {
     if (messageId != null) await this.edit(messageId, `${a.symbol}: trade closed. Alarms closed, nothing to do.`);
   }
 
-  /** The trade's one live owner message: edit it when there is one, else send it; remember it per trade. */
+  /**
+   * The trade's one live owner message, for anything that needs attention (alert, re-alert, a new alarm): SEND a
+   * fresh message (an edit does not ring the owner's phone), then delete the trade's previous one. If the send
+   * fails the previous message stays the trade's message. The id is persisted on every tracked alarm of the trade.
+   */
   private async putTradeMessage(trackerId: string, text: string, buttons?: InlineButton[][]): Promise<number | null> {
-    let messageId = this.messages.get(trackerId);
-    if (messageId != null && !(await this.edit(messageId, text, buttons))) messageId = null;
-    if (messageId == null) messageId = await this.send(text, buttons);
-    this.messages.set(trackerId, messageId);
-    return messageId;
+    const old = this.messages.get(trackerId);
+    const sent = await this.send(text, buttons);
+    if (sent == null) return old;
+    this.messages.set(trackerId, sent);
+    if (old != null && old !== sent) await deleteQuietly(this.telegram, old, this.log);
+    try {
+      await this.esc.setTrackerMessageId(trackerId, sent);
+    } catch (err) {
+      this.log.warn(`${LOG} could not persist message ${sent} for tracker ${trackerId}: ${(err as Error)?.message}`);
+    }
+    return sent;
   }
 
   /** Another unresolved, alerted alarm of the same trade currently relies on the trade message. */

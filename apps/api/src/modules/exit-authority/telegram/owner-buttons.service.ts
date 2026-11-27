@@ -5,7 +5,7 @@ import type { AlarmRow, OwnerEscalationPort } from '../exit-authority.tokens';
 import { EscalationRepository } from '../repositories/escalation.repository';
 import { TradeAlarmRepository } from '../repositories/trade-alarm.repository';
 import { AuthorityStateService } from '../services/authority-state.service';
-import { OWNER_EXIT, alarmButtons, istTime, type OwnerExitPort } from '../services/escalation-runner.service';
+import { OWNER_EXIT, alarmButtons, deleteQuietly, istTime, type OwnerExitPort } from '../services/escalation-runner.service';
 import { TelegramBotClient, type InlineButton, type TelegramCallbackQuery } from './telegram-bot.client';
 import { TrackerMessages } from './tracker-messages';
 
@@ -174,28 +174,29 @@ export class OwnerButtonsService implements OwnerEscalationPort, OnApplicationBo
       'The confirmed exit was not sent; your order was not touched.',
       'Exit = sell now via the owner path (cancels your order). Hold = leave it (15 min).',
     ].join('\n');
-    // The trade's one live message (§4.5 B): edit it if there is one, else send it.
-    let messageId = this.messages.get(input.trackerId);
-    if (messageId == null) {
+    // Needs the owner's attention: a FRESH message (it rings), then the trade's previous one is deleted, so the
+    // trade still has one live message (§4.5 B). The id is persisted on the trade's tracked alarms.
+    let old = this.messages.get(input.trackerId);
+    if (old == null) {
       try {
-        messageId = await this.esc.trackerMessageId(input.trackerId);
+        old = await this.esc.trackerMessageId(input.trackerId);
       } catch {
-        messageId = null;
+        old = null;
       }
     }
-    if (messageId != null) {
-      try {
-        await this.telegram.editMessage(messageId, text, blockedButtons(input.trackerId));
-        this.messages.set(input.trackerId, messageId);
-        return;
-      } catch (err) {
-        this.log.warn(`${LOG} blocked-exit: edit of ${messageId} failed (${(err as Error)?.message}); sending a new message`);
-      }
-    }
+    let sent: number;
     try {
-      this.messages.set(input.trackerId, await this.telegram.sendMessage(text, blockedButtons(input.trackerId)));
+      sent = await this.telegram.sendMessage(text, blockedButtons(input.trackerId));
     } catch (err) {
       this.log.error(`${LOG} blocked-exit alert for ${input.symbol} (${input.trackerId}) NOT SENT: ${(err as Error)?.message}`);
+      return;
+    }
+    this.messages.set(input.trackerId, sent);
+    if (old != null && old !== sent) await deleteQuietly(this.telegram, old, this.log);
+    try {
+      await this.esc.setTrackerMessageId(input.trackerId, sent);
+    } catch (err) {
+      this.log.warn(`${LOG} could not persist message ${sent} for tracker ${input.trackerId}: ${(err as Error)?.message}`);
     }
   }
 

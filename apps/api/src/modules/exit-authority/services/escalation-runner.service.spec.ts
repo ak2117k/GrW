@@ -11,7 +11,7 @@ import {
 import type { AlarmRow, ConfirmResult, SupremeConfirmPort, TradeAlarmsPort } from '../exit-authority.tokens';
 import type { EscalationRepository } from '../repositories/escalation.repository';
 import type { AgentVerdictRef, TradeAlarmPatch, TradeAlarmRepository } from '../repositories/trade-alarm.repository';
-import type { TelegramBotClient } from '../telegram/telegram-bot.client';
+import { TelegramBotClient as RealTelegramBotClient, type TelegramBotClient } from '../telegram/telegram-bot.client';
 import { TrackerMessages } from '../telegram/tracker-messages';
 import { holdUntil } from '../telegram/owner-buttons.service';
 import type { AuthorityStateService } from './authority-state.service';
@@ -45,6 +45,11 @@ class FakeDb {
   }
   async openTrackerIds(ids: string[]): Promise<Set<string>> {
     return new Set(ids.filter((i) => this.openTrackers.has(i)));
+  }
+  async setTrackerMessageId(trackerId: string, messageId: number): Promise<void> {
+    for (const a of this.alarms) {
+      if (a.trackerId === trackerId && ['OPEN', 'SNOOZED', 'ANSWERED'].includes(a.status)) a.telegramMessageId = messageId;
+    }
   }
 }
 
@@ -90,6 +95,7 @@ function setup(opts: { ownerExit?: boolean; probe?: boolean; aiDown?: boolean; c
   const telegram = {
     sendMessage: jest.fn(async (_text: string, _buttons?: unknown) => ++msgSeq),
     editMessage: jest.fn(async (_id: number, _text: string, _buttons?: unknown) => undefined),
+    deleteMessage: jest.fn(async (_id: number) => undefined),
   };
   const ownerExit: OwnerExitPort & { exitAsOwner: jest.Mock } = { exitAsOwner: jest.fn(async () => 'man_trk1_1') };
   const probe: HardLossProbe & { stillPastLimit: jest.Mock } = { stillPastLimit: jest.fn(async () => opts.probe ?? true) };
@@ -205,20 +211,74 @@ describe('EscalationRunner.pass', () => {
       expect(String(telegram.sendMessage.mock.calls[0][0])).toContain('AI route is DOWN');
     });
 
-    it('REALERT → the same message is edited (no new one) and alertCount++, then every 5 min from the first alert', async () => {
+    it('REALERT → a fresh message (rings) + delete of the old one, alertCount++, then every 5 min from the first alert', async () => {
       const { db, telegram, runner } = setup();
       db.alarms.push(alarm({ alertedAt: at(0), alertCount: 1, telegramMessageId: 55 }));
       await runner.pass(at(REALERT_EVERY_MS));
-      expect(telegram.sendMessage).not.toHaveBeenCalled();
-      expect(telegram.editMessage).toHaveBeenCalledTimes(1);
-      expect(telegram.editMessage.mock.calls[0][0]).toBe(55);
-      expect(db.alarms[0]).toMatchObject({ alertCount: 2, telegramMessageId: 55, alertedAt: at(0) });
+      expect(telegram.sendMessage).toHaveBeenCalledTimes(1);
+      expect(telegram.deleteMessage).toHaveBeenCalledWith(55);
+      expect(telegram.editMessage).not.toHaveBeenCalled();
+      expect(db.alarms[0]).toMatchObject({ alertCount: 2, telegramMessageId: 101, alertedAt: at(0) });
 
       await runner.pass(at(REALERT_EVERY_MS + 15_000));
-      expect(telegram.editMessage).toHaveBeenCalledTimes(1);
+      expect(telegram.sendMessage).toHaveBeenCalledTimes(1);
       await runner.pass(at(2 * REALERT_EVERY_MS));
-      expect(telegram.editMessage).toHaveBeenCalledTimes(2);
-      expect(db.alarms[0].alertCount).toBe(3);
+      expect(telegram.sendMessage).toHaveBeenCalledTimes(2);
+      expect(telegram.deleteMessage).toHaveBeenLastCalledWith(101);
+      expect(db.alarms[0]).toMatchObject({ alertCount: 3, telegramMessageId: 102 });
+    });
+
+    it('a failed delete of the old message is ignored (WARN); the new message stands', async () => {
+      const { db, telegram, runner } = setup();
+      telegram.deleteMessage.mockRejectedValueOnce(new Error('deleteMessage failed: HTTP 400 message to delete not found'));
+      db.alarms.push(alarm({ alertedAt: at(0), alertCount: 1, telegramMessageId: 55 }));
+      await expect(runner.pass(at(REALERT_EVERY_MS))).resolves.toBeUndefined();
+      expect(db.alarms[0]).toMatchObject({ alertCount: 2, telegramMessageId: 101 });
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('a failed fresh send keeps the old message as the trade message (nothing deleted)', async () => {
+      const { db, telegram, runner } = setup();
+      telegram.sendMessage.mockRejectedValueOnce(new Error('sendMessage failed: HTTP 502'));
+      db.alarms.push(alarm({ alertedAt: at(0), alertCount: 1, telegramMessageId: 55 }));
+      await runner.pass(at(REALERT_EVERY_MS));
+      expect(telegram.deleteMessage).not.toHaveBeenCalled();
+      expect(db.alarms[0]).toMatchObject({ alertCount: 2, telegramMessageId: 55 });
+    });
+
+    it('answered → the trade message is edited in place only (no send, no delete)', async () => {
+      const { db, telegram, runner } = setup();
+      db.alarms.push(alarm({ alertedAt: at(ESCALATE_AFTER_MS), alertCount: 1, telegramMessageId: 55 }));
+      db.verdicts.push({ id: 'v1', verdict: 'HOLD', createdAt: at(ESCALATE_AFTER_MS + 5_000), trackerId: 'trk1' });
+      await runner.pass(at(ESCALATE_AFTER_MS + 15_000));
+      expect(telegram.editMessage).toHaveBeenCalledTimes(1);
+      expect(telegram.editMessage.mock.calls[0][0]).toBe(55);
+      expect(telegram.sendMessage).not.toHaveBeenCalled();
+      expect(telegram.deleteMessage).not.toHaveBeenCalled();
+    });
+
+    it('"message is not modified" on an in-place edit is success: no new send', async () => {
+      const db = new FakeDb();
+      db.alarms.push(alarm({ alertedAt: at(ESCALATE_AFTER_MS), alertCount: 1, telegramMessageId: 55 }));
+      db.verdicts.push({ id: 'v1', verdict: 'HOLD', createdAt: at(ESCALATE_AFTER_MS + 5_000), trackerId: 'trk1' });
+      const fetchMock = jest.fn(async (url: string) => ({
+        ok: false,
+        status: 400,
+        json: async () => ({ ok: false, description: `Bad Request: message is not modified (${url.split('/').pop()})` }),
+      }));
+      const client = new RealTelegramBotClient({ env: { TELEGRAM_ALERT_BOT_TOKEN: 't', TELEGRAM_ALERT_CHAT_ID: '-1' }, fetch: fetchMock });
+      const alarms = { answer: jest.fn(async (id: string, vid: string, ans: string, now?: Date) => void (await db.update(id, { status: 'ANSWERED', answeredAt: now ?? null, answerVerdictId: vid, answer: ans }))) };
+      const runner = new EscalationRunner(
+        db as unknown as TradeAlarmRepository,
+        db as unknown as EscalationRepository,
+        alarms as unknown as TradeAlarmsPort,
+        { isLive: () => true } as unknown as AuthorityStateService,
+        client,
+        new TrackerMessages(),
+      );
+      await runner.pass(at(ESCALATE_AFTER_MS + 15_000));
+      const methods = fetchMock.mock.calls.map((c) => String(c[0]).split('/').pop());
+      expect(methods).toEqual(['editMessageText']);
     });
 
     it('a failed send still records alertedAt (the owner was unreachable)', async () => {
@@ -310,13 +370,13 @@ describe('EscalationRunner.pass', () => {
 
     await runner.pass(new Date(until.getTime() - 1)); // still snoozed: nothing
     expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
-    expect(telegram.editMessage).not.toHaveBeenCalled();
+    expect(telegram.sendMessage).not.toHaveBeenCalled();
 
-    await runner.pass(until); // snooze over: re-alert (on the trade's message), not a sale
+    await runner.pass(until); // snooze over: a fresh (ringing) alert replaces the trade's message, not a sale
     expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
-    expect(telegram.editMessage).toHaveBeenCalledTimes(1);
-    expect(telegram.editMessage.mock.calls[0][0]).toBe(55);
-    expect(db.alarms[0]).toMatchObject({ alertedAt: until, alertCount: 1 });
+    expect(telegram.sendMessage).toHaveBeenCalledTimes(1);
+    expect(telegram.deleteMessage).toHaveBeenCalledWith(55);
+    expect(db.alarms[0]).toMatchObject({ alertedAt: until, alertCount: 1, telegramMessageId: 101 });
 
     await runner.pass(new Date(until.getTime() + BACKSTOP_OWNER_SILENT_MS - 1));
     expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
@@ -324,16 +384,16 @@ describe('EscalationRunner.pass', () => {
     expect(ownerExit.exitAsOwner.mock.calls[0][2]).toMatch(/^BACKSTOP HARD_LOSS: /);
   });
 
-  it('one message per trade: two alarms on one tracker → one send + one edit (latest alarm id on the buttons)', async () => {
+  it('one live message per trade: a new alarm on the trade sends fresh (latest alarm id on the buttons) and deletes the old', async () => {
     const { db, telegram, runner } = setup();
     db.alarms.push(alarm());
     await runner.pass(at(ESCALATE_AFTER_MS));
     db.alarms.push(alarm({ id: 'a2', rule: 'LADDER', reason: 'ladder step lost', raisedAt: at(ESCALATE_AFTER_MS), lastRaisedAt: at(ESCALATE_AFTER_MS) }));
     await runner.pass(at(2 * ESCALATE_AFTER_MS));
-    expect(telegram.sendMessage).toHaveBeenCalledTimes(1);
-    expect(telegram.editMessage).toHaveBeenCalledTimes(1);
-    const [id, text, buttons] = telegram.editMessage.mock.calls[0];
-    expect(id).toBe(101);
+    expect(telegram.sendMessage).toHaveBeenCalledTimes(2);
+    expect(telegram.deleteMessage).toHaveBeenCalledTimes(1);
+    expect(telegram.deleteMessage).toHaveBeenCalledWith(101);
+    const [text, buttons] = telegram.sendMessage.mock.calls[1];
     expect(text).toContain('ladder step lost');
     expect(buttons).toEqual([
       [
@@ -341,7 +401,8 @@ describe('EscalationRunner.pass', () => {
         { text: 'Hold', data: 'h:a2' },
       ],
     ]);
-    expect(db.alarms.find((a) => a.id === 'a2')?.telegramMessageId).toBe(101);
+    // Persisted on every tracked alarm of the trade, so another container / a restart sees the live one.
+    expect(db.alarms.map((a) => a.telegramMessageId)).toEqual([102, 102]);
   });
 
   it('restart: a fresh runner on the same store resumes (re-alerts, does not re-send the first alert)', async () => {
@@ -353,8 +414,8 @@ describe('EscalationRunner.pass', () => {
     await fresh.pass(at(ESCALATE_AFTER_MS + 15_000));
     expect(telegram.sendMessage).toHaveBeenCalledTimes(1);
     await fresh.pass(at(ESCALATE_AFTER_MS + REALERT_EVERY_MS));
-    expect(telegram.sendMessage).toHaveBeenCalledTimes(1);
-    expect(telegram.editMessage).toHaveBeenCalledTimes(1);
+    expect(telegram.sendMessage).toHaveBeenCalledTimes(2);
+    expect(telegram.deleteMessage).toHaveBeenCalledWith(101); // the fresh runner found the live message in the rows
     expect(db.alarms[0].alertCount).toBe(2);
   });
 

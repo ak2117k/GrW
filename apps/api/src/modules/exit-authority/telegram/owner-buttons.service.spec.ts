@@ -57,13 +57,16 @@ function setup(opts: { ownerExit?: boolean; live?: boolean; ownerUserId?: string
     }),
     tracker: jest.fn(async (id: string) => trackers.find((t) => t.id === id) ?? null),
     trackerMessageId: jest.fn(async (_id: string) => opts.trackerMessageId ?? null),
+    setTrackerMessageId: jest.fn(async (_trackerId: string, _messageId: number) => undefined),
   };
+  let msgSeq = 8;
   const telegram = {
     chatId: () => CHAT,
     ownerUserId: () => opts.ownerUserId ?? '',
     answerCallback: jest.fn(async (_id: string, _text?: string) => undefined),
     editMessage: jest.fn(async (_id: number, _text: string, _buttons?: unknown) => undefined),
-    sendMessage: jest.fn(async (_text: string, _buttons?: unknown) => 9),
+    sendMessage: jest.fn(async (_text: string, _buttons?: unknown) => ++msgSeq),
+    deleteMessage: jest.fn(async (_id: number) => undefined),
     getUpdates: jest.fn(),
   };
   const ownerExit: OwnerExitPort & { exitAsOwner: jest.Mock } = { exitAsOwner: jest.fn(async () => 'man_trk1_1') };
@@ -77,7 +80,7 @@ function setup(opts: { ownerExit?: boolean; live?: boolean; ownerUserId?: string
     messages,
     opts.ownerExit === false ? undefined : ownerExit,
   );
-  return { rows, trackers, repo, telegram, ownerExit, svc, messages };
+  return { rows, trackers, repo, esc, telegram, ownerExit, svc, messages };
 }
 
 const tap = (
@@ -240,7 +243,7 @@ describe('OwnerButtonsService', () => {
   describe('blockedExit', () => {
     const input = { userId: 'owner1', trackerId: 'trk1', symbol: 'SENSEX25DEC85000PE', reason: 'OPEN_ORDER_EXISTS', detail: 'execution aix_1: resting SL order 1234' };
 
-    it('sends Exit / Hold keyed by tracker, at most once per execution row; a new row edits the trade message', async () => {
+    it('sends Exit / Hold keyed by tracker, at most once per execution row; a new row sends fresh + deletes the old', async () => {
       const { svc, telegram } = setup();
       await svc.blockedExit(input);
       await svc.blockedExit(input);
@@ -252,17 +255,25 @@ describe('OwnerButtonsService', () => {
         ],
       ]);
       await svc.blockedExit({ ...input, detail: 'execution aix_2: resting SL order 1234' });
-      expect(telegram.sendMessage).toHaveBeenCalledTimes(1);
-      expect(telegram.editMessage).toHaveBeenCalledTimes(1);
-      expect(telegram.editMessage.mock.calls[0][0]).toBe(9);
+      expect(telegram.sendMessage).toHaveBeenCalledTimes(2);
+      expect(telegram.deleteMessage).toHaveBeenCalledWith(9);
+      expect(telegram.editMessage).not.toHaveBeenCalled();
     });
 
-    it("edits the trade's existing alarm message instead of sending a second one", async () => {
-      const { svc, telegram, messages } = setup({ trackerMessageId: 77 });
+    it("replaces the trade's existing alarm message (fresh send, delete old) and persists the new id on the alarm rows", async () => {
+      const { svc, telegram, messages, esc } = setup({ trackerMessageId: 77 });
       await svc.blockedExit(input);
-      expect(telegram.sendMessage).not.toHaveBeenCalled();
-      expect(telegram.editMessage.mock.calls[0][0]).toBe(77);
-      expect(messages.get('trk1')).toBe(77);
+      expect(telegram.sendMessage).toHaveBeenCalledTimes(1);
+      expect(telegram.deleteMessage).toHaveBeenCalledWith(77);
+      expect(messages.get('trk1')).toBe(9);
+      expect(esc.setTrackerMessageId).toHaveBeenCalledWith('trk1', 9);
+    });
+
+    it('a failed delete is ignored', async () => {
+      const { svc, telegram, messages } = setup({ trackerMessageId: 77 });
+      telegram.deleteMessage.mockRejectedValueOnce(new Error('message to delete not found'));
+      await expect(svc.blockedExit(input)).resolves.toBeUndefined();
+      expect(messages.get('trk1')).toBe(9);
     });
 
     it('off (not live) → nothing sent', async () => {

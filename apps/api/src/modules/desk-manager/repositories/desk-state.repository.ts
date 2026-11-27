@@ -98,10 +98,15 @@ export class DeskStateRepository {
     return out;
   }
 
+  /**
+   * The desk's open positions: kind POSITION only (F&O / MCX / intraday), the same rule as the desk guard.
+   * Delivery HOLDING rows are not desk trades — they must never fill the packet's instrument slots or be a valid
+   * EXIT / BOOK / TIGHTEN target (2026-11-27: 26 holdings sorted first and crowded out the live NIFTY position).
+   */
   async openPositions(userId: string): Promise<OpenPositionRow[]> {
     const [trackers, paper] = await Promise.all([
       this.prisma.tradeTracker.findMany({
-        where: { userId, status: 'OPEN', NOT: { id: { startsWith: PAPER_TRACKER_PREFIX } } },
+        where: { userId, status: 'OPEN', kind: 'POSITION', NOT: { id: { startsWith: PAPER_TRACKER_PREFIX } } },
         select: { id: true, symbol: true, exchange: true, qty: true, entryPrice: true, lastLtp: true, pnl: true, entryTime: true },
         orderBy: { entryTime: 'asc' },
         take: 50,

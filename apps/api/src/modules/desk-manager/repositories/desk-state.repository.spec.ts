@@ -62,6 +62,17 @@ describe('DeskStateRepository', () => {
     ]);
   });
 
+  it('open positions read only POSITION trackers: delivery HOLDING rows are not desk trades and never exit targets', async () => {
+    // 11-27 prod: 26 HOLDING rows (oldest first) filled the packet and made long-term stocks valid EXIT targets.
+    const p = prismaMock();
+    p.tradeTracker.findMany.mockResolvedValueOnce([]);
+    p.trade.findMany.mockResolvedValueOnce([]);
+    p.signalOrder.findMany.mockResolvedValueOnce([]);
+    await new DeskStateRepository(p as never).openPositions('owner');
+    const where = (p.tradeTracker.findMany.mock.calls[0] as unknown as [{ where: Record<string, unknown> }])[0].where;
+    expect(where).toMatchObject({ userId: 'owner', status: 'OPEN', kind: 'POSITION' });
+  });
+
   it('latest sentinel per tracker, capped before the exit time', async () => {
     const p = prismaMock();
     const at = (m: number) => new Date(NOW.getTime() - m * 60_000);

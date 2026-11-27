@@ -118,10 +118,11 @@ export class DeskStateService {
         ? { status: 'present', value: guard.value.path, source: SRC.pnl }
         : { status: 'unavailable', reason: guard.reason ?? 'guard unavailable', source: SRC.pnl };
 
+    // Slots by what the manager can act on: open positions (exits), proposals (entries), then recent exits.
     const underlyings = pickUnderlyings([
       (positions.value ?? []).map((p) => p.underlying),
-      (recentExits.value ?? []).map((e) => e.underlying),
       (proposals.value ?? []).map((p) => p.underlying),
+      (recentExits.value ?? []).map((e) => e.underlying),
     ]);
     const instruments = await timedBlock<Record<string, InstrumentView>>(SRC.instruments, () => this.instruments(underlyings, now), INSTRUMENTS_BLOCK_MS);
     if (recentExits.status === 'present' && instruments.status === 'present') {

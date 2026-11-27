@@ -122,6 +122,19 @@ describe('DeskStateService.build', () => {
     expect(inst.U0.ltp).toBe(24650);
   });
 
+  it('instrument slots go to what can be acted on: open positions, then proposals, then recent exits', async () => {
+    // 11-27 prod: the 8 slots went to old rows first and NIFTY (a live position) plus every proposal got no data.
+    const proposals: Proposal[] = ['SENSEX', 'CRUDEOIL', 'SENSEX', 'HINDOILEXP'].map((u, i) => ({ ...proposal(i), underlying: u }));
+    const exits: ClosedPositionRow[] = [{ trackerId: 'x1', symbol: 'BSE29DEC264250CE', underlying: 'BSE', exitAt: new Date(NOW.getTime() - 10 * 60_000), pnl: -3330, paper: false }];
+    const repo = repoMock({
+      openPositions: jest.fn(async () => [pos(0, { underlying: 'NIFTY', symbol: 'NIFTY01DEC2625700PE' }), pos(1, { underlying: 'MAZDOCK', symbol: 'MAZDOCK29DEC261760PE' })]),
+      proposalsSince: jest.fn(async () => proposals),
+      closedSince: jest.fn(async () => exits),
+    });
+    const p = await make(repo).build('owner', NOW, cfg);
+    expect(Object.keys(p.instruments.value ?? {})).toEqual(['NIFTY', 'MAZDOCK', 'SENSEX', 'CRUDEOIL', 'HINDOILEXP', 'BSE']);
+  });
+
   it('instruments without a market port say so', async () => {
     const repo = repoMock({ openPositions: jest.fn(async () => [pos(1)]) });
     const p = await new DeskStateService(repo as never, { state: async () => guardState }, undefined, undefined).build('owner', NOW, cfg);

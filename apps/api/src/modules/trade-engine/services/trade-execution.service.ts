@@ -36,6 +36,7 @@ import {
 import { Trade, Prisma, TradeEventType } from '@prisma/client';
 import { computeOrderCharges } from './trade-charges';
 import { AUTHORITY_STATE, type AuthorityStatePort } from '../../exit-authority/exit-authority.tokens';
+import { sendOpsAlert } from '../../../common/utils/ops-alert';
 
 /** The log line (and error text) of a legacy live close refused under TRADE_AGENT_AUTHORITY=live. */
 export const LEGACY_LIVE_CLOSE_REFUSED = '[exit-authority] legacy live close refused';
@@ -742,9 +743,11 @@ export class TradeExecutionService {
     const openTrades = await this.tradeRepository.getOpenTrades();
     let closed = 0;
     // TRADE_AGENT_AUTHORITY=live: a LIVE trades row may be stale (its position already closed by the trade agent's
-    // exit, which does not close the legacy row), and a blind MARKET close would then OPEN a reverse position. The
-    // broker position is checked first; a row whose position is flat is skipped, and if the check fails the row is
-    // skipped with an ERROR (never sold blind). Off: exactly as before (no broker read).
+    // exit, which does not close the legacy row), and a blind MARKET close would then OPEN a reverse position. The kill
+    // switch is non-negotiable ("squares off ALL positions"), so a row is skipped ONLY on a POSITIVE broker read: a
+    // successful, NON-EMPTY positions answer with no open quantity for that symbol. An empty answer (the adapter
+    // returns [] when it has no data), a failed read or no adapter is UNREADABLE ⇒ the row is closed exactly as before.
+    // Every skip and every unreadable case is told to the owner (ops alert). Off: exactly as before (no broker read).
     let brokerOpen: Set<string> | null | undefined;
 
     for (const trade of openTrades) {
@@ -754,11 +757,11 @@ export class TradeExecutionService {
           const inst = (trade as { instrument?: { symbol?: string; exchange?: string } }).instrument;
           const key = positionKey(inst?.exchange, inst?.symbol);
           if (brokerOpen === null) {
-            this.logger.error(`[exit-authority] kill switch: broker positions unreadable — live trade ${trade.id} (${inst?.symbol ?? '?'}) SKIPPED, not sold blind; check it at the broker`);
-            continue;
-          }
-          if (!brokerOpen.has(key)) {
+            this.logger.error(`[exit-authority] kill switch: broker positions unreadable — live trade ${trade.id} (${inst?.symbol ?? '?'}) closed as before`);
+            void sendOpsAlert(`killswitch-unreadable:${trade.id}`, `GrW ALERT: kill switch — broker positions unreadable; live trade ${trade.id} (${inst?.symbol ?? '?'}) closed at market as before. Check the position at the broker.`).catch(() => undefined);
+          } else if (!brokerOpen.has(key)) {
             this.logger.warn(`[exit-authority] kill switch: live trade ${trade.id} (${inst?.symbol ?? '?'}) is flat at the broker — skipped (stale row), nothing sold`);
+            void sendOpsAlert(`killswitch-skip:${trade.id}`, `GrW ALERT: kill switch — live trade ${trade.id} (${inst?.symbol ?? '?'}) SKIPPED: the broker shows no open quantity (stale row). Check the position at the broker.`).catch(() => undefined);
             continue;
           }
         }
@@ -782,12 +785,15 @@ export class TradeExecutionService {
     return { closed };
   }
 
-  /** `EXCHANGE:SYMBOL` of every non-zero broker position, or null when the read fails / no broker is configured. */
+  /**
+   * `EXCHANGE:SYMBOL` of every non-zero broker position, or null when UNREADABLE: the read failed, no broker is
+   * configured, or the answer is empty (the adapter answers [] when it has no data, so empty is not proof of flat).
+   */
   private async brokerOpenPositions(): Promise<Set<string> | null> {
     if (!this.brokerAdapter) return null;
     try {
       const rows = await this.brokerAdapter.getPositions();
-      if (!Array.isArray(rows)) return null;
+      if (!Array.isArray(rows) || rows.length === 0) return null;
       return new Set(rows.filter((p) => Number(p?.quantity) !== 0 && Number.isFinite(Number(p?.quantity))).map((p) => positionKey(p.exchange, p.symbol)));
     } catch (err) {
       this.logger.error(`[exit-authority] kill switch: broker positions read failed: ${err instanceof Error ? err.message : String(err)}`);

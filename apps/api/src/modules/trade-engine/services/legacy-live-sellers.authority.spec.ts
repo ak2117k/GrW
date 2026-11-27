@@ -9,6 +9,7 @@ import { HttpException, HttpStatus, Logger } from '@nestjs/common';
 import type { AuthorityStatePort } from '../../exit-authority/exit-authority.tokens';
 import { LEGACY_LIVE_CLOSE_REFUSED, TradeExecutionService } from './trade-execution.service';
 import { OrderTrackerService } from './order-tracker.service';
+import * as opsAlert from '../../../common/utils/ops-alert';
 
 const LIVE: AuthorityStatePort = { isLive: () => true };
 const OFF: AuthorityStatePort = { isLive: () => false };
@@ -84,24 +85,33 @@ describe('legacy live closeTrade under TRADE_AGENT_AUTHORITY', () => {
     expect(h.broker.placeOrder).toHaveBeenCalledTimes(1);
   });
 
-  it('live: the kill switch SKIPS a stale live trades row whose broker position is flat (never sells an already-flat position)', async () => {
-    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  it.each([
+    ['without the symbol', [{ symbol: 'BANKNIFTY27NOV50000CE', exchange: 'NFO', side: 'BUY', quantity: 30, averagePrice: 100, ltp: 95, pnl: 0 }]],
+    ['with the symbol at qty 0', [{ symbol: 'NIFTY27NOV24000CE', exchange: 'NFO', side: 'BUY', quantity: 0, averagePrice: 100, ltp: 95, pnl: 0 }]],
+  ])('live: a POSITIVE non-empty broker read %s → the stale live row is SKIPPED (never sells a flat position) + owner alerted', async (_n, rows) => {
+    const ops = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const h = harness(LIVE);
-    h.broker.getPositions.mockResolvedValueOnce([{ symbol: 'NIFTY27NOV24000CE', exchange: 'NFO', side: 'BUY', quantity: 0, averagePrice: 100, ltp: 95, pnl: 0 }]);
+    h.broker.getPositions.mockResolvedValueOnce(rows);
     const r = await h.svc.closeAllPositions('max daily loss');
     expect(r.closed).toBe(0);
     expect(h.broker.placeOrder).not.toHaveBeenCalled();
     expect(h.trades.t1.status).toBe('OPEN');
-    expect(warn.mock.calls.some(([m]) => String(m).includes('flat at the broker'))).toBe(true);
+    expect(ops).toHaveBeenCalledWith('killswitch-skip:t1', expect.stringContaining('SKIPPED'));
   });
 
-  it('live: the broker position check failing → the live row is skipped with an ERROR, not sold blind', async () => {
+  it.each([
+    ['an EMPTY read ([] — the adapter answers [] when it has no data)', (b: { getPositions: jest.Mock }) => b.getPositions.mockResolvedValueOnce([])],
+    ['a failed read', (b: { getPositions: jest.Mock }) => b.getPositions.mockRejectedValueOnce(new Error('AG8001 Invalid Token'))],
+  ])('live: %s is UNREADABLE → the live row is closed exactly as before + owner alerted', async (_n, arrange) => {
+    const ops = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true);
     const h = harness(LIVE);
-    h.broker.getPositions.mockRejectedValueOnce(new Error('AG8001 Invalid Token'));
+    arrange(h.broker);
     const r = await h.svc.closeAllPositions('max daily loss');
-    expect(r.closed).toBe(0);
-    expect(h.broker.placeOrder).not.toHaveBeenCalled();
-    expect(errors.mock.calls.some(([m]) => String(m).includes('SKIPPED, not sold blind'))).toBe(true);
+    expect(r.closed).toBe(1);
+    expect(h.broker.placeOrder).toHaveBeenCalledTimes(1);
+    expect(h.trades.t1.status).toBe('CLOSED');
+    expect(ops).toHaveBeenCalledWith('killswitch-unreadable:t1', expect.stringContaining('unreadable'));
   });
 
   it('live: a PAPER trade is closed by the kill switch with no broker read', async () => {

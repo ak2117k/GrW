@@ -301,10 +301,11 @@ export class SentinelExitExecutor {
   ): Promise<AiExitOutcome> {
     let cfg: AutoExitConfig = trigger === 'MANUAL' ? { ...aiCfg, mode: 'live' } : aiCfg;
     // TRADE_AGENT_AUTHORITY=live (spec §4.5b, owner 2026-11-27 "keep me alerting"): an AI / price-trigger exit
-    // never cancels the owner's order — EXIT_CANCEL_OWNER_ORDERS is ignored, OPEN_ORDER_EXISTS goes to the owner.
-    // MANUAL (the owner's own Exit, Telegram Exit, backstop via the owner path) keeps today's behaviour.
-    if (trigger !== 'MANUAL' && cfg.cancelOwnerOrders === true && this.authorityLive(v.trackerId)) {
-      cfg = { ...cfg, cancelOwnerOrders: false };
+    // never cancels the owner's order — EXIT_CANCEL_OWNER_ORDERS and AI_AUTO_EXIT_CANCEL_PROTECTIVE are both
+    // ignored, so OPEN_ORDER_EXISTS goes to the owner (blockedExit). MANUAL (the owner's own Exit, Telegram Exit,
+    // backstop via the owner path) keeps today's behaviour.
+    if (trigger !== 'MANUAL' && (cfg.cancelOwnerOrders === true || cfg.cancelProtective) && this.authorityLive(v.trackerId)) {
+      cfg = { ...cfg, cancelOwnerOrders: false, cancelProtective: false };
     }
 
     // 2. GUARDS — DB + clock only.

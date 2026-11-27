@@ -1757,6 +1757,41 @@ describe('SentinelExitExecutor — trade agent exit authority (TRADE_AGENT_AUTHO
       expect(h.escalation.blockedExit).not.toHaveBeenCalled();
     });
 
+    describe('AI_AUTO_EXIT_CANCEL_PROTECTIVE (owner ruling 2026-11-27: never cancel my order, alert me)', () => {
+      // The owner's stop exactly covering the position: protective, so cancel-protective would cancel it today.
+      const sl = (x: Record<string, unknown> = {}) => own({ orderid: 'SL1', variety: 'STOPLOSS', ordertype: 'STOPLOSS_MARKET', quantity: '40', price: '0', triggerprice: '400', ...x });
+      const CP = parseAutoExitConfig({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'true' });
+      const slGone = env([sl({ status: 'cancelled' })]);
+      const slFilled = env([sl({ status: 'cancelled' }), { orderid: 'O1', status: 'complete', symboltoken: '1171', exchange: 'BFO' }]);
+
+      it.each(['AI', 'PRICE_TRIGGER'] as const)('live %s exit: the owner\'s protective SL is NOT cancelled; SKIPPED OPEN_ORDER_EXISTS → blockedExit', async (trigger) => {
+        expect(CP.cancelProtective).toBe(true);
+        const h = harness({ tracker: TRK, authority: { live: true }, positions: [pos('40')], books: [env([sl()])] });
+        const out = trigger === 'AI' ? await h.ex.process(SV, CP, NOW) : await h.ex.execute('row1', { ...SV, id: 'trg_x' }, CP, NOW, 'PRICE_TRIGGER');
+        expect(out).toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+        await flush();
+        expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+        expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+        expect(h.escalation.blockedExit).toHaveBeenCalledTimes(1);
+        expect(String((h.escalation.blockedExit.mock.calls[0][0] as { detail: string }).detail)).toContain('SL1 (STOPLOSS_MARKET SELL 40 trg 400)');
+      });
+
+      it('off: the protective SL is cancelled as today; nobody escalated', async () => {
+        const h = harness({ tracker: TRK, authority: { live: false }, positions: [pos('40'), pos('40'), pos('0')], books: [env([sl()]), slGone, slGone, slFilled] });
+        await h.ex.process(SV, CP, NOW);
+        expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('STOPLOSS', 'SL1');
+        await flush();
+        expect(h.escalation.blockedExit).not.toHaveBeenCalled();
+      });
+
+      it('live MANUAL: the protective SL is cancelled as today', async () => {
+        const h = harness({ tracker: TRK, authority: { live: true }, positions: [pos('40'), pos('40'), pos('0')], books: [env([sl()]), slGone, slGone, slFilled] });
+        await h.ex.execute('row1', { ...SV, id: 'man_x' }, CP, NOW, 'MANUAL');
+        expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('STOPLOSS', 'SL1');
+        expect(h.escalation.blockedExit).not.toHaveBeenCalled();
+      });
+    });
+
     it('live MANUAL (owner path): keeps today\'s behaviour — the owner order is cancelled and the exit sent', async () => {
       const h = harness({ tracker: TRK, authority: { live: true }, positions: [pos('40'), pos('40'), pos('0')], books: [env([own()]), cancelled, cancelled, filled] });
       await expect(h.ex.execute('row1', { ...SV, id: 'man_x' }, CFG, NOW, 'MANUAL')).resolves.toEqual({ status: 'FILLED' });

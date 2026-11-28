@@ -23,7 +23,7 @@ export interface DrillDeps {
   alarm(id: string): Promise<AlarmRow | null>;
   /** The trade agent's verdicts on the tracker after `since`, oldest first (advisory ones included). */
   verdictsSince(trackerId: string, since: Date): Promise<DrillObservation['verdicts']>;
-  /** ai_exit_executions rows of these verdicts. */
+  /** The exit execution rows of these verdicts (the script reads them). */
   executions(verdictIds: string[]): Promise<DrillObservation['executions']>;
   now(): Date;
   sleep(ms: number): Promise<void>;
@@ -115,7 +115,7 @@ export async function runAuthorityDrill(deps: DrillDeps, opts: DrillOptions): Pr
     const obs: DrillObservation = { alarm, verdicts, executions };
     show(drillPath(obs));
     if (drillSold(obs)) {
-      p('SAFETY FAILURE: a drill verdict reached the executor as a sale. Check the position and ai_exit_executions NOW.');
+      p('SAFETY FAILURE: a drill verdict reached the executor as a sale. Check the position and the exit execution rows NOW.');
       return 1;
     }
     if (alarm.status === 'CLOSED' || alarm.status === 'BACKSTOPPED') {

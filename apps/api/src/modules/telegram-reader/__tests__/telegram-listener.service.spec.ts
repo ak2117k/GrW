@@ -2,7 +2,8 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TELEGRAM_MESSAGE_EVENT } from '../telegram-reader.events';
-import { TelegramListenerService, backoffMs, readerEnabled } from '../services/telegram-listener.service';
+import { TelegramListenerService, backoffMs, isNetworkError, isPermanentChannelError, readerEnabled } from '../services/telegram-listener.service';
+import { TelegramTimeoutError } from '../services/telegram-listener-health';
 import { TgIncomingMessage } from '../client/telegram-client.port';
 import { FakeTgClient } from './fake-client';
 import { Logger } from '@nestjs/common';
@@ -522,9 +523,9 @@ describe('TelegramListenerService', () => {
       expect(alerts.mock.calls[1][1]).toContain('Caught up 1 post(s)');
       expect(alerts.mock.calls[1][1]).toContain('Could not read: "Beta"');
       const beta = c.recentMessages.mock.calls.filter(([id]: [string]) => id === '-1002').map(([, n]: [string, number]) => n);
-      expect(beta.slice(0, 3)).toEqual([100, 100, 100]);
-      expect(beta.length).toBeGreaterThan(3);
-      expect(beta.slice(3).every((n: number) => n === 5)).toBe(true); // no 100-post fetch forever
+      expect(beta[0]).toBe(100); // "Could not find the input entity" is permanent: dropped after the first try
+      expect(beta.length).toBeGreaterThan(1);
+      expect(beta.slice(1).every((n: number) => n === 5)).toBe(true); // no 100-post fetch forever
       expect(warn.mock.calls.filter(([l]) => String(l).includes('catch-up skipped for "Beta"'))).toHaveLength(1);
       await svc.onModuleDestroy();
     });
@@ -548,6 +549,73 @@ describe('TelegramListenerService', () => {
       await svc.refreshChannels();
       expect([...(svc as any).catchUpLeft]).toEqual(['-1001']);
       await svc.stop();
+    });
+
+    it.each([
+      ['CHANNEL_BANNED (permanent): dropped at once', [Object.assign(new Error('rpc'), { errorMessage: 'CHANNEL_BANNED' })], [100, 5, 5, 5]],
+      ['RPC_CALL_FAIL ×3 (no network error): dropped after the 3rd try', [Object.assign(new Error('rpc'), { errorMessage: 'RPC_CALL_FAIL' })], [100, 100, 100, 5]],
+      ['"Request was unsuccessful 5 time(s)" ×3: dropped after the 3rd try', [new Error('Request was unsuccessful 5 time(s)')], [100, 100, 100, 5]],
+      [
+        'a timeout among the tries: kept in catch-up (the link, not the channel)',
+        [new TelegramTimeoutError('poll', 30_000), Object.assign(new Error('rpc'), { errorMessage: 'RPC_CALL_FAIL' }), new Error('Request was unsuccessful 5 time(s)')],
+        [100, 100, 100, 100],
+      ],
+      [
+        'a socket error among the tries: kept in catch-up',
+        [new Error('Cannot send requests while disconnected. Please reconnect.'), Object.assign(new Error('rpc'), { errorMessage: 'RPC_CALL_FAIL' }), Object.assign(new Error('rpc'), { errorMessage: 'RPC_CALL_FAIL' })],
+        [100, 100, 100, 100],
+      ],
+    ])('catch-up errors: %s', async (_why, errors, limits) => {
+      const { svc, c, prisma } = live();
+      jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      prisma.telegramChannel.findMany.mockResolvedValue(two as any);
+      const errs = errors as unknown[];
+      let n = 0;
+      c.recentMessages.mockImplementation(async (chatId: string) => {
+        if (chatId !== '-1002') return [];
+        throw errs[Math.min(n++, errs.length - 1)];
+      });
+      await svc.start();
+      for (let i = 0; i < 4; i++) await svc.pollOnce();
+      expect(c.recentMessages.mock.calls.filter(([id]: [string]) => id === '-1002').map(([, l]: [string, number]) => l)).toEqual(limits);
+      await svc.stop();
+    });
+
+    it('classifies permanent channel errors and network errors', () => {
+      const rpc = (m: string) => Object.assign(new Error('rpc'), { errorMessage: m });
+      for (const m of ['CHANNEL_PRIVATE', 'CHANNEL_INVALID', 'CHANNEL_BANNED', 'USER_BANNED_IN_CHANNEL']) expect(isPermanentChannelError(rpc(m))).toBe(true);
+      expect(isPermanentChannelError(new Error('Could not find the input entity for {"channelId":"2"}'))).toBe(true);
+      expect(isPermanentChannelError(rpc('RPC_CALL_FAIL'))).toBe(false);
+      expect(isPermanentChannelError(new Error('Request was unsuccessful 5 time(s)'))).toBe(false);
+      expect(isNetworkError(new TelegramTimeoutError('poll', 30_000))).toBe(true);
+      expect(isNetworkError(Object.assign(new Error('x'), { code: 'ECONNRESET' }))).toBe(true);
+      expect(isNetworkError(new Error('Cannot send requests while disconnected. Please reconnect.'))).toBe(true);
+      expect(isNetworkError(rpc('RPC_CALL_FAIL'))).toBe(false);
+      expect(isNetworkError(new Error('Request was unsuccessful 5 time(s)'))).toBe(false);
+    });
+
+    it('pushes flowing for 5 min close the outage (RECOVERED) even while catch-up cannot finish', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, c, client, alerts } = live();
+      jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      c.recentMessages.mockImplementation(never); // polls never answer, so catch-up never completes
+      client.connectSilentlyFails = true;
+      await svc.onApplicationBootstrap();
+      await jest.advanceTimersByTimeAsync(20 * 60_000);
+      expect(alerts).toHaveBeenCalledTimes(1);
+      client.connectSilentlyFails = false;
+      let pushes = 0;
+      for (let i = 0; i < 40; i++) {
+        // pushes every 30 s once the reconnected client listens (polls still hang: catch-up never finishes)
+        if (svc.status().state === 'listening') client.handler!(msg({ chatId: '-1999', tgMessageId: 900 + pushes++ }));
+        await jest.advanceTimersByTimeAsync(30_000);
+        if (pushes === 8) expect(alerts).toHaveBeenCalledTimes(1); // ~4 min of pushes: not yet
+      }
+      expect(pushes).toBeGreaterThan(12);
+      expect(svc.status().state).toBe('listening');
+      expect(alerts).toHaveBeenCalledTimes(2);
+      expect(alerts.mock.calls[1][0]).toBe('TELEGRAM_READER_RECOVERED');
+      await svc.onModuleDestroy();
     });
 
     it('pushes from a replaced (abandoned) client are ignored: they cannot hide a stall of the current one', async () => {

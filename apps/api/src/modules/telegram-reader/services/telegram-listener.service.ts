@@ -119,11 +119,14 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
   private catchUpLeft = new Set<string>();
   private catchUpStored = 0;
   /** Non-transient catch-up failures per channel; after CATCHUP_MAX_TRIES the channel is skipped (logged once). */
-  private catchUpTries = new Map<string, number>();
+  private catchUpTries = new Map<string, { tries: number; network: boolean }>();
   /** Titles of channels catch-up gave up on since the last (re)connect (named in the recovery alert). */
   private catchUpBroken: string[] = [];
   /** First answer after the latest failure; the backoff resets once the link has been up STABLE_RESET_MS. */
   private stableSince: number | null = null;
+  /** Live-push streak (no gap > stall threshold): pushes flowing PUSH_RECOVERY_MS close an outage on their own. */
+  private lastPushAt: number | null = null;
+  private pushStreakSince: number | null = null;
   /** Every round that failed for all channels after a good one logs once. */
   private pollFailing = false;
   private pollRound = 0;
@@ -351,12 +354,15 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
             this.markProgress();
           }
           lastErr = describe(err);
-          // A channel that keeps failing must not hold catch-up (and the recovery alert) open forever. A
-          // timeout is the link, not the channel, so it does not count; an RPC answer / any other error does.
-          if (catchUp && !(err instanceof TelegramTimeoutError)) {
-            const tries = (this.catchUpTries.get(chatId) ?? 0) + 1;
-            this.catchUpTries.set(chatId, tries);
-            if (answered || tries >= CATCHUP_MAX_TRIES) {
+          // A channel that keeps failing must not hold catch-up (and the recovery alert) open forever.
+          // Known permanent errors drop it at once; anything else counts as a try, and after the 3rd try it is
+          // dropped only if none of the tries was a timeout / network error (those are the link, not the channel).
+          if (catchUp) {
+            const prev = this.catchUpTries.get(chatId) ?? { tries: 0, network: false };
+            const t = { tries: prev.tries + 1, network: prev.network || isNetworkError(err) };
+            this.catchUpTries.set(chatId, t);
+            const tries = t.tries;
+            if (isPermanentChannelError(err) || (tries >= CATCHUP_MAX_TRIES && !t.network)) {
               this.catchUpLeft.delete(chatId);
               const title = this.enabled.get(chatId)?.title ?? chatId;
               this.catchUpBroken.push(title);
@@ -455,6 +461,9 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     if (source === 'push') {
       this.received++;
       this.markProgress(); // a live update proves the link even when polls fail
+      const now = Date.now();
+      if (this.lastPushAt === null || now - this.lastPushAt > this.stallMs()) this.pushStreakSince = now;
+      this.lastPushAt = now;
     }
     const ch = this.enabled.get(m.chatId);
     if (!ch) return false;
@@ -658,7 +667,7 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
       this.logger.warn('telegram-reader: connection lost — reconnecting');
       await this.onFailure(new Error('connection lost'), this.generation);
     } else if (this.stateValue === 'listening' && this.client && this.pollOn) {
-      const stallMs = envMinutes(this.config.get<string>('TELEGRAM_STALL_MIN'), STALL_MIN_DEFAULT) * 60_000;
+      const stallMs = this.stallMs();
       const silent = silentForMs({ now, lastProgressAt: this.lastProgressAt, listeningSince: this.listeningSince, floodPauseUntil: this.floodPauseUntil });
       if (silent > stallMs) {
         this.logger.warn(`telegram-reader: no answer from Telegram for ${Math.round(silent / 60_000)} min (no poll round, no live update) — restarting the client`);
@@ -668,6 +677,10 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     await this.checkOutage(now);
   }
 
+  private stallMs(): number {
+    return envMinutes(this.config.get<string>('TELEGRAM_STALL_MIN'), STALL_MIN_DEFAULT) * 60_000;
+  }
+
   /** One alert per outage once nothing could be read for the alert threshold; retried until Telegram takes it. */
   private async checkOutage(now: number): Promise<void> {
     if (!this.pollOn || this.stateValue === 'idle' || this.stateValue === 'off') return;
@@ -675,7 +688,11 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     const downSince = Math.max(this.lastProgressAt ?? this.bootAt, this.floodPauseUntil);
     if (now - downSince < alertMs) {
       // Answers came back by a path that did not close the outage (e.g. live pushes while polls fail).
-      if (this.outageDue && this.stateValue === 'listening' && this.catchUpLeft.size === 0) this.closeOutage();
+      if (this.outageDue && this.stateValue === 'listening') {
+        const pushesFlowing =
+          this.lastPushAt !== null && this.pushStreakSince !== null && now - this.lastPushAt <= this.stallMs() && now - this.pushStreakSince >= STABLE_RESET_MS;
+        if (this.catchUpLeft.size === 0 || pushesFlowing) this.closeOutage();
+      }
       return;
     }
     const text = stalledAlertText({ downSince, now, state: this.stateValue, lastError: this.lastError });
@@ -698,6 +715,8 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     this.client = null;
     this.listeningSince = null;
     this.stableSince = null;
+    this.lastPushAt = null;
+    this.pushStreakSince = null;
     this.polling = false; // a round still waiting on the dead client must not block the next client's polls
     this.pollRound++;
     if (c) await closeQuietly(c);
@@ -721,6 +740,25 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
   }
+}
+
+/** Errors that mean this channel cannot be read with this account (left / banned / gone): no point retrying. */
+const PERMANENT_CHANNEL_CODES = new Set(['CHANNEL_PRIVATE', 'CHANNEL_INVALID', 'CHANNEL_BANNED', 'USER_BANNED_IN_CHANNEL']);
+
+export function isPermanentChannelError(err: unknown): boolean {
+  const code = rpcCode(err);
+  if (code && PERMANENT_CHANNEL_CODES.has(code)) return true;
+  return err instanceof Error && err.message.includes('Could not find the input entity');
+}
+
+/** The link, not the channel: a time-out, a socket / DNS error, or GramJS refusing to send while disconnected. */
+export function isNetworkError(err: unknown): boolean {
+  if (err instanceof TelegramTimeoutError) return true;
+  if (rpcCode(err)) return false; // Telegram answered
+  const e = err as { code?: unknown; message?: unknown } | null;
+  if (e && typeof e.code === 'string' && /^(ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EPIPE|ENETUNREACH|EHOSTUNREACH)/.test(e.code)) return true;
+  const msg = typeof e?.message === 'string' ? e.message : '';
+  return /disconnected|socket|network|ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|connection (closed|lost|reset)/i.test(msg);
 }
 
 /** Close a client without ever blocking or throwing (a dead GramJS client may never finish disconnecting). */

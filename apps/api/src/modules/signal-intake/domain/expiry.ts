@@ -5,8 +5,8 @@ import type { ExpiryHint, InstrumentKind } from './types';
  *
  * First choice: the instrument master's listed expiries for the underlying (passed in as `listed`,
  * YYYY-MM-DD) — the nearest one that is still tradable at `postedAt`; with a month-only hint, that
- * month's LAST listed expiry; with a full date hint, that date if listed (else the nearest listed on
- * or after it).
+ * month's LAST live expiry; with a full date hint, exactly that date (a holiday-shifted nominal day maps to
+ * the listed one 1–2 days earlier; anything else is a mismatch, never another listed expiry).
  *
  * Fallback when the master is unavailable (the download failed, or a BFO expiry beyond the cached
  * 70-day BFO window): the exchange calendar rule as of the 2025 SEBI changes — NIFTY weekly (Tuesday), SENSEX
@@ -20,21 +20,29 @@ export interface InferredExpiry {
   source: 'message' | 'master' | 'rule' | 'none';
   /**
    * Set when the post NAMES an expiry the master does not list as live (audit 2026-11-28). `expiry` is then the
-   * named date itself (or the named month's calendar monthly) — never another listed contract — so no contract
-   * matches and the call stays unresolved instead of trading a different expiry.
+   * named date itself (or the named month's calendar monthly / last day) — never another listed contract — so
+   * the trader's exact-expiry resolve refuses it. (Edge: a month-only hint posted after the cutoff on that month's
+   * last expiry day keeps a date that is still listed; that is the contract the post named.)
    */
   mismatch?: string;
   /**
-   * A named weekday that is not listed, taken as the one listed expiry of the same month 1–2 calendar days earlier
-   * (an exchange holiday moves an expiry earlier; ruling 2026-11-28). Two such candidates, a wider gap, another month
-   * or a named weekend day stay a mismatch.
+   * A named day that is not listed, taken as the one listed expiry of the same month 1–2 calendar days earlier
+   * (an exchange holiday moves an expiry earlier; ruling 2026-11-28). Only when the named day is the underlying's
+   * normal expiry weekday (and, for a monthly-only underlying, in the last week of the month); never on MCX.
    */
   expiryShifted?: { named: string; listed: string };
 }
 
+export interface InferOptions {
+  /** The contract's segment (NFO / BFO / MCX): MCX has its own session cutoff and never holiday-shifts. */
+  exchange?: string | null;
+}
+
 const IST_OFFSET_MS = 330 * 60_000;
-/** After this IST minute an expiring contract is no longer the one a new tip means. */
+/** After this IST minute an expiring NSE / BSE contract is no longer the one a new tip means. */
 const EXPIRY_DAY_CUTOFF_MIN = 15 * 60 + 15;
+/** MCX trades its expiring contract until the session close (23:30 IST; 23:55 in the US winter — 23:30 is the safe one). */
+const MCX_EXPIRY_DAY_CUTOFF_MIN = 23 * 60 + 30;
 
 const istParts = (at: Date) => {
   const d = new Date(at.getTime() + IST_OFFSET_MS);
@@ -44,10 +52,10 @@ const istParts = (at: Date) => {
 const pad = (n: number) => String(n).padStart(2, '0');
 const ymdOf = (y: number, m: number, d: number) => `${y}-${pad(m)}-${pad(d)}`;
 
-/** First YYYY-MM-DD a NEW position can still use at `at` (today until 15:15 IST, else tomorrow). */
-export function earliestUsable(at: Date): string {
+/** First YYYY-MM-DD a NEW position can still use at `at` (today until 15:15 IST — 23:30 on MCX — else tomorrow). */
+export function earliestUsable(at: Date, exchange?: string | null): string {
   const { ymd, min } = istParts(at);
-  if (min < EXPIRY_DAY_CUTOFF_MIN) return ymd;
+  if (min < (exchange === 'MCX' ? MCX_EXPIRY_DAY_CUTOFF_MIN : EXPIRY_DAY_CUTOFF_MIN)) return ymd;
   const d = new Date(`${ymd}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + 1);
   return d.toISOString().slice(0, 10);
@@ -59,9 +67,11 @@ export function inferExpiry(
   hint: ExpiryHint | null,
   postedAt: Date,
   listed: readonly string[] | null,
+  opts: InferOptions = {},
 ): InferredExpiry {
   if (kind === 'EQ') return { expiry: null, source: 'none' };
-  const from = earliestUsable(postedAt);
+  const mcx = opts.exchange === 'MCX' || MCX.has(underlying);
+  const from = earliestUsable(postedAt, mcx ? 'MCX' : opts.exchange);
   const list = (listed ?? []).filter((e) => /^\d{4}-\d{2}-\d{2}$/.test(e)).sort();
 
   const live = list.filter((e) => e >= from);
@@ -71,11 +81,11 @@ export function inferExpiry(
     const year = hint.year ?? yearFor(hint.month, from);
     if (hint.day !== null) {
       // The named day exactly: a day the master does not list is a mismatch, never the next listed one. A listed
-      // day is kept even after the 15:15 cutoff on that day (the post names it; the market clock decides).
+      // day is kept even after the cutoff on that day (the post names it; the market clock decides).
       const want = ymdOf(year, hint.month, hint.day);
       if (list.length === 0) return { expiry: want, source: 'message' };
       if (list.includes(want)) return { expiry: want, source: 'message' };
-      const shifted = holidayShift(want, list, from);
+      const shifted = mcx ? null : holidayShift(want, list, from);
       if (shifted) return { expiry: shifted, source: 'message', expiryShifted: { named: want, listed: shifted } };
       const why = want < from ? 'has already expired' : 'is not listed';
       return { expiry: want, source: 'message', mismatch: `named expiry ${want} ${why} for ${underlying} ${kind} (live: ${shown()})` };
@@ -91,7 +101,7 @@ export function inferExpiry(
     return { expiry: want, source: 'message', mismatch: `named expiry month ${month} has no live ${underlying} ${kind} expiry (live: ${shown()})` };
   }
 
-  if (hint?.relative) return relativeExpiry(underlying, kind, hint.relative, from, live);
+  if (hint?.relative) return relativeExpiry(underlying, kind, hint.relative, from, list, live);
 
   if (list.length) {
     // Futures: nearest month; options: nearest listed (weekly where one exists).
@@ -102,19 +112,31 @@ export function inferExpiry(
   return { expiry: rule, source: rule ? 'rule' : 'none' };
 }
 
+/** The underlying lists more than one expiry in some month (a weekly series). */
+const hasWeeklies = (list: readonly string[]) => {
+  const months = list.map((e) => e.slice(0, 7));
+  return months.some((m, i) => months.indexOf(m) !== i);
+};
+
 /**
- * "weekly" / "this expiry" → the nearest live; "next (week) expiry" → the one after it; "monthly" → the last live
- * expiry in the nearest live expiry's month. Without the master: the calendar rule, source 'rule'.
+ * "weekly" / "this expiry" → the nearest live; "next expiry" → the one after it; "next week expiry" → the same on a
+ * weekly underlying, a mismatch on a monthly-only one (never next month's); "monthly" → the last live expiry in the
+ * nearest live expiry's month. Without the master: the calendar rule, source 'rule'.
  */
 function relativeExpiry(
   underlying: string,
   kind: InstrumentKind,
   r: NonNullable<ExpiryHint['relative']>,
   from: string,
+  list: readonly string[],
   live: readonly string[],
 ): InferredExpiry {
   if (live.length) {
-    if (r === 'NEXT') {
+    if (r === 'NEXT_WEEK' && !hasWeeklies(list)) {
+      // A monthly-only underlying has no next week's expiry: the day after the nearest is never listed.
+      return { expiry: dayAfter(live[0]), source: 'message', mismatch: `"next week expiry" named but ${underlying} ${kind} has no weekly expiries (live: ${live.slice(0, 3).join(', ')})` };
+    }
+    if (r === 'NEXT' || r === 'NEXT_WEEK') {
       if (live[1]) return { expiry: live[1], source: 'message' };
       // Only one live: name the calendar's next one (never the nearest), so nothing listed matches.
       const next = ruleExpiry(underlying, kind, dayAfter(live[0])) ?? dayAfter(live[0]);
@@ -129,7 +151,10 @@ function relativeExpiry(
   }
   const near = ruleExpiry(underlying, kind, from);
   if (!near) return { expiry: null, source: 'none' };
-  if (r === 'NEXT') {
+  if (r === 'NEXT_WEEK' && (WEEKLY[underlying] === undefined || kind === 'FUT')) {
+    return { expiry: dayAfter(near), source: 'message', mismatch: `"next week expiry" named but ${underlying} ${kind} has no weekly expiries` };
+  }
+  if (r === 'NEXT' || r === 'NEXT_WEEK') {
     const next = ruleExpiry(underlying, kind, dayAfter(near));
     return { expiry: next, source: next ? 'rule' : 'none' };
   }
@@ -140,13 +165,30 @@ function relativeExpiry(
   return { expiry: near, source: 'rule' };
 }
 
+const dowOf = (ymd: string) => new Date(`${ymd}T00:00:00Z`).getUTCDay();
+
+/** The weekday most of the listed expiries fall on (holiday-shifted ones are the exception). */
+function normalExpiryWeekday(list: readonly string[]): number | null {
+  const n = new Array<number>(7).fill(0);
+  for (const e of list) n[dowOf(e)]++;
+  const best = Math.max(...n);
+  return best > 0 ? n.indexOf(best) : null;
+}
+
 /**
- * The one listed (and still usable) expiry 1–2 calendar days before a named weekday, in the same month; else null.
- * A Saturday / Sunday is never a nominal expiry, so it never shifts ("26 DEC" 2026 is a Saturday).
+ * The one listed (and still usable) expiry 1–2 calendar days before a named day, in the same month; else null.
+ * The named day must be the underlying's normal expiry weekday (from the master) — "by DEC 31" / "till 2 DEC" /
+ * SENSEX's "03 DEC" on a NIFTY call are not holiday shifts — and, for a monthly-only underlying, in the last
+ * week of its month.
  */
 function holidayShift(want: string, list: readonly string[], from: string): string | null {
-  const dow = new Date(`${want}T00:00:00Z`).getUTCDay();
-  if (dow === 0 || dow === 6) return null;
+  if (dowOf(want) !== normalExpiryWeekday(list)) return null;
+  if (!hasWeeklies(list)) {
+    const y = Number(want.slice(0, 4));
+    const m = Number(want.slice(5, 7));
+    const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    if (Number(want.slice(8, 10)) <= lastDay - 7) return null;
+  }
   const back = (n: number) => {
     const d = new Date(`${want}T00:00:00Z`);
     d.setUTCDate(d.getUTCDate() - n);
@@ -170,7 +212,10 @@ function yearFor(month: number, from: string): number {
 
 const WEEKLY: Record<string, number> = { NIFTY: 2, SENSEX: 4 };
 const MONTHLY_DOW: Record<string, number> = { BANKEX: 4 };
-const MCX = new Set(['CRUDEOIL', 'NATURALGAS', 'GOLD', 'SILVER', 'COPPER', 'ZINC']);
+const MCX = new Set([
+  'CRUDEOIL', 'CRUDEOILM', 'NATURALGAS', 'NATGASMINI', 'GOLD', 'GOLDM', 'GOLDPETAL', 'GOLDGUINEA', 'SILVER', 'SILVERM', 'SILVERMIC',
+  'COPPER', 'ZINC', 'ZINCMINI', 'ALUMINIUM', 'ALUMINI', 'LEAD', 'LEADMINI', 'NICKEL',
+]);
 
 /** Calendar-rule expiry on or after `from` (YYYY-MM-DD). */
 export function ruleExpiry(underlying: string, kind: InstrumentKind, from: string): string | null {

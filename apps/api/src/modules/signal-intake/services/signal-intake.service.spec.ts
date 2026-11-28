@@ -1303,34 +1303,44 @@ describe('named expiry (audit 2026-11-28, Mr P "December 29" traded on the weekl
   const row = (d: string, mon: string, token: string) => ({
     exch_seg: 'NFO', name: 'NIFTY', instrumenttype: 'OPTIDX', symbol: `NIFTY${d}${mon}2624000CE`, expiry: `${d}${mon}2026`, strike: '2400000.000000', token,
   });
-  const master = [row('27', 'OCT', '111'), row('03', 'NOV', '222'), row('24', 'NOV', '333')];
+  // The real NIFTY calendar: Tuesday weeklies; the Nov monthly is Mon 23-Nov (Guru Nanak Jayanti on Tue 24-Nov).
+  const master = [row('27', 'OCT', '111'), row('03', 'NOV', '222'), row('23', 'NOV', '333')];
   const llmCall = { underlying: 'NIFTY', instrumentKind: 'CE', strike: 24000, expiry: null, side: 'BUY', entryType: 'ABOVE', entryLow: 120, entryHigh: 120, sl: 100, targets: [150], qty: null, horizon: 'BTST', confidence: 0.8 };
 
   it('an LLM parse with no expiry takes the expiry the post names', async () => {
     const llm = jest.fn(async (): Promise<LlmParseReply> => ({ isSignal: true, signals: [llmCall as never] }));
     const { svc, mem, msg } = make({ llm, master });
-    await svc.handle(msg('m1', 'A', 'Btst (November 24) NIFTY 24000 CE 120 ke upar lelo, 100 ka stop, 150 tak jayega'));
+    await svc.handle(msg('m1', 'A', 'Btst (November 23) NIFTY 24000 CE 120 ke upar lelo, 100 ka stop, 150 tak jayega'));
     await flush();
     await svc.handle(msg('x', 'A', 'BUY NIFTY 24100 CE ABOVE 120 SL 100 TGT 140', 1));
     expect(llm).toHaveBeenCalledTimes(1);
-    expect(mem.signals[0]).toMatchObject({ parser: 'llm', expiry: '2026-11-24', expirySource: 'message', token: '333', tradingsymbol: 'NIFTY24NOV2624000CE' });
+    expect(mem.signals[0]).toMatchObject({ parser: 'llm', expiry: '2026-11-23', expirySource: 'message', token: '333', tradingsymbol: 'NIFTY23NOV2624000CE' });
+  });
+
+  it('a multi-underlying LLM reply: the expiry written next to CRUDEOIL is not given to the NIFTY call', async () => {
+    const llm = jest.fn(async (): Promise<LlmParseReply> => ({ isSignal: true, signals: [llmCall as never] }));
+    const { svc, mem, msg } = make({ llm, master });
+    await svc.handle(msg('m1', 'A', 'CRUDEOIL 7500 PE 16 DEC EX 285 ke upar\nNIFTY 24000 CE 120 ke upar lelo, 100 ka stop, 150 tak jayega'));
+    await flush();
+    await svc.handle(msg('x', 'A', 'BUY NIFTY 24100 CE ABOVE 120 SL 100 TGT 140', 1));
+    expect(mem.signals[0]).toMatchObject({ parser: 'llm', underlying: 'NIFTY', expiry: '2026-10-27', expirySource: 'master', token: '111' });
   });
 
   it('a named expiry that is not listed stays unresolved (no token) and records why — never the nearest weekly', async () => {
     const { svc, mem, msg } = make({ master });
-    // Fri 27-Nov: nothing listed on 25/26-Nov (24-Nov is 3 days earlier) — no holiday shift either.
+    // Fri 27-Nov: not the NIFTY expiry weekday, nothing listed on it — no holiday shift either.
     await svc.handle(msg('m1', 'A', 'BUY NIFTY 24000 CE 27 Nov ABOVE 120 SL 100 TGT 140'));
     expect(mem.signals[0]).toMatchObject({ expiry: '2026-11-27', expirySource: 'message', token: null, tradingsymbol: null });
     expect(mem.signals[0].tags).toContain('EXPIRY_UNLISTED');
     expect(mem.classes.get('m1')?.reason).toMatch(/named expiry 2026-11-27 is not listed/);
   });
 
-  it('a named day 1 day after the one listed expiry (holiday shift) takes it and records expiryShifted', async () => {
+  it('"24 Nov" (the nominal Tuesday) → the holiday-shifted Monday 23-Nov, recorded as expiryShifted', async () => {
     const { svc, mem, msg } = make({ master });
-    await svc.handle(msg('m1', 'A', 'BUY NIFTY 24000 CE 25 Nov ABOVE 120 SL 100 TGT 140'));
-    expect(mem.signals[0]).toMatchObject({ expiry: '2026-11-24', expirySource: 'message', token: '333', tradingsymbol: 'NIFTY24NOV2624000CE' });
+    await svc.handle(msg('m1', 'A', 'BUY NIFTY 24000 CE 24 Nov ABOVE 120 SL 100 TGT 140'));
+    expect(mem.signals[0]).toMatchObject({ expiry: '2026-11-23', expirySource: 'message', token: '333', tradingsymbol: 'NIFTY23NOV2624000CE' });
     expect(mem.signals[0].tags).toContain('EXPIRY_SHIFTED');
-    expect(mem.classes.get('m1')?.reason).toBe('expiryShifted {"named":"2026-11-25","listed":"2026-11-24"}');
+    expect(mem.classes.get('m1')?.reason).toBe('expiryShifted {"named":"2026-11-24","listed":"2026-11-23"}');
   });
 
   it('no expiry named → nearest listed, unchanged', async () => {
@@ -1338,5 +1348,27 @@ describe('named expiry (audit 2026-11-28, Mr P "December 29" traded on the weekl
     await svc.handle(msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
     expect(mem.signals[0]).toMatchObject({ expiry: '2026-10-27', expirySource: 'master', token: '111' });
     expect(mem.signals[0].tags).not.toContain('EXPIRY_UNLISTED');
+  });
+
+  it('an expiry-correcting repost is a new signal, not a DUPLICATE (MCX COMMODITY 2026-11-18, real pair)', async () => {
+    // The Nov crude option expired 17-Nov: "EXPIRY - NOVEMBER" is unresolved; the channel corrects it 33 s later.
+    const crude = [
+      { exch_seg: 'MCX', name: 'CRUDEOIL', instrumenttype: 'OPTFUT', symbol: 'CRUDEOIL16DEC267500PE', expiry: '16DEC2026', strike: '750000.000000', token: '901' },
+      { exch_seg: 'MCX', name: 'CRUDEOIL', instrumenttype: 'OPTFUT', symbol: 'CRUDEOIL15JAN277500PE', expiry: '15JAN2027', strike: '750000.000000', token: '902' },
+    ];
+    const post = (exp: string) =>
+      `▶️COMMODITY MCX TRADE\n\n\n\n🆕 BUY  CRUDEOIL 7500 PE\n\n\n\n📈NEAR LEVEL -  285\n\n\n\n\n📌TARGET  - 310 /330/380\n\n\n\n🚫STOPLOSS -  PAID\n\n\n\n📣EXPIRY -  ${exp}`;
+    const { svc, mem } = make({ master: crude, now: new Date('2026-11-18T05:56:00Z') });
+    const at = (iso: string, id: string, text: string) => ({ messageId: id, channelId: 'MCXC', text, postedAt: new Date(iso), hasMedia: false });
+    await svc.handle(at('2026-11-18T05:54:43Z', 'm1', post('NOVEMBER')));
+    await svc.handle(at('2026-11-18T05:55:16Z', 'm2', post('DECEMBER')));
+    expect(mem.classes.get('m2')?.status).toBe('SIGNAL');
+    expect(mem.signals).toHaveLength(2);
+    expect(mem.signals[0]).toMatchObject({ underlying: 'CRUDEOIL', token: null });
+    expect(mem.signals[0].tags).toContain('EXPIRY_UNLISTED');
+    expect(mem.signals[1]).toMatchObject({ underlying: 'CRUDEOIL', expiry: '2026-12-16', token: '901', tradingsymbol: 'CRUDEOIL16DEC267500PE' });
+    // The same post again (same expiry) is still a DUPLICATE.
+    await svc.handle(at('2026-11-18T05:55:40Z', 'm3', post('DECEMBER')));
+    expect(mem.classes.get('m3')?.status).toBe('DUPLICATE');
   });
 });

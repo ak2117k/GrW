@@ -215,7 +215,9 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
   if (strike !== null && (entryLow === strike || entryHigh === strike)) return null;
 
   // ─── Sanity: levels on the right side of the entry ─────────────────────────
-  if (slCost || noSl || (sl !== null && sl <= 0)) sl = null;
+  // A written stop of 0 is not a stop ("Hero zero … Stop loss- 0"): the LLM path decides (Fix 3 review 2026-11-28).
+  if (!slCost && !noSl && sl !== null && sl <= 0) return null;
+  if (slCost || noSl) sl = null;
   if (sl !== null) {
     if (side === 'BUY' ? sl >= entryLow : sl <= entryHigh) return null;
   }

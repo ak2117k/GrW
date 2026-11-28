@@ -160,18 +160,25 @@ function liftExpiry(input: string): { s: string; expiry: ExpiryHint | null } {
   // "26 DECEX" / "01 DECEXP" (the fancy-font "DEC𝗘𝘅" after NFKC): the month glued to EX(P).
   s = s.replace(new RegExp(`\\b(\\d{1,2}(?:ST|ND|RD|TH)?\\s*[-/ ]?\\s*(?:${MONTH_RE}))(?:EXPIRY|EXP|EX)\\b`, 'g'), '$1 EXPIRY');
   // "28 OCT", "28OCT", "28-OCT-26", "28TH OCT", "29 DECEMBER 2026" — a day + month is an expiry.
-  s = s.replace(new RegExp(`\\b(\\d{1,2})(?:ST|ND|RD|TH)?\\s*[-/ ]?\\s*(${MONTH_RE})\\b(?:\\s*[-/ ]?\\s*'?(\\d{4}|\\d{2})\\b(?!\\s*(CE|PE)))?`, 'g'), (m, d, mo, y) => {
-    const day = Number(d);
-    if (day < 1 || day > 31) return m;
-    name({ day, month: monthIdx(mo), year: yearOf(y) });
-    return ' ';
-  });
+  s = s.replace(
+    new RegExp(`\\b(\\d{1,2})(?:ST|ND|RD|TH)?\\s*[-/ ]?\\s*(${MONTH_RE})\\b(?:\\s*[-/ ]?\\s*'?(\\d{4}|\\d{2})\\b(?!\\s*(?:CE|PE)))?`, 'g'),
+    (m: string, d: string, mo: string, y: string | undefined, at: number, str: string) => {
+      const day = Number(d);
+      if (day < 1 || day > 31) return m;
+      // "25 may come soon" / "20 mar ke nikal jana": MAY / MAR(CH) are words too — a date only with a year, an
+      // EXPIRY word, or next to the contract.
+      if (ENGLISH_MONTH.test(mo) && !y && !nextToContractOrExpiry(str.slice(0, at), str.slice(at + m.length))) return m;
+      name({ day, month: monthIdx(mo), year: yearOf(y) });
+      return ' ';
+    },
+  );
   // "DECEMBER 29", "DEC 29TH, 2026" — month first (not a strike: "DEC 24000 CE" has more digits; not "OCT 25 CE").
   s = s.replace(
     new RegExp(`\\b(${MONTH_WORD_RE})\\s*[-/ ]?\\s*(\\d{1,2})(?:ST|ND|RD|TH)?\\b(?:\\s*,?\\s*(\\d{4})\\b)?(?!\\s*(?:[-/.]\\s*\\d|CE\\b|PE\\b|FUT\\b|%|TO\\b))`, 'g'),
-    (m, mo, d, y) => {
+    (m: string, mo: string, d: string, y: string | undefined, at: number, str: string) => {
       const day = Number(d);
       if (day < 1 || day > 31) return m;
+      if (ENGLISH_MONTH.test(mo) && !y && !nextToContractOrExpiry(str.slice(0, at), str.slice(at + m.length))) return m;
       name({ day, month: monthIdx(mo), year: yearOf(y) });
       return ' ';
     },
@@ -181,8 +188,8 @@ function liftExpiry(input: string): { s: string; expiry: ExpiryHint | null } {
     name({ day: null, month: monthIdx(mo), year: null });
     return ' ';
   });
-  // "DEC EXPIRY", "NOVEMBER EXPIRY", "DEC MONTHLY EXPIRY" — a month named as the expiry.
-  s = s.replace(new RegExp(`\\b(${MONTH_RE})\\b(?=\\s*(?:MONTHLY\\s*)?(?:EXPIRY|EXP)\\b)`, 'g'), (_m, mo) => {
+  // "DEC EXPIRY", "NOVEMBER EXPIRY", "DEC MONTHLY EXPIRY", "DEC SERIES" — a month named as the expiry.
+  s = s.replace(new RegExp(`\\b(${MONTH_RE})\\b(?=\\s*(?:MONTHLY\\s*)?(?:EXPIRY|EXP|SERIES)\\b)`, 'g'), (_m, mo) => {
     name({ day: null, month: monthIdx(mo), year: null });
     return ' ';
   });
@@ -193,9 +200,20 @@ function liftExpiry(input: string): { s: string; expiry: ExpiryHint | null } {
   });
 
   // Relative words, anchored on the word EXPIRY or on the contract itself (a bare "next week" / "monthly plan" is not one).
-  s = s.replace(/\b(?:NEXT|AGLE|AGLI|AGLA)\s+(?:WEEK(?:LY)?\s+|HAFTE\s+(?:KI\s+|KA\s+|WALI\s+)?)?(?:KI\s+|WALI\s+)?(?=EXPIRY\b|EXP\b)/g, () => {
-    rel('NEXT');
-    return ' ';
+  // "NEXT (WEEK) EXPIRY" only right next to the contract ("25700 PE next week expiry", "(next expiry) NIFTY 25700 PE")
+  // or as the EXPIRY label ("EXPIRY: NEXT WEEK"); "hold till next expiry" is commentary.
+  s = s.replace(
+    /\b(?:NEXT|AGLE|AGLI|AGLA)\s+(?:(WEEK(?:LY)?)\s+|(HAFTE)\s+(?:KI\s+|KA\s+|WALI\s+)?)?(?:KI\s+|WALI\s+)?(?=(?:EXPIRY|EXP)\b)/g,
+    (m: string, week: string | undefined, hafte: string | undefined, at: number, str: string) => {
+      const after = str.slice(at + m.length).replace(/^(?:EXPIRY|EXP)\b/, '');
+      if (!nextToContract(str.slice(0, at), after)) return m;
+      rel(week || hafte ? 'NEXT_WEEK' : 'NEXT');
+      return ' ';
+    },
+  );
+  s = s.replace(/(\bEXPIRY\s*[:\-=]+\s*)(?:NEXT|AGLE|AGLA)(\s+WEEK(?:LY)?|\s+HAFTE)?\b/g, (_m, pre: string, week: string | undefined) => {
+    rel(week ? 'NEXT_WEEK' : 'NEXT');
+    return `${pre} `;
   });
   s = s.replace(/\b(?:THIS|CURRENT|IS|ISI)\s+(?:WEEK(?:LY)?\s+|HAFTE\s+(?:KI\s+)?)?(?:KI\s+)?(?=EXPIRY\b|EXP\b)/g, () => {
     rel('CURRENT');
@@ -218,6 +236,21 @@ function liftExpiry(input: string): { s: string; expiry: ExpiryHint | null } {
 
   const expiry: ExpiryHint | null = named ?? (relative ? { day: null, month: 0, year: null, relative } : null);
   return { s, expiry };
+}
+
+/** Month names that are also ordinary words ("may", Hinglish "mar", "march"). */
+const ENGLISH_MONTH = /^(?:MAY|MAR|MARCH)$/;
+
+/** A strike + CE/PE right before (`before` ends with it, maybe with "(" / "-") or right after (`after` starts with it). */
+function nextToContract(before: string, after: string): boolean {
+  return (
+    /\d{2,6}(?:\.\d+)?\s*(?:CE|PE)\s*[(\-:,]?\s*$/.test(before) ||
+    /^\s*\)?\s*[:\-,]?\s*(?:[A-Z&]+\s+)?\d{2,6}(?:\.\d+)?\s*(?:CE|PE)\b/.test(after)
+  );
+}
+
+function nextToContractOrExpiry(before: string, after: string): boolean {
+  return nextToContract(before, after) || /^\s*\)?\s*(?:EXPIRY|EXP|EX)\b/.test(after) || /\bEXPIRY\s*[:\-=]*\s*$/.test(before);
 }
 
 export const isNumber = (t: string): boolean => /^\d+(\.\d+)?$/.test(t);

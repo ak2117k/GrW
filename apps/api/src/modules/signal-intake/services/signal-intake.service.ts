@@ -11,6 +11,7 @@ import { prefilter, type PrefilterResult } from '../domain/prefilter';
 import { hasNewCall, resultPostReason } from '../domain/result-post';
 import { parseSignal } from '../domain/rule-parser';
 import { expiryHintOfText, normalise } from '../domain/text';
+import { expiryOwner } from '../domain/expiry-owner';
 import { rematchStrike } from '../domain/strike-sanity';
 import {
   directionOf,
@@ -786,9 +787,17 @@ export class SignalIntakeService {
    * master does not list comes back with `mismatch` and no contract — never another listed expiry.
    */
   private async expiryAndContract(p: ParsedSignal, postedAt: Date, text?: string | null) {
-    const hint = p.expiryHint ?? (p.instrumentKind === 'EQ' ? null : expiryHintOfText(text));
-    if (hint !== p.expiryHint) p = { ...p, expiryHint: hint };
     const vocab = await this.vocab.get();
+    if (!p.expiryHint && p.instrumentKind !== 'EQ' && text) {
+      // A post naming several underlyings: the written expiry belongs only to the one it sits next to (the strike
+      // re-match keeps the post's own name in REMATCHED_FROM).
+      const textHint = expiryHintOfText(text);
+      if (textHint) {
+        const { owner, named } = expiryOwner(text, vocab);
+        const from = p.tags.find((t) => t.startsWith('REMATCHED_FROM:'))?.slice('REMATCHED_FROM:'.length);
+        if (named.length <= 1 || owner === p.underlying || (from && owner === from)) p = { ...p, expiryHint: textHint };
+      }
+    }
     const seg = segmentOf(p.underlying, p.instrumentKind, vocab.classOf.get(p.underlying));
     let rows: readonly unknown[] | null = null;
     try {
@@ -797,7 +806,7 @@ export class SignalIntakeService {
       this.logger.warn(`[signal-intake] instrument master unavailable (calendar-rule expiry): ${errText(e)}`);
     }
     const listed = rows ? listedExpiries(rows, p.underlying, p.instrumentKind, seg) : null;
-    const ex = inferExpiry(p.underlying, p.instrumentKind, p.expiryHint, postedAt, listed && listed.length ? listed : null);
+    const ex = inferExpiry(p.underlying, p.instrumentKind, p.expiryHint, postedAt, listed && listed.length ? listed : null, { exchange: seg });
     const contract = rows ? findContract(rows, { underlying: p.underlying, instrumentKind: p.instrumentKind, strike: p.strike, expiry: ex.expiry }, seg) : null;
     if (ex.mismatch) this.logger.warn(`[signal-intake] ${p.underlying} ${p.strike ?? ''} ${p.instrumentKind}: ${ex.mismatch} — left unresolved`);
     if (ex.expiryShifted) this.logger.log(`[signal-intake] ${p.underlying} ${p.strike ?? ''} ${p.instrumentKind}: named expiry ${ex.expiryShifted.named} not listed — holiday-shifted to ${ex.expiryShifted.listed}`);
@@ -848,7 +857,10 @@ export class SignalIntakeService {
     const reMatched = sane.reMatched ? `reMatched ${JSON.stringify(sane.reMatched)}` : null;
     llmResult = withReMatched(llmResult, sane.reMatched);
     const W = this.config.clusterWindowMs;
-    const key = dedupKey({ channelId: evt.channelId, underlying: p.underlying, instrumentKind: p.instrumentKind, strike: p.strike, side: p.side, entryLow: p.entryLow, entryHigh: p.entryHigh });
+    // The resolved expiry is part of the idea: a repost that corrects the expiry ("EXPIRY - NOVEMBER" → "EXPIRY -
+    // DECEMBER" 30 s later, MCX COMMODITY 2026-11-18) is a new signal, not a DUPLICATE (Fix 3 review).
+    const ex = await this.expiryAndContract(p, postedAt, evt.text);
+    const key = `${dedupKey({ channelId: evt.channelId, underlying: p.underlying, instrumentKind: p.instrumentKind, strike: p.strike, side: p.side, entryLow: p.entryLow, entryHigh: p.entryHigh })}${ex.expiry ? `|${ex.expiry}` : ''}`;
     const dup = await this.repo.duplicateOf(key, new Date(postedAt.getTime() - W));
     if (dup) {
       await this.repo.saveClass({ ...base, status: 'DUPLICATE', parser, signalId: dup, llmResult, reason: reMatched ? `same idea re-posted in this channel; ${reMatched}` : 'same idea re-posted in this channel' });
@@ -866,7 +878,6 @@ export class SignalIntakeService {
       await this.repo.saveClass({ ...base, status: 'RECAP', parser, llmResult, reason: why.slice(0, 500) });
       return;
     }
-    const ex = await this.expiryAndContract(p, postedAt, evt.text);
     const direction = directionOf(p.instrumentKind, p.side);
     let confidence = p.confidence;
     if (ex.source === 'rule') confidence -= 0.05;

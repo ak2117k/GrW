@@ -26,7 +26,7 @@ const FIXTURES: Array<[string, Want]> = [
     { underlying: 'BANKNIFTY', instrumentKind: 'CE', strike: 51500, entryType: 'ABOVE', entryLow: 250, sl: 220, targets: [280, 320] }],
   ['Nifty 24100 PE kharido 95 ke upar, SL 80, target 110 130',
     { underlying: 'NIFTY', instrumentKind: 'PE', strike: 24100, side: 'BUY', entryType: 'ABOVE', entryLow: 95, sl: 80, targets: [110, 130] }],
-  ['HERO ZERO 🦸 NIFTY 24500 CE buy above 5 target 20 40 80 SL 0 (risky)',
+  ['HERO ZERO 🦸 NIFTY 24500 CE buy above 5 target 20 40 80 (risky)',
     { underlying: 'NIFTY', strike: 24500, entryType: 'ABOVE', entryLow: 5, sl: null, targets: [20, 40, 80], tags: ['HERO_ZERO'] }],
   ['BTST: BUY TATASTEEL 150 CE @ 4.5 SL 3.5 TGT 6/7',
     { underlying: 'TATASTEEL', strike: 150, instrumentKind: 'CE', entryLow: 4.5, sl: 3.5, targets: [6, 7], horizon: 'BTST' }],
@@ -147,6 +147,9 @@ describe('rule parser — refuses ambiguous posts (LLM fallback)', () => {
     ['two underlyings', 'NIFTY and BANKNIFTY buy on dips 24000 52000'],
     ['two loose entry numbers (Hinglish prose)', 'NIFTY 24000 CE 120 wala lelo, 100 ka stop, 150 tak jayega'],
     ['option with BELOW and no side', 'NIFTY 24000 PE below 90 sl 110 tgt 70'],
+    // Fix 3 review 2026-11-28: a stop of 0 is not a stop — the LLM path decides, as before the expiry fix.
+    ['a stop of 0 (hero-zero)', 'HERO ZERO 🦸 NIFTY 24500 CE buy above 5 target 20 40 80 SL 0 (risky)'],
+    ['Mr P "Hero zero (November 17) … Stop loss- 0"', 'Hero zero (November 17)\n\nNifty 26000 ce\nAbove 12\nStop loss- 0\n\nLot size- 65\nTarget- 20, 30, 50++'],
   ])('%s', (_why, text) => {
     expect(parseSignal(text, vocab)).toBeNull();
   });

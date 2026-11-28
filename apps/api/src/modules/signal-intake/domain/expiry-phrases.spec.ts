@@ -1,3 +1,4 @@
+import { expiryOwner } from './expiry-owner';
 import { inferExpiry } from './expiry';
 import { parseSignal } from './rule-parser';
 import { expiryHintOfText, normalise } from './text';
@@ -29,14 +30,20 @@ describe('expiry phrases in the post text', () => {
     ['BUY GOLD 125000 CE 📣EXPIRY - NOVEMBER', { day: null, month: 11, year: null }],
     ['KPIT TECH 540CE CMP 25-26 For 35++ November Expiry', { day: null, month: 11, year: null }],
     ['NIFTY DEC 25700 PE above 330', { day: null, month: 12, year: null }],
+    ['NIFTY 25700 PE DEC SERIES above 330', { day: null, month: 12, year: null }],
+    ['BANKNIFTY NOV SERIES 52000 CE buy 300', { day: null, month: 11, year: null }],
+    ['NIFTY 25700 PE 26 MAY EXPIRY above 330', { day: 26, month: 5, year: null }],
+    ['NIFTY 25700 PE (30 MAR) above 330', { day: 30, month: 3, year: null }],
     ['NIFTY 25700 PE monthly expiry above 330', { day: null, month: 0, year: null, relative: 'MONTHLY' }],
     ['NIFTY MONTHLY 25700 PE above 330', { day: null, month: 0, year: null, relative: 'MONTHLY' }],
     ['NIFTY 25700 PE weekly expiry above 330', { day: null, month: 0, year: null, relative: 'WEEKLY' }],
-    ['NIFTY 25700 PE next week expiry above 330', { day: null, month: 0, year: null, relative: 'NEXT' }],
+    ['NIFTY 25700 PE next week expiry above 330', { day: null, month: 0, year: null, relative: 'NEXT_WEEK' }],
     ['NIFTY 25700 PE next expiry above 330', { day: null, month: 0, year: null, relative: 'NEXT' }],
+    ['(Next expiry) NIFTY 25700 PE above 330', { day: null, month: 0, year: null, relative: 'NEXT' }],
+    ['NIFTY 25700 PE above 330, expiry: next week', { day: null, month: 0, year: null, relative: 'NEXT_WEEK' }],
     ['NIFTY 25700 PE this expiry above 330', { day: null, month: 0, year: null, relative: 'CURRENT' }],
     ['NIFTY 25700 PE current week expiry above 330', { day: null, month: 0, year: null, relative: 'CURRENT' }],
-    ['Nifty 25700 PE agle hafte ki expiry 330 ke upar', { day: null, month: 0, year: null, relative: 'NEXT' }],
+    ['Nifty 25700 PE agle hafte ki expiry 330 ke upar', { day: null, month: 0, year: null, relative: 'NEXT_WEEK' }],
     ['Nifty 25700 PE is expiry 330 ke upar', { day: null, month: 0, year: null, relative: 'CURRENT' }],
     ['Nifty 25700 PE mahine ki expiry 330 ke upar', { day: null, month: 0, year: null, relative: 'MONTHLY' }],
   ])('%s', (text, want) => {
@@ -48,8 +55,13 @@ describe('expiry phrases in the post text', () => {
     'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140/160/200',
     'Join our monthly plan, fees 4999',
     'Hold for next week, target 400',
+    'BUY NIFTY 25700 PE above 330, hold till next expiry',
+    'Hold for next week expiry special: NIFTY 25700 PE above 330',
     'BANKNIFTY 52000 PE buy 300-310 sl 270 target 350 400',
     'NIFTY 25700 PE you may 20 points more',
+    'BUY NIFTY 25700 PE above 330, 25 may come soon',
+    'NIFTY 25700 PE above 330, 20 mar ke nikal jana',
+    'NIFTY will march 30 points higher today',
   ])('no expiry in "%s"', (text) => {
     expect(hint(text)).toBeNull();
   });
@@ -78,12 +90,23 @@ describe('expiry phrases in the post text', () => {
     const p = parseSignal(text, vocab);
     expect(p).toMatchObject({ underlying: 'NIFTY', strike: 25700, instrumentKind: 'PE', entryLow: 330, sl: 300, targets: [360, 390], expiryHint: { day: 29, month: 12, year: null } });
   });
+
+  it('a multi-underlying post: the expiry belongs to the one it sits next to', () => {
+    const text = 'BUY CRUDEOIL 7500 PE 16 DEC EX above 200\nBUY NIFTY 25700 PE above 330';
+    expect(expiryOwner(text, vocab)).toMatchObject({ owner: 'CRUDEOIL' });
+    expect(expiryOwner('BUY NIFTY 25700 PE above 330 (29 DEC)', vocab)).toMatchObject({ owner: 'NIFTY', named: ['NIFTY'] });
+    expect(expiryOwner('BUY NIFTY 25700 PE above 330', vocab).owner).toBeNull();
+  });
 });
 
 describe('expiry inference from a named expiry', () => {
   // Fri 2026-11-27 09:19 IST
   const at = new Date('2026-11-27T03:49:35Z');
-  const niftyListed = ['2026-12-01', '2026-12-08', '2026-12-15', '2026-12-22', '2026-12-29', '2027-01-26', '2027-03-30'];
+  // The real Angel master (2026-11-28): NIFTY weeklies to 29-Dec, then monthlies (25-Jan is the Republic Day shift).
+  const niftyListed = ['2026-12-01', '2026-12-08', '2026-12-15', '2026-12-22', '2026-12-29', '2027-01-25', '2027-02-23', '2027-03-30'];
+  const bankniftyListed = ['2026-12-29', '2027-01-25', '2027-02-23', '2027-03-30'];
+  const sensexListed = ['2026-11-26', '2026-12-03', '2026-12-10', '2026-12-17', '2026-12-24', '2026-12-31'];
+  const nifty = (text: string, list = niftyListed) => inferExpiry('NIFTY', 'CE', expiryHintOfText(text), at, list, { exchange: 'NFO' });
 
   it('Mr P "December 29" → the 29-Dec monthly, not the 01-Dec weekly', () => {
     expect(inferExpiry('NIFTY', 'PE', { day: 29, month: 12, year: null }, at, niftyListed)).toEqual({ expiry: '2026-12-29', source: 'message' });
@@ -96,62 +119,103 @@ describe('expiry inference from a named expiry', () => {
     expect(r.mismatch).toMatch(/2026-12-04.*not listed/);
     expect(r.expiryShifted).toBeUndefined();
   });
-  it('holiday shift: a named Tuesday with the one listed expiry on the Monday before is that expiry', () => {
-    const listed = ['2026-12-01', '2026-12-08', '2026-12-14', '2026-12-22'];
-    expect(inferExpiry('NIFTY', 'PE', { day: 15, month: 12, year: null }, at, listed)).toEqual({
-      expiry: '2026-12-14', source: 'message', expiryShifted: { named: '2026-12-15', listed: '2026-12-14' },
+
+  describe('holiday shift', () => {
+    it('NIFTY "26 JAN" (a Tuesday, Republic Day) → the listed Monday 25-Jan', () => {
+      expect(nifty('BUY NIFTY 26000 CE 26 JAN above 100')).toEqual({ expiry: '2027-01-25', source: 'message', expiryShifted: { named: '2027-01-26', listed: '2027-01-25' } });
+    });
+    it('a monthly-only name (BANKNIFTY) shifts only in the last week of the month', () => {
+      expect(inferExpiry('BANKNIFTY', 'CE', { day: 26, month: 1, year: null }, at, bankniftyListed)).toMatchObject({ expiry: '2027-01-25', expiryShifted: { named: '2027-01-26', listed: '2027-01-25' } });
+      // A named Tuesday outside the last week (12-Jan) does not shift onto a listed Monday before it.
+      const r = inferExpiry('BANKNIFTY', 'CE', { day: 12, month: 1, year: null }, at, ['2026-12-29', '2027-01-11', '2027-02-23', '2027-03-30']);
+      expect(r.expiryShifted).toBeUndefined();
+      expect(r.mismatch).toMatch(/2027-01-12/);
+    });
+    it.each([
+      ['"by DEC 31" (a Thursday)', 'BUY NIFTY 26000 CE above 100 target 200 by DEC 31', '2026-12-31'],
+      ['"target by 31st Dec"', 'BUY NIFTY 26000 CE above 100 target by 31st Dec', '2026-12-31'],
+      ['"till 2 DEC" (a Wednesday)', 'BUY NIFTY 26000 CE above 100 hold till 2 DEC', '2026-12-02'],
+      ['SENSEX\'s "(03 DEC EX)" on a NIFTY call (a Thursday)', 'NIFTY 25700 PE (03 DEC EX) above 330', '2026-12-03'],
+    ])('NIFTY %s never shifts to an earlier contract', (_why, text, named) => {
+      const r = nifty(text);
+      expect(r.expiryShifted).toBeUndefined();
+      expect(r).toMatchObject({ expiry: named, mismatch: expect.stringMatching(/not listed/) });
+    });
+    it('a 3-day gap is rejected', () => {
+      // Tue 15-Dec with only Sat 12-Dec before it.
+      const r = inferExpiry('NIFTY', 'PE', { day: 15, month: 12, year: null }, at, ['2026-12-01', '2026-12-08', '2026-12-12', '2026-12-22', '2026-12-29']);
+      expect(r).toMatchObject({ expiry: '2026-12-15', mismatch: expect.stringMatching(/not listed/) });
+      expect(r.expiryShifted).toBeUndefined();
+    });
+    it('two candidates are rejected', () => {
+      const r = inferExpiry('NIFTY', 'PE', { day: 15, month: 12, year: null }, at, ['2026-12-01', '2026-12-08', '2026-12-13', '2026-12-14', '2026-12-22', '2026-12-29']);
+      expect(r).toMatchObject({ expiry: '2026-12-15', mismatch: expect.stringMatching(/not listed/) });
+      expect(r.expiryShifted).toBeUndefined();
+    });
+    it('never across a month', () => {
+      // Tue 02-Mar-2027 with Mon/Sun 01-Mar… none; Tue 01-Jun-2027 with 31-May listed is another month.
+      const r = inferExpiry('NIFTY', 'PE', { day: 1, month: 6, year: 2027 }, at, [...niftyListed, '2027-05-31', '2027-06-29']);
+      expect(r.mismatch).toMatch(/2027-06-01/);
+    });
+    it('never on MCX', () => {
+      const r = inferExpiry('CRUDEOIL', 'PE', { day: 17, month: 12, year: null }, at, ['2026-12-16', '2027-01-15'], { exchange: 'MCX' });
+      expect(r.expiryShifted).toBeUndefined();
+      expect(r.mismatch).toMatch(/2026-12-17/);
+    });
+    it('SENSEX "26 DEC" (a Saturday) stays unresolved although 24-Dec is listed (real master 2026-11-28)', () => {
+      const nov26 = new Date('2026-11-26T03:58:32Z');
+      const r = inferExpiry('SENSEX', 'PE', { day: 26, month: 12, year: null }, nov26, sensexListed, { exchange: 'BFO' });
+      expect(r).toMatchObject({ expiry: '2026-12-26', mismatch: expect.stringMatching(/not listed/) });
+      expect(r.expiryShifted).toBeUndefined();
     });
   });
-  it('holiday shift: a 3-day gap is rejected', () => {
-    const r = inferExpiry('NIFTY', 'PE', { day: 18, month: 12, year: null }, at, ['2026-12-15', '2026-12-22']);
-    expect(r).toMatchObject({ expiry: '2026-12-18', mismatch: expect.stringMatching(/not listed/) });
-    expect(r.expiryShifted).toBeUndefined();
-  });
-  it('holiday shift: two candidates are rejected', () => {
-    const r = inferExpiry('NIFTY', 'PE', { day: 17, month: 12, year: null }, at, ['2026-12-15', '2026-12-16', '2026-12-22']);
-    expect(r).toMatchObject({ expiry: '2026-12-17', mismatch: expect.stringMatching(/not listed/) });
-    expect(r.expiryShifted).toBeUndefined();
-  });
-  it('holiday shift: never across a month', () => {
-    const r = inferExpiry('NIFTY', 'PE', { day: 1, month: 1, year: 2027 }, at, ['2026-12-31', '2027-01-05']);
-    expect(r.mismatch).toMatch(/2027-01-01/);
-  });
-  it('SENSEX "26 DEC" (a Saturday) stays unresolved although 24-Dec is listed (real master 2026-11-28)', () => {
-    const sensex = ['2026-11-26', '2026-12-03', '2026-12-10', '2026-12-17', '2026-12-24', '2026-12-31'];
-    const nov26 = new Date('2026-11-26T03:58:32Z');
-    const r = inferExpiry('SENSEX', 'PE', { day: 26, month: 12, year: null }, nov26, sensex);
-    expect(r).toMatchObject({ expiry: '2026-12-26', mismatch: expect.stringMatching(/not listed/) });
-    expect(r.expiryShifted).toBeUndefined();
-  });
+
   it('a named day already expired (gone from the master) is a mismatch', () => {
-    const r = inferExpiry('NIFTY', 'PE', { day: 24, month: 11, year: null }, at, niftyListed);
-    expect(r.mismatch).toMatch(/2026-11-24 has already expired/);
+    const r = inferExpiry('NIFTY', 'PE', { day: 23, month: 11, year: null }, at, niftyListed);
+    expect(r.mismatch).toMatch(/2026-11-23 has already expired/);
   });
   it('a listed day named after the 15:15 cutoff on that day stays that contract', () => {
     const late = new Date('2026-11-26T09:56:02Z'); // 15:26 IST on the SENSEX 26-Nov expiry
-    expect(inferExpiry('SENSEX', 'CE', { day: 26, month: 11, year: 2026 }, late, ['2026-11-26', '2026-12-03'])).toEqual({ expiry: '2026-11-26', source: 'message' });
+    expect(inferExpiry('SENSEX', 'CE', { day: 26, month: 11, year: 2026 }, late, sensexListed)).toEqual({ expiry: '2026-11-26', source: 'message' });
+  });
+  it('MCX: a month-only post on expiry evening is that day\'s contract (MCX trades it until its close)', () => {
+    // COPPER "EXPIRY - NOVEMBER", 2026-11-23 19:37 IST, the copper Nov expiry day.
+    const eve = new Date('2026-11-23T14:07:00Z');
+    expect(inferExpiry('COPPER', 'CE', { day: null, month: 11, year: null }, eve, ['2026-11-23', '2026-12-23'], { exchange: 'MCX' })).toEqual({ expiry: '2026-11-23', source: 'message' });
+    // NSE at the same minute has already rolled past its 15:15 cutoff.
+    expect(inferExpiry('NIFTY', 'CE', null, eve, ['2026-11-23', '2026-12-01'], { exchange: 'NFO' })).toEqual({ expiry: '2026-12-01', source: 'master' });
   });
   it('month only → that month’s last listed expiry (the monthly)', () => {
     expect(inferExpiry('NIFTY', 'PE', { day: null, month: 12, year: null }, at, niftyListed)).toEqual({ expiry: '2026-12-29', source: 'message' });
+    expect(inferExpiry('NIFTY', 'PE', { day: null, month: 1, year: null }, at, niftyListed)).toEqual({ expiry: '2027-01-25', source: 'message' });
   });
   it('month only with nothing listed that month is a mismatch that names no other contract', () => {
-    const r = inferExpiry('NIFTY', 'PE', { day: null, month: 2, year: null }, at, niftyListed);
-    expect(r.mismatch).toMatch(/2027-02/);
+    const r = inferExpiry('NIFTY', 'PE', { day: null, month: 4, year: null }, at, niftyListed);
+    expect(r.mismatch).toMatch(/2027-04/);
     expect(niftyListed).not.toContain(r.expiry);
   });
   it('monthly → the nearest live month’s last expiry', () => {
     expect(inferExpiry('NIFTY', 'PE', { day: null, month: 0, year: null, relative: 'MONTHLY' }, at, niftyListed)).toEqual({ expiry: '2026-12-29', source: 'message' });
     const nov20 = new Date('2026-11-20T05:00:00Z');
-    expect(inferExpiry('NIFTY', 'PE', { day: null, month: 0, year: null, relative: 'MONTHLY' }, nov20, ['2026-11-24', ...niftyListed])).toEqual({ expiry: '2026-11-24', source: 'message' });
+    expect(inferExpiry('NIFTY', 'PE', { day: null, month: 0, year: null, relative: 'MONTHLY' }, nov20, ['2026-11-23', ...niftyListed])).toEqual({ expiry: '2026-11-23', source: 'message' });
   });
-  it('weekly / this expiry → nearest; next → the one after', () => {
+  it('weekly / this expiry → nearest; next / next week → the one after', () => {
     expect(inferExpiry('NIFTY', 'PE', { day: null, month: 0, year: null, relative: 'WEEKLY' }, at, niftyListed)).toEqual({ expiry: '2026-12-01', source: 'message' });
     expect(inferExpiry('NIFTY', 'PE', { day: null, month: 0, year: null, relative: 'CURRENT' }, at, niftyListed)).toEqual({ expiry: '2026-12-01', source: 'message' });
     expect(inferExpiry('NIFTY', 'PE', { day: null, month: 0, year: null, relative: 'NEXT' }, at, niftyListed)).toEqual({ expiry: '2026-12-08', source: 'message' });
+    expect(inferExpiry('NIFTY', 'PE', { day: null, month: 0, year: null, relative: 'NEXT_WEEK' }, at, niftyListed)).toEqual({ expiry: '2026-12-08', source: 'message' });
+  });
+  it('"next week expiry" on a monthly-only name (BANKNIFTY "agle hafte ki expiry") is a mismatch, never next month', () => {
+    const r = inferExpiry('BANKNIFTY', 'PE', expiryHintOfText('Banknifty 60900 PE agle hafte ki expiry 427 ke upar'), at, bankniftyListed);
+    expect(r.mismatch).toMatch(/no weekly expiries/);
+    expect(bankniftyListed).not.toContain(r.expiry);
+    // "next expiry" (not "week") on BANKNIFTY is the next monthly.
+    expect(inferExpiry('BANKNIFTY', 'PE', { day: null, month: 0, year: null, relative: 'NEXT' }, at, bankniftyListed)).toEqual({ expiry: '2027-01-25', source: 'message' });
   });
   it('relative without the master uses the calendar rule', () => {
     expect(inferExpiry('NIFTY', 'PE', { day: null, month: 0, year: null, relative: 'MONTHLY' }, at, null)).toEqual({ expiry: '2026-12-29', source: 'rule' });
     expect(inferExpiry('NIFTY', 'PE', { day: null, month: 0, year: null, relative: 'NEXT' }, at, null)).toEqual({ expiry: '2026-12-08', source: 'rule' });
+    expect(inferExpiry('BANKNIFTY', 'PE', { day: null, month: 0, year: null, relative: 'NEXT_WEEK' }, at, null).mismatch).toMatch(/no weekly/);
   });
   it('no hint → nearest listed (unchanged)', () => {
     expect(inferExpiry('NIFTY', 'PE', null, at, niftyListed)).toEqual({ expiry: '2026-12-01', source: 'master' });

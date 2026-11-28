@@ -9,9 +9,10 @@ export type Direction = 'BULL' | 'BEAR';
 
 /**
  * A relative expiry written in the message: "monthly expiry" (the nearest month's last), "weekly" / "this expiry"
- * (the nearest), "next expiry" / "next week expiry" (the one after the nearest).
+ * (the nearest), "next expiry" (the one after the nearest), "next week expiry" (the same on a weekly underlying;
+ * none on a monthly-only one).
  */
-export type RelativeExpiry = 'MONTHLY' | 'WEEKLY' | 'CURRENT' | 'NEXT';
+export type RelativeExpiry = 'MONTHLY' | 'WEEKLY' | 'CURRENT' | 'NEXT' | 'NEXT_WEEK';
 
 /**
  * An expiry written in the message: a full date, a month only (that month's last expiry), or a relative one

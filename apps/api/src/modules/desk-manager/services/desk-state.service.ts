@@ -219,7 +219,15 @@ export class DeskStateService {
         if (k && e.underlyingNow == null) e.underlyingNow = instruments.value?.[k]?.ltp ?? null;
       }
     }
-    const funds = await timedBlock<FundsView>(SRC.funds, () => this.fundsView(fundsRead, underlyings, instruments.value ?? {}, rows, now), FUNDS_BLOCK_MS);
+    // Lots only for what can be OPENed or is held (final review item 8): an underlying with an open position, a
+    // proposal or a channel view — not a recent-exit-only slot — so lot pricing never widens the hub's 30-slot watch.
+    const actOn = new Set(
+      [...pos.map((p) => p.underlying), ...(proposals.value ?? []).map((p) => p.underlying), ...(channelViews.value ?? []).map((v) => v.subject)]
+        .map((u) => normaliseUnderlyingKey(u, names))
+        .filter((k): k is string => !!k),
+    );
+    const lotUnderlyings = underlyings.filter((u) => actOn.has(u));
+    const funds = await timedBlock<FundsView>(SRC.funds, () => this.fundsView(fundsRead, lotUnderlyings, instruments.value ?? {}, rows, now), FUNDS_BLOCK_MS);
 
     const failed = failedBlocks({ day, pnl, guard, positions, recentExits, proposals, instruments, memory, channelViews, funds });
     const health = await timedBlock<HealthView>(SRC.health, () => this.health(now, failed));
@@ -245,49 +253,64 @@ export class DeskStateService {
       for (const u of underlyings) lots[u].missing.push(m ? 'instrument master unavailable' : 'lot market not wired');
       return { available, lots };
     }
-    const priced = await timedValue(() => this.priceLots(lots, underlyings, instruments, master, available, now), LOT_PRICING_MS);
-    if (!priced.ok) for (const u of underlyings) if (!lots[u].atmCe && !lots[u].atmPe) lots[u].missing.push(`lot pricing: ${priced.reason}`);
+    // COPY-ON-RETURN + ABORT (final review item 6): the workers price into their own working copy; the returned
+    // `lots` is a deep copy of it taken when the box closes (what was priced by then is kept). On a timeout the abort
+    // flag stops every worker before its next Angel read, and a read still in flight lands in the working copy only —
+    // nothing writes the packet or calls the broker after the box closes.
+    const work: Record<string, UnderlyingLotCosts> = {};
+    for (const u of underlyings) work[u] = { atmCe: null, atmPe: null, missing: [] };
+    const abort = { aborted: false };
+    const priced = await timedValue(() => this.priceLots(work, underlyings, instruments, master, available, now, abort), LOT_PRICING_MS);
+    if (!priced.ok) abort.aborted = true;
+    for (const u of underlyings) {
+      lots[u] = JSON.parse(JSON.stringify(work[u])) as UnderlyingLotCosts;
+      if (!priced.ok && !lots[u].atmCe && !lots[u].atmPe) lots[u].missing.push(`lot pricing: ${priced.reason}`);
+    }
     return { available, lots };
   }
 
   /** Fills `lots` in place; at most LOT_PRICING_CONCURRENCY underlyings priced at once (Angel REST 10 req/s). */
-  private async priceLots(lots: Record<string, UnderlyingLotCosts>, underlyings: string[], instruments: Record<string, InstrumentView>, master: readonly unknown[], available: number | null, now: Date): Promise<void> {
+  private async priceLots(lots: Record<string, UnderlyingLotCosts>, underlyings: string[], instruments: Record<string, InstrumentView>, master: readonly unknown[], available: number | null, now: Date, abort: { aborted: boolean }): Promise<void> {
     const m = this.lotMarket as DeskMarket;
     // One pass over the master: only the packet's names (and their minis) are searched per contract.
     const wanted = new Set(underlyings.flatMap((u) => [u, miniUnderlyingOf(u)].filter((x): x is string => !!x)));
     const rows = (master as Array<{ name?: unknown }>).filter((r) => r && wanted.has(String(r.name ?? '').trim().toUpperCase()));
     const queue = [...underlyings];
     const worker = async () => {
-      for (let u = queue.shift(); u !== undefined; u = queue.shift()) await this.priceOne(lots[u], u, rows, instruments, available, now, m);
+      for (let u = queue.shift(); u !== undefined && !abort.aborted; u = queue.shift()) await this.priceOne(lots[u], u, rows, instruments, available, now, m, abort);
     };
     await Promise.all(Array.from({ length: Math.min(LOT_PRICING_CONCURRENCY, queue.length) }, worker));
   }
 
-  /** One underlying: the spot (instruments ltp, else its line), the ATM CE / PE and the mini's. */
-  private async priceOne(view: UnderlyingLotCosts, u: string, rows: readonly unknown[], instruments: Record<string, InstrumentView>, available: number | null, now: Date, m: DeskMarket): Promise<void> {
+  /** One underlying: the spot (instruments ltp, else its line), the ATM CE / PE and the mini's. Stops on abort. */
+  private async priceOne(view: UnderlyingLotCosts, u: string, rows: readonly unknown[], instruments: Record<string, InstrumentView>, available: number | null, now: Date, m: DeskMarket, abort: { aborted: boolean }): Promise<void> {
     let spot = instruments[u]?.ltp ?? null;
     if (spot == null) {
       const ref = await m.underlyingRef(u, now).catch(() => null);
+      if (abort.aborted) return;
       spot = ref ? ((await m.ltps([ref], now).catch(() => new Map<string, number>())).get(refKey(ref)) ?? null) : null;
     }
+    if (abort.aborted) return;
     if (spot == null || !(spot > 0)) {
       view.missing.push(`no price for ${u}: no ATM strike`);
       return;
     }
-    const full = await this.atmCosts(rows, u, spot, available, now);
+    const full = await this.atmCosts(rows, u, spot, available, now, abort);
+    if (abort.aborted) return;
     view.atmCe = full.ce;
     view.atmPe = full.pe;
     view.missing.push(...full.missing);
     const mini = miniUnderlyingOf(u);
     if (mini) {
-      const mc = await this.atmCosts(rows, mini, spot, available, now);
+      const mc = await this.atmCosts(rows, mini, spot, available, now, abort);
+      if (abort.aborted) return;
       view.mini = { underlying: mini, atmCe: mc.ce, atmPe: mc.pe };
       view.missing.push(...mc.missing);
     }
   }
 
   /** The ATM CE and PE of `underlying` (nearest expiry) priced at the live premium: 1-lot cost each. */
-  private async atmCosts(rows: readonly unknown[], underlying: string, spot: number, available: number | null, now: Date): Promise<{ ce: LotCost | null; pe: LotCost | null; missing: string[] }> {
+  private async atmCosts(rows: readonly unknown[], underlying: string, spot: number, available: number | null, now: Date, abort: { aborted: boolean } = { aborted: false }): Promise<{ ce: LotCost | null; pe: LotCost | null; missing: string[] }> {
     const m = this.lotMarket as DeskMarket;
     const missing: string[] = [];
     const contracts: Array<{ kind: 'CE' | 'PE'; c: ResolvedContract }> = [];
@@ -303,7 +326,7 @@ export class DeskStateService {
       else contracts.push({ kind, c: r.contract });
     }
     const out: { ce: LotCost | null; pe: LotCost | null; missing: string[] } = { ce: null, pe: null, missing };
-    if (contracts.length === 0) return out;
+    if (contracts.length === 0 || abort.aborted) return out;
     const refs: DeskRef[] = contracts.map(({ c }) => ({ exchange: c.exchange, token: c.token, symbol: c.tradingsymbol }));
     const prices = await m.ltps(refs, now).catch(() => new Map<string, number>());
     for (const { kind, c } of contracts) {
@@ -327,7 +350,7 @@ export class DeskStateService {
   }
 
   private async positions(userId: string, now: Date, hold: string[]): Promise<PositionView[]> {
-    const rows = await this.repo.openPositions(userId);
+    const rows = await this.repo.openPositions(userId, now);
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.trackerId);
     const openIds = rows.map((r) => r.openDecisionId).filter((x): x is string => !!x);

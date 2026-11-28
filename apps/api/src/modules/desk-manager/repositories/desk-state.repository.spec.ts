@@ -62,6 +62,39 @@ describe('DeskStateRepository', () => {
     ]);
   });
 
+  it('final review item 4: positions[].origin is the guard\'s originsOf — an UNLINKED app order for the same contract is not "manual"', async () => {
+    // t1 has no linked signal_orders row (the executor's NO_TRACKER window) but a FILLED manager order for its token:
+    // the guard (DeskDayRepository.originsOf) calls it manager; the packet must agree.
+    const p = prismaMock();
+    const entryTime = new Date('2026-11-26T05:00:00Z');
+    p.tradeTracker.findMany.mockResolvedValueOnce([
+      { id: 't1', symbol: 'NIFTY27NOV2624650CE', exchange: 'NFO', token: '4321', qty: 75, entryPrice: 100, lastLtp: 110, pnl: 750, entryTime },
+      { id: 't2', symbol: 'GOLDM05DEC25FUT', exchange: 'MCX', token: '9999', qty: 10, entryPrice: 72000, lastLtp: 72100, pnl: 1000, entryTime },
+    ]);
+    p.trade.findMany.mockResolvedValueOnce([]);
+    p.signalOrder.findMany
+      .mockResolvedValueOnce([]) // linked by trackerId: none
+      .mockResolvedValueOnce([
+        { trackerId: null, source: 'manager', decisionId: 'dec1', exchange: 'NFO', token: '4321', tradingsymbol: 'NIFTY27NOV2624650CE', createdAt: new Date('2026-11-26T04:59:00Z') },
+      ]);
+    const rows = await new DeskStateRepository(p as never).openPositions('owner', NOW);
+    expect(rows.map((r) => [r.trackerId, r.origin])).toEqual([
+      ['t1', 'manager'],
+      ['t2', 'manual'],
+    ]);
+  });
+
+  it('final review item 2: latest sentinel skips drill-tagged verdicts (a drill look is never the desk\'s view)', async () => {
+    const p = prismaMock();
+    const at = (m: number) => new Date(NOW.getTime() - m * 60_000);
+    p.sentinelVerdict.findMany.mockResolvedValueOnce([
+      { trackerId: 't1', verdict: 'EXIT_ADVISORY', thesisStatus: 'BROKEN', reason: '[advisory: authority drill] the 15m broke the low', invalidationPoint: null, createdAt: at(2) },
+      { trackerId: 't1', verdict: 'HOLD', thesisStatus: 'INTACT', reason: 'still inside the range', invalidationPoint: null, createdAt: at(12) },
+    ]);
+    const m = await new DeskStateRepository(p as never).latestSentinel(['t1']);
+    expect(m.get('t1')).toMatchObject({ verdict: 'HOLD', reason: 'still inside the range' });
+  });
+
   it('open positions read only POSITION trackers: delivery HOLDING rows are not desk trades and never exit targets', async () => {
     // 11-27 prod: 26 HOLDING rows (oldest first) filled the packet and made long-term stocks valid EXIT targets.
     const p = prismaMock();

@@ -28,6 +28,88 @@ const ORDER_LOOKBACK_MS = 7 * 86_400_000;
 /** A linked tracker that CLOSED this close to (or after) the unlinked tracker's open is treated as re-created. */
 const RECREATE_SLACK_MS = 15 * 60_000;
 
+/** A live tracker as {@link originsOf} needs it. */
+export interface OriginTrackerRow {
+  id: string;
+  symbol: string;
+  exchange: string | null;
+  token: string | null;
+  entryTime: Date | null;
+  exitTime?: Date | null;
+}
+
+/**
+ * tracker id → origin (+ the app order's desk decision id). THE ONE origin classifier: the desk guard
+ * (DeskDayRepository) and the packet's positions block (DeskStateRepository.openPositions) both use it, so a
+ * position is never "manual" in one and "manager" in the other (final review 2026-11-28, item 4).
+ * 'manual' ONLY on positive evidence that no app order is behind the position (a real-money guard must not let an app
+ * trade escape as "manual"):
+ *  1. a signal_orders row linked by trackerId → its source (oldest row wins; a null source = the signal trader);
+ *  2. otherwise (the executor's NO_TRACKER branch, the window before linking, a re-created tracker) any of the
+ *     user's live-status app orders (FILLED / PARTIAL / UNCERTAIN, last 7 days, created before the tracker
+ *     closed) for the same contract — exchange+token or tradingsymbol — that is still open: never linked, linked
+ *     to a tracker that no longer exists, or linked to a CLOSED tracker that closed at/after this tracker opened
+ *     (−15 min: a reconcile re-created it). An order still serving ANOTHER open tracker is that tracker's, not
+ *     this one's. Any match ⇒ that order's source;
+ *  3. no match ⇒ absent from the map ('manual' to the caller).
+ * Every app path that trades live money (signal trader, reentry, desk manager OPEN) writes a signal_orders row,
+ * so this one table is the evidence for all of them.
+ */
+export async function originsOf(
+  prisma: PrismaService,
+  userId: string,
+  rows: OriginTrackerRow[],
+  now: Date,
+): Promise<Map<string, { origin: TradeOrigin; decisionId: string | null }>> {
+  const out = new Map<string, { origin: TradeOrigin; decisionId: string | null }>();
+  if (rows.length === 0) return out;
+  const linked = await prisma.signalOrder.findMany({
+    where: { trackerId: { in: rows.map((r) => r.id) } },
+    select: { trackerId: true, source: true, decisionId: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  for (const o of linked) {
+    if (o.trackerId && !out.has(o.trackerId)) out.set(o.trackerId, { origin: originOf(o.source ?? 'signal'), decisionId: o.decisionId ?? null });
+  }
+  const unlinked = rows.filter((r) => !out.has(r.id));
+  if (unlinked.length === 0) return out;
+
+  const tokens = [...new Set(unlinked.map((r) => r.token).filter((t): t is string => !!t))];
+  const symbols = [...new Set(unlinked.map((r) => r.symbol).filter(Boolean))];
+  const cands = await prisma.signalOrder.findMany({
+    where: {
+      userId,
+      status: { in: [...LIVE_ORDER_STATUSES] },
+      createdAt: { gte: new Date(now.getTime() - ORDER_LOOKBACK_MS) },
+      OR: [{ token: { in: tokens } }, { tradingsymbol: { in: symbols } }],
+    },
+    select: { trackerId: true, source: true, decisionId: true, exchange: true, token: true, tradingsymbol: true, createdAt: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (cands.length === 0) return out;
+  const linkedIds = [...new Set(cands.map((c) => c.trackerId).filter((t): t is string => !!t))];
+  const trackerOf = new Map<string, { status: string; exitTime: Date | null }>();
+  if (linkedIds.length > 0) {
+    const ts = await prisma.tradeTracker.findMany({ where: { userId, id: { in: linkedIds } }, select: { id: true, status: true, exitTime: true } });
+    for (const t of ts) trackerOf.set(t.id, { status: t.status, exitTime: t.exitTime ?? null });
+  }
+  for (const r of unlinked) {
+    const until = (r.exitTime ?? now).getTime();
+    const opened = r.entryTime ? r.entryTime.getTime() : 0;
+    const hit = cands.find((c) => {
+      const same = (!!r.token && c.token === r.token && (!r.exchange || c.exchange === r.exchange)) || c.tradingsymbol === r.symbol;
+      if (!same || c.createdAt.getTime() > until) return false;
+      if (!c.trackerId) return true;
+      const t = trackerOf.get(c.trackerId);
+      if (!t) return true; // linked tracker row is gone (re-created)
+      if (t.status === 'OPEN') return false; // still serving another open position
+      return t.exitTime !== null && t.exitTime.getTime() >= opened - RECREATE_SLACK_MS;
+    });
+    if (hit) out.set(r.id, { origin: originOf(hit.source ?? 'signal'), decisionId: hit.decisionId ?? null });
+  }
+  return out;
+}
+
 /**
  * The desk guard's reads and writes (plan Task 1). Reads EVERY live position tracker (IST day, NSE + MCX) with its
  * origin; which ones the guard counts is decided in guardDayPath (the app's own trades, not the owner's manual or
@@ -111,69 +193,14 @@ export class DeskDayRepository {
     return null;
   }
 
-  /**
-   * tracker id → origin. 'manual' ONLY on positive evidence that no app order is behind the position (a real-money
-   * guard must not let an app trade escape as "manual"):
-   *  1. a signal_orders row linked by trackerId → its source (oldest row wins; a null source = the signal trader);
-   *  2. otherwise (the executor's NO_TRACKER branch, the window before linking, a re-created tracker) any of the
-   *     user's live-status app orders (FILLED / PARTIAL / UNCERTAIN, last 7 days, created before the tracker
-   *     closed) for the same contract — exchange+token or tradingsymbol — that is still open: never linked, linked
-   *     to a tracker that no longer exists, or linked to a CLOSED tracker that closed at/after this tracker opened
-   *     (−15 min: a reconcile re-created it). An order still serving ANOTHER open tracker is that tracker's, not
-   *     this one's. Any match ⇒ that order's source;
-   *  3. no match ⇒ 'manual'.
-   * Every app path that trades live money (signal trader, reentry, desk manager OPEN) writes a signal_orders row,
-   * so this one table is the evidence for all of them.
-   */
+  /** tracker id → origin, by the shared {@link originsOf} (no entry ⇒ 'manual' at the call sites). */
   private async originsOf(
     userId: string,
-    rows: Array<{ id: string; symbol: string; exchange: string | null; token: string | null; entryTime: Date | null; exitTime?: Date | null }>,
+    rows: OriginTrackerRow[],
     now: Date,
   ): Promise<Map<string, TradeOrigin>> {
-    const out = new Map<string, TradeOrigin>();
-    const linked = await this.prisma.signalOrder.findMany({
-      where: { trackerId: { in: rows.map((r) => r.id) } },
-      select: { trackerId: true, source: true },
-      orderBy: { createdAt: 'asc' },
-    });
-    for (const o of linked) if (o.trackerId && !out.has(o.trackerId)) out.set(o.trackerId, originOf(o.source ?? 'signal'));
-    const unlinked = rows.filter((r) => !out.has(r.id));
-    if (unlinked.length === 0) return out;
-
-    const tokens = [...new Set(unlinked.map((r) => r.token).filter((t): t is string => !!t))];
-    const symbols = [...new Set(unlinked.map((r) => r.symbol).filter(Boolean))];
-    const cands = await this.prisma.signalOrder.findMany({
-      where: {
-        userId,
-        status: { in: [...LIVE_ORDER_STATUSES] },
-        createdAt: { gte: new Date(now.getTime() - ORDER_LOOKBACK_MS) },
-        OR: [{ token: { in: tokens } }, { tradingsymbol: { in: symbols } }],
-      },
-      select: { trackerId: true, source: true, exchange: true, token: true, tradingsymbol: true, createdAt: true },
-      orderBy: { createdAt: 'asc' },
-    });
-    if (cands.length === 0) return out;
-    const linkedIds = [...new Set(cands.map((c) => c.trackerId).filter((t): t is string => !!t))];
-    const trackerOf = new Map<string, { status: string; exitTime: Date | null }>();
-    if (linkedIds.length > 0) {
-      const ts = await this.prisma.tradeTracker.findMany({ where: { userId, id: { in: linkedIds } }, select: { id: true, status: true, exitTime: true } });
-      for (const t of ts) trackerOf.set(t.id, { status: t.status, exitTime: t.exitTime ?? null });
-    }
-    for (const r of unlinked) {
-      const until = (r.exitTime ?? now).getTime();
-      const opened = r.entryTime ? r.entryTime.getTime() : 0;
-      const hit = cands.find((c) => {
-        const same = (!!r.token && c.token === r.token && (!r.exchange || c.exchange === r.exchange)) || c.tradingsymbol === r.symbol;
-        if (!same || c.createdAt.getTime() > until) return false;
-        if (!c.trackerId) return true;
-        const t = trackerOf.get(c.trackerId);
-        if (!t) return true; // linked tracker row is gone (re-created)
-        if (t.status === 'OPEN') return false; // still serving another open position
-        return t.exitTime !== null && t.exitTime.getTime() >= opened - RECREATE_SLACK_MS;
-      });
-      if (hit) out.set(r.id, originOf(hit.source ?? 'signal'));
-    }
-    return out;
+    const found = await originsOf(this.prisma, userId, rows, now);
+    return new Map([...found].map(([id, o]) => [id, o.origin]));
   }
 
   /** Today's pause / reset (a row left from an earlier IST day is ignored). */

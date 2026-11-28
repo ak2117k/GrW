@@ -223,6 +223,38 @@ describe('DeskStateService.build', () => {
     expect(none.funds).toMatchObject({ status: 'unavailable', reason: expect.stringMatching(/funds read not wired/) });
   });
 
+  it('final review item 6: after the lot-pricing box closes, no worker writes the returned lots or calls Angel again', async () => {
+    // 4 underlyings, 3 workers: the first premium reads land at 4.5 s (after the 4 s box); without an abort the
+    // workers would then write the returned lots and go on to price the 4th underlying and the minis.
+    const us = ['CRUDEOIL', 'B1', 'B2', 'B3'];
+    const repo = repoMock({ openPositions: jest.fn(async () => us.map((u, i) => pos(i, { underlying: u, symbol: `${u}16DEC265200CE`, exchange: 'MCX' }))) });
+    const base = lotMarket();
+    const late = lotMarket({
+      ltps: jest.fn((refs: ReadonlyArray<{ exchange: string; token: string }>) => new Promise((r) => setTimeout(() => r(base.ltps(refs)), 4_500))),
+      master: jest.fn(async () => ['CRUDEOIL', 'CRUDEOILM', 'B1', 'B2', 'B3'].flatMap((n) => [5200, 5300].flatMap((s) => (['CE', 'PE'] as const).map((k) => crudeRow(n, s, k, '10'))))),
+    });
+    const p = await new DeskStateService(repo as never, { state: async () => guardState }, market({ ltp: async () => 5210 }), undefined, undefined, undefined, { available: async () => 30_000 }, late).build('owner', NOW, cfg);
+    const snapshot = JSON.stringify(p.funds?.value);
+    expect(p.funds?.value?.lots.CRUDEOIL.missing.join(' ')).toMatch(/lot pricing: timed out after 4000 ms/);
+    const callsAtClose = late.ltps.mock.calls.length + late.underlyingRef.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 1_500)); // the 4.5 s reads land now
+    expect(JSON.stringify(p.funds?.value)).toBe(snapshot);
+    expect(late.ltps.mock.calls.length + late.underlyingRef.mock.calls.length).toBe(callsAtClose);
+  }, 20_000);
+
+  it('final review item 8: lots are priced only for underlyings with a position, a proposal or a channel view', async () => {
+    const repo = repoMock({
+      openPositions: jest.fn(async () => [pos(1, { underlying: 'CRUDEOIL', symbol: 'CRUDEOIL16DEC265200CE', exchange: 'MCX' })]),
+      // A recent exit gets an instrument slot (context), but nothing to open: no lot pricing, no hub watch.
+      closedSince: jest.fn(async () => [{ trackerId: 'x', symbol: 'BSE29DEC264250CE', underlying: 'BSE', exitAt: new Date(NOW.getTime() - 60_000), pnl: 1, paper: false }]),
+    });
+    const lot = lotMarket();
+    const p = await new DeskStateService(repo as never, { state: async () => guardState }, market({ ltp: async () => 5210 }), undefined, undefined, undefined, { available: async () => 30_000 }, lot).build('owner', NOW, cfg);
+    expect(Object.keys(p.instruments.value ?? {})).toEqual(['CRUDEOIL', 'BSE']);
+    expect(Object.keys(p.funds?.value?.lots ?? {})).toEqual(['CRUDEOIL']);
+    expect(lot.underlyingRef.mock.calls.map((c) => c[0])).not.toContain('BSE');
+  });
+
   it('health: the status port reports the feed and the agents', async () => {
     const status = { feed: async () => 'hub socket up, last tick 2 s ago', agents: async () => ({ trading: 'up' }) };
     const p = await new DeskStateService(repoMock() as never, { state: async () => guardState }, market(), status).build('owner', NOW, cfg);

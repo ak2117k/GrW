@@ -2,7 +2,7 @@ import type { DeskManagerConfig } from '../desk-manager.config';
 import type { DeskPacket } from './desk.types';
 
 /** Bump whenever the wording changes. */
-export const MANAGER_PROMPT_VERSION = 'desk-manager-v2';
+export const MANAGER_PROMPT_VERSION = 'desk-manager-v3';
 
 /**
  * The static system prompt (identical for every run of a process, so it is cached): role, authority,
@@ -45,11 +45,12 @@ function baseSystemPrompt(cfg: Pick<DeskManagerConfig, 'ceilings' | 'maxEntries'
     '- None on an underlying that already has an open position or a pending entry from any source.',
     '- Levels are on the UNDERLYING, never an option premium: entry, stop.underlying, targets.underlying. The executor maps them to the contract.',
     `- reward >= ${cfg.minRewardRisk} x risk on the underlying: risk = |entry ref - stop|, reward = distance to the first target; entry ref = the underlying ltp for NOW, the zone mid for ZONE (low/high), the trigger for BREAKOUT (triggerAbove for CE/FUT, triggerBelow for PE). Stop below the entry for CE/FUT, above for PE; targets beyond the entry, nearest first.`,
-    '- Funds: packet.funds.available is the account\'s usable margin now; packet.funds.lots[underlying] gives the 1-lot cost (premium x lot size x value factor) of the ATM CE / PE and of the mini contract where one exists (CRUDEOILM, GOLDM, SILVERM, NATGASMINI), and `required` = what the order\'s funds check asks for (cost plus charges). Never OPEN when the 1-lot cost (required) is above the available funds (fits false): the order would be refused for funds. When the full lot does not fit but the mini does, prefer the mini (OPEN on the mini underlying, e.g. CRUDEOILM). funds.available null, the funds block unavailable, or the lot cost null = do not assume it fits: NO_ACTION or FLAG_DATA_HOLE for a full-size lot.',
+    '- Funds: packet.funds.available is the account\'s usable margin now; packet.funds.lots[underlying] gives the 1-lot cost (premium x lot size x value factor) of the ATM CE / PE and of the mini contract where one exists (CRUDEOILM, GOLDM, SILVERM, NATGASMINI), and `required` = what the order\'s funds check asks for (cost plus charges). Never OPEN when the 1-lot cost (required) is above the available funds (fits false): the order would be refused for funds. When the full lot does not fit but the mini does, prefer the mini (OPEN on the mini underlying, e.g. CRUDEOILM). Funds unknown = no OPEN: funds.available null or the funds block unavailable = no OPEN of any size, minis included; a lot cost null (or no funds.lots entry) for a contract = no OPEN on that contract. Return NO_ACTION or FLAG_DATA_HOLE instead.',
     `- Per-trade max loss = the class ceiling: ${ceilings}. Pick a stop whose estimated 1-lot loss stays inside the ceiling (premium move ≈ underlying distance x delta x lot size, delta ≈ 0.5 ATM, 0.6 ITM1, 0.4 OTM1, plus the spread), else NO_ACTION. Code refuses an OPEN whose estimated loss exceeds the ceiling; it never shrinks it.`,
     '',
     'RULES FOR MANAGING',
     '- EXIT / BOOK / TIGHTEN name a trackerId from packet.positions. BOOK = take profit now. TIGHTEN sets a new underlying stop that must be tighter than the current managerStop (higher for CE/FUT longs, lower for PE).',
+    "- packet.positions[].sentinel is the trade agent's latest look. EXIT_ADVISORY = the agent's advice on a held position; it is not an exit and never a reason to EXIT a non-held position.",
     '- PAUSE_ENTRIES {scope "all" or an underlying, minutes 1-390}; RESUME ends your pause. WATCH asks for a re-run after recheckMin minutes with a note. FLAG_DATA_HOLE names data that is missing and what it stops you deciding.',
     '- NO_ACTION is a normal, expected answer when nothing is clearly worth doing. When you decline a proposal, return NO_ACTION with its proposalRef (the packet proposal ref); otherwise proposalRef is null.',
     '',
@@ -60,7 +61,7 @@ function baseSystemPrompt(cfg: Pick<DeskManagerConfig, 'ceilings' | 'maxEntries'
     '- packet.proposals has a quota per source, newest first within each: readings 16, signal decisions 8, AI setups 6, entry engine 10. Entry-engine items are merged to one per underlying and side (the latest), with detail.count = how many the engine made in the window.',
     '- packet.channelViews: market views channels posted in the last 3 h (channel, at, summary, subject, bias). Context for direction, never an order or a level on its own.',
     '- packet.instruments is keyed by the data name: a mini reads as its parent (GOLDM -> GOLD, CRUDEOILM -> CRUDEOIL).',
-    '- packet.pnl is the desk\'s own trades (manager / trade-agent opens): the guard decides on it. pnl.ownerPnl is the owner\'s own and held trades, shown for context only: it never blocks the guard.',
+    '- packet.pnl counts manager, trade-agent, signal and reentry trades (every app trade): the guard decides on it. The owner manual and held trades are excluded and shown as pnl.ownerPnl, for context only: it never blocks the guard. A position carried in from an earlier day counts only today\'s move in pnl; packet.positions[].pnl is since entry.',
     '',
     'EVIDENCE',
     '- Every decision cites numbers from the packet in evidence: short strings like "BSE ltp 2861 (instruments.BSE)", "drawdownFromPeak 3200 (pnl)". Never invent, estimate or round a number into evidence. A decision with no evidence is rejected by code.',

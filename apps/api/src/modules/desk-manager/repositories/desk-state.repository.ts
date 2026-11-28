@@ -15,7 +15,9 @@ import {
   underlyingFromSymbol,
 } from '../domain/packet-blocks';
 import { positionOpenPnl } from '../domain/pnl-path';
-import { DESK_MANAGER_SOURCE, DESK_MANAGER_TAG, type ChannelView, type Proposal, type Scorecard, type TradeOrigin } from '../domain/desk.types';
+import { DESK_MANAGER_TAG, type ChannelView, type Proposal, type Scorecard, type TradeOrigin } from '../domain/desk.types';
+import { isDrillReason } from '../../exit-authority/domain/drill';
+import { originsOf } from './desk-day.repository';
 
 /** Engine rows read per packet before the (underlying, side) merge: 2 h of a ~1-min engine over a few underlyings. */
 const ENGINE_ROWS_READ = 400;
@@ -78,7 +80,6 @@ interface GradeJson {
   netPnl?: number | null;
 }
 
-const SIGNAL_ORIGINS: Record<string, TradeOrigin> = { signal: 'signal', reentry: 'reentry', [DESK_MANAGER_SOURCE]: 'manager' };
 const DECISION_TAG_PREFIX = 'desk-decision:';
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
@@ -91,28 +92,17 @@ const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFi
 export class DeskStateRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Origin of each live tracker from signal_orders.source (no row = the owner's own trade). */
-  private async ordersByTracker(trackerIds: string[]): Promise<Map<string, { source: string | null; decisionId: string }>> {
-    const out = new Map<string, { source: string | null; decisionId: string }>();
-    if (trackerIds.length === 0) return out;
-    const rows = await this.prisma.signalOrder.findMany({
-      where: { trackerId: { in: trackerIds } },
-      select: { trackerId: true, source: true, decisionId: true },
-    });
-    for (const r of rows) if (r.trackerId) out.set(r.trackerId, { source: r.source ?? null, decisionId: r.decisionId });
-    return out;
-  }
-
   /**
    * The desk's open positions: kind POSITION only (F&O / MCX / intraday), the same rule as the desk guard.
    * Delivery HOLDING rows are not desk trades — they must never fill the packet's instrument slots or be a valid
    * EXIT / BOOK / TIGHTEN target (2026-11-27: 26 holdings sorted first and crowded out the live NIFTY position).
+   * Origin: the desk guard's own classifier (desk-day.repository originsOf), so the packet and the guard agree.
    */
-  async openPositions(userId: string): Promise<OpenPositionRow[]> {
+  async openPositions(userId: string, now: Date = new Date()): Promise<OpenPositionRow[]> {
     const [trackers, paper] = await Promise.all([
       this.prisma.tradeTracker.findMany({
         where: { userId, status: 'OPEN', kind: 'POSITION', NOT: { id: { startsWith: PAPER_TRACKER_PREFIX } } },
-        select: { id: true, symbol: true, exchange: true, qty: true, entryPrice: true, lastLtp: true, pnl: true, entryTime: true },
+        select: { id: true, symbol: true, exchange: true, token: true, qty: true, entryPrice: true, lastLtp: true, pnl: true, entryTime: true },
         orderBy: { entryTime: 'asc' },
         take: 50,
       }),
@@ -122,10 +112,10 @@ export class DeskStateRepository {
         take: 20,
       }),
     ]);
-    const orders = await this.ordersByTracker(trackers.map((t) => t.id));
+    const orders = await originsOf(this.prisma, userId, trackers.map((t) => ({ id: t.id, symbol: t.symbol, exchange: t.exchange, token: t.token ?? null, entryTime: t.entryTime })), now);
     const live: OpenPositionRow[] = trackers.map((t) => {
       const o = orders.get(t.id);
-      const origin: TradeOrigin = o ? (SIGNAL_ORIGINS[String(o.source ?? 'signal')] ?? 'unknown') : 'manual';
+      const origin: TradeOrigin = o ? o.origin : 'manual';
       return {
         trackerId: t.id,
         symbol: t.symbol,
@@ -205,6 +195,8 @@ export class DeskStateRepository {
       paper.length ? this.prisma.paperSentinelLook.findMany({ where: { trackerId: { in: paper }, createdAt: { gte: since } }, select, orderBy: { createdAt: 'desc' }, take: 400 }) : [],
     ]);
     for (const r of [...a, ...b]) {
+      // A drill look (final review item 2) is a rehearsal, not the agent's view of the position: never shown to the desk.
+      if (isDrillReason(r.reason)) continue;
       const cap = before?.get(r.trackerId);
       if (cap && r.createdAt.getTime() > cap.getTime()) continue;
       const prev = out.get(r.trackerId);

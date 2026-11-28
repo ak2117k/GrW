@@ -10,7 +10,24 @@ describe('manager system prompt (audit 2026-11-27 packet blocks)', () => {
     expect(p).toMatch(/packet\.funds/);
     expect(p).toMatch(/never OPEN when .*1-lot cost.*available/i);
     expect(p).toMatch(/mini/i);
-    expect(p).toMatch(/available null.*lot cost null = do not assume it fits: NO_ACTION or FLAG_DATA_HOLE for a full-size lot/);
+  });
+
+  it('final review item 7: funds unknown forbids ANY OPEN size, minis included', () => {
+    expect(p).toMatch(/funds\.available null.*no OPEN of any size, minis included/);
+    expect(p).toMatch(/lot cost null.*no OPEN on that contract/);
+    expect(p).not.toMatch(/for a full-size lot/);
+  });
+
+  it('final review item 2: EXIT_ADVISORY is advice on a held position, never a reason to EXIT a non-held one', () => {
+    expect(p).toContain("EXIT_ADVISORY = the agent's advice on a held position; it is not an exit and never a reason to EXIT a non-held position");
+  });
+
+  it('final review item 4: which trades pnl counts, carried positions, positions[].pnl since entry', () => {
+    expect(p).toMatch(/packet\.pnl counts manager, trade-agent, signal and reentry trades/);
+    expect(p).toMatch(/owner manual and held trades are excluded and shown as pnl\.ownerPnl/);
+    expect(p).toMatch(/carried in from an earlier day counts only today's move/);
+    expect(p).toMatch(/positions\[\]\.pnl is since entry/);
+    expect(p).not.toMatch(/manager \/ trade-agent opens\): the guard decides on it/);
   });
 
   it('channelViews fields named as in the packet (at, not time)', () => {
@@ -26,6 +43,6 @@ describe('manager system prompt (audit 2026-11-27 packet blocks)', () => {
   });
 
   it('version bumped for the new wording', () => {
-    expect(MANAGER_PROMPT_VERSION).toBe('desk-manager-v2');
+    expect(MANAGER_PROMPT_VERSION).toBe('desk-manager-v3');
   });
 });

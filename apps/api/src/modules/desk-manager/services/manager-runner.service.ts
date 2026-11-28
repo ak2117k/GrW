@@ -293,7 +293,7 @@ export class ManagerRunnerService implements DeskWakePort, OnModuleInit, OnModul
     this.silentAlertedFor = since;
     void this.alert(
       `desk-manager-silent:${new Date(since).toISOString()}`,
-      `Desk manager has not completed a run for ${Math.round(silentMin)} min while a venue is open (last completed ${this.lastCompleted?.toISOString() ?? 'never'}). Manager OPENs are blocked until it completes one.`,
+      `Desk manager: no desk run for ${Math.round(silentMin)} min while a venue is open (last completed ${this.lastCompleted?.toISOString() ?? 'never'}).`,
     );
   }
 

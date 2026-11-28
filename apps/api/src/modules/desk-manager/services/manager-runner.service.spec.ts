@@ -186,6 +186,16 @@ describe('ManagerRunnerService', () => {
     expect(new Set(silent(m.alerts)).size).toBe(2); // distinct keys: the ops-alert cooldown never swallows a new gap
   });
 
+  it('final review item 11: the missed-run alert says "no desk run for N min" and never claims OPENs are blocked', async () => {
+    const m = make();
+    m.llm.decide.mockRejectedValue(new Error('vertex 529'));
+    for (let t = 0; t <= 20; t += 1) await m.svc.tick(min(t));
+    const i = m.alerts.findIndex((k) => k.startsWith('desk-manager-silent'));
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(m.texts[i]).toMatch(/no desk run for \d+ min/);
+    expect(m.texts[i]).not.toMatch(/blocked/i);
+  });
+
   it('failed-run alert: any run error alerts, at most once per 30 min', async () => {
     const m = make();
     m.llm.decide.mockRejectedValue(new Error('vertex 529'));

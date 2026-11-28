@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { Logger } from '@nestjs/common';
 import { readVisionReply, SIGNAL_VISION_SCHEMA, SIGNAL_VISION_SCHEMA_LEGACY, SIGNAL_VISION_SYSTEM, SIGNAL_VISION_SYSTEM_LEGACY } from '../domain/llm-schema';
 import { parseSignalIntakeConfig } from '../signal-intake.config';
-import { isRequestRejected, SIGNAL_VISION_JOB, SignalVisionService, visionModelFor, visionTransportState } from './signal-vision.service';
+import { isRequestRejected, servedVisionModel, SIGNAL_VISION_JOB, SignalVisionService, visionModelFor, visionTransportState } from './signal-vision.service';
 
 describe('readVisionReply — strict schema', () => {
   const sig = { underlying: 'NIFTY', instrumentKind: 'CE', strike: 24000, expiry: null, side: 'BUY', entryType: 'AT', entryLow: 120, entryHigh: 120, sl: 100, targets: [150], qty: null, horizon: 'INTRADAY', confidence: 0.8 };
@@ -251,5 +251,39 @@ describe('SignalVisionService.classify', () => {
   it('refuses non-image types', async () => {
     const { svc } = make({ SENTINEL_JUDGE: 'cli' }, '{}');
     await expect(svc.classify('', { ...image, mimeType: 'video/mp4' })).rejects.toThrow(/unsupported image type/);
+  });
+});
+
+describe('vision boot log names the model each id is SERVED as (audit 2026-11-27: log said haiku, ai_calls said sonnet-5-5)', () => {
+  const boot = (env: Record<string, string | undefined>) => {
+    const config = { get: (k: string) => env[k] };
+    const svc = new SignalVisionService(config as never, {} as never, {} as never, {} as never, {} as never, parseSignalIntakeConfig(env));
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    try {
+      svc.onApplicationBootstrap();
+      return log.mock.calls.map((c) => String(c[0]));
+    } finally {
+      log.mockRestore();
+    }
+  };
+
+  it('servedVisionModel: Vertex maps ids (haiku → sonnet-5-5, VERTEX_MODEL_MAP wins); cli / api serve the id as named', () => {
+    expect(servedVisionModel('claude-haiku-5-5', 'vertex', undefined)).toBe('claude-sonnet-5-5');
+    expect(servedVisionModel('claude-sonnet-5', 'vertex', undefined)).toBe('claude-sonnet-5-5');
+    expect(servedVisionModel('claude-haiku-5-5', 'vertex', 'claude-haiku-5-5=claude-haiku-5-5')).toBe('claude-haiku-5-5');
+    expect(servedVisionModel('claude-haiku-5-5', 'cli', undefined)).toBe('claude-haiku-5-5');
+    expect(servedVisionModel('claude-haiku-5-5', 'api', undefined)).toBe('claude-haiku-5-5');
+  });
+
+  it('on Vertex the boot line prints the served ids next to the configured ones', () => {
+    const [line] = boot({ SENTINEL_JUDGE: 'vertex' });
+    expect(line).toContain('claude-haiku-5-5 served as claude-sonnet-5-5');
+    expect(line).toContain('claude-sonnet-5 served as claude-sonnet-5-5');
+  });
+
+  it('over the CLI the ids are printed as configured (no "served as")', () => {
+    const [line] = boot({ SENTINEL_JUDGE: 'cli' });
+    expect(line).toContain('(claude-haiku-5-5;');
+    expect(line).not.toContain('served as');
   });
 });

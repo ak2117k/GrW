@@ -6,7 +6,7 @@ import { AiCallRepository } from '../../ai-gateway/audit/ai-call.repository';
 import { ClaudeCliTransport } from '../../ai-gateway/providers/claude-cli.provider';
 import type { MessagesTransport, TransportImage, TransportRequest } from '../../ai-gateway/transport.types';
 import { runInSharedSlot } from '../../ai-assist/assist-slot';
-import { judgeTransportFrom } from '../../trade-sentinel/services/llm-transport';
+import { judgeTransportFrom, vertexModelId, vertexModelMapFrom } from '../../trade-sentinel/services/llm-transport';
 import { SentinelCycleService } from '../../trade-sentinel/services/sentinel-cycle.service';
 import { readVisionReply, SIGNAL_VISION_SCHEMA, SIGNAL_VISION_SCHEMA_LEGACY, SIGNAL_VISION_SYSTEM, SIGNAL_VISION_SYSTEM_LEGACY, type VisionReply } from '../domain/llm-schema';
 import type { TelegramMediaRef } from '../domain/types';
@@ -71,6 +71,14 @@ export function visionTransportState(env: { judge: string | undefined; apiKey: s
 }
 
 /**
+ * The model id a configured id is actually served as: Vertex maps ids (claude-haiku-5-5 → claude-sonnet-5-5 by
+ * default, VERTEX_MODEL_MAP overrides — the ids ai_calls records); the CLI and the API serve the id as named.
+ */
+export function servedVisionModel(model: string, via: 'cli' | 'api' | 'vertex' | null, vertexMap: string | undefined): string {
+  return via === 'vertex' ? vertexModelId(model, vertexModelMapFrom(vertexMap)) : model;
+}
+
+/**
  * Image posts (MCX / tip channels often post the call as a picture): one cheap vision call per image —
  * classify (SIGNAL / UPDATE / VIEW / NOISE) and, for a SIGNAL, extract with the text fallback's schema.
  * Same transport binding and recorder as the text fallback (job 'signal.vision'), same shared slot —
@@ -100,8 +108,13 @@ export class SignalVisionService implements SignalVision, OnApplicationBootstrap
     if (!this.cfg.visionEnabled) this.logger.log('[signal-intake] vision: off (SIGNAL_VISION=off) — image posts are not read');
     else if (this.state.reason) this.logger.warn(`[signal-intake] vision: UNAVAILABLE — ${this.state.reason}; image posts are not read`);
     else {
-      const trusted = this.cfg.visionTrustedChannels.length ? `; ${this.cfg.visionTrustedModel} for ${this.cfg.visionTrustedChannels.join(' / ')}` : '';
-      this.logger.log(`[signal-intake] vision: on via ${this.state.via} (${this.cfg.visionModel}${trusted}, cap ${this.cfg.visionDailyCap}/day)`);
+      // The served id, not only the configured one: on Vertex haiku is served by sonnet-5-5 (audit 2026-11-27).
+      const named = (model: string) => {
+        const served = servedVisionModel(model, this.state.via, this.config.get<string>('VERTEX_MODEL_MAP'));
+        return served === model ? model : `${model} served as ${served}`;
+      };
+      const trusted = this.cfg.visionTrustedChannels.length ? `; ${named(this.cfg.visionTrustedModel)} for ${this.cfg.visionTrustedChannels.join(' / ')}` : '';
+      this.logger.log(`[signal-intake] vision: on via ${this.state.via} (${named(this.cfg.visionModel)}${trusted}, cap ${this.cfg.visionDailyCap}/day)`);
     }
   }
 

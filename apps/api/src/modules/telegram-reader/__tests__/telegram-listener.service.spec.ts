@@ -61,7 +61,9 @@ function build(opts: { flag?: string; session?: boolean; env?: Record<string, st
     get: (k: string) => (k === 'TELEGRAM_READER' ? opts.flag : k === 'HUB_OWNER_USER_ID' ? 'u1' : opts.env?.[k]),
   };
   const svc = new TelegramListenerService(config as any, prisma as any, events as any, store as any, factory as any);
-  return { svc, prisma, events, store, client, factory, messages };
+  const alerts = jest.fn(async (_key: string, _text: string) => true);
+  (svc as any).sendAlert = alerts;
+  return { svc, prisma, events, store, client, factory, messages, alerts };
 }
 
 describe('TelegramListenerService', () => {
@@ -183,7 +185,8 @@ describe('TelegramListenerService', () => {
     expect(await svc.pollOnce()).toBe(2);
     expect(await svc.pollOnce()).toBe(0);              // dedup: already stored
     expect(events.emit).toHaveBeenCalledTimes(2);
-    expect(c.recentMessages).toHaveBeenCalledWith('-1001', 5);
+    // The first round after a (re)connect is the catch-up (deeper fetch); later rounds take the newest 5.
+    expect(c.recentMessages.mock.calls).toEqual([['-1001', 100], ['-1001', 5]]);
     const line = svc.logSummary();
     expect(line).toContain('received=0 (live push');    // polled posts do not count as live pushes
     expect(line).toContain('polled_new=2');
@@ -289,6 +292,191 @@ describe('TelegramListenerService', () => {
       await svc.restart();
       await jest.advanceTimersByTimeAsync(60_000);
       expect(c.recentMessages).toHaveBeenCalledTimes(10);
+      await svc.stop();
+    });
+  });
+
+  describe('self-healing (prod 2026-11-27 21:01 UTC: ~2 min network outage → listener dead ~18 h, no alert)', () => {
+    const never = () => new Promise<never>(() => undefined);
+    // Saturday night 02:30 IST: outside market hours on purpose — the check must run at any hour.
+    const T0 = new Date('2026-11-27T21:00:00Z');
+
+    function live(env: Record<string, string> = {}) {
+      const b = build({ env });
+      const c = b.client as any;
+      c.subscribeUpdates = jest.fn(async () => undefined);
+      c.recentMessages = jest.fn(async () => []);
+      return { ...b, c };
+    }
+
+    it('GramJS connect() resolving on a dead network is a failure that retries with backoff, not a hang', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, client, factory, c } = live();
+      client.connectSilentlyFails = true;
+      c.subscribeUpdates.mockImplementation(never); // what GramJS does after a failed connect: waits forever
+      await svc.start();
+      expect(svc.status().state).toBe('backoff');
+      expect(svc.status().lastError).toContain('not connected');
+      expect(client.calls).toContain('disconnect'); // the failed client is closed, not leaked
+      client.connectSilentlyFails = false;
+      c.subscribeUpdates.mockImplementation(async () => undefined);
+      await jest.advanceTimersByTimeAsync(5_000);
+      expect(factory.create).toHaveBeenCalledTimes(2);
+      expect(svc.status().state).toBe('listening');
+      await svc.stop();
+    });
+
+    it('a subscribeUpdates that never answers times out into backoff', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, c } = live();
+      c.subscribeUpdates.mockImplementation(never);
+      const started = svc.start();
+      await jest.advanceTimersByTimeAsync(90_000);
+      await started;
+      expect(svc.status().state).toBe('backoff');
+      expect(svc.status().lastError).toContain('timed out');
+      await svc.stop();
+    });
+
+    it('polls that never answer time out; 3 min without a sign of life restarts the client, then a catch-up round runs', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, c, factory } = live();
+      jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      await svc.onApplicationBootstrap();
+      await jest.advanceTimersByTimeAsync(12_000); // catch-up round (6 s) + one normal round (12 s)
+      expect(c.recentMessages.mock.calls).toEqual([['-1001', 100], ['-1001', 5]]);
+
+      c.recentMessages.mockImplementation(never); // network gone: every request hangs
+      await jest.advanceTimersByTimeAsync(170_000); // 3 min since the last good round, not yet more
+      expect(factory.create).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(60_000 + 5_000); // watchdog tick sees > 3 min silent → backoff 5 s → restart
+      expect(factory.create).toHaveBeenCalledTimes(2);
+      expect(svc.status().state).toBe('listening');
+
+      c.recentMessages.mockReset();
+      c.recentMessages.mockImplementation(async () => []);
+      await jest.advanceTimersByTimeAsync(7_000);
+      expect(c.recentMessages).toHaveBeenCalledWith('-1001', 100); // reconnect → catch-up
+      await svc.onModuleDestroy();
+    });
+
+    it('a live push or an RPC answer counts as life: no restart while Telegram answers', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, c, client, factory } = live();
+      jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      c.recentMessages.mockRejectedValue(Object.assign(new Error('rpc'), { errorMessage: 'CHANNEL_PRIVATE' }));
+      await svc.onApplicationBootstrap();
+      await jest.advanceTimersByTimeAsync(10 * 60_000);
+      expect(factory.create).toHaveBeenCalledTimes(1);
+
+      c.recentMessages.mockRejectedValue(new Error('socket closed')); // no answer at all, but pushes still arrive
+      for (let i = 0; i < 10; i++) {
+        client.handler!(msg({ chatId: '-1999', tgMessageId: 100 + i }));
+        await jest.advanceTimersByTimeAsync(60_000);
+      }
+      expect(factory.create).toHaveBeenCalledTimes(1);
+      await svc.onModuleDestroy();
+    });
+
+    it('alerts the owner ONCE when stalled > 15 min (at 02:30 IST on a weekend), and once on recovery with the caught-up count', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, c, client, alerts } = live();
+      jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      await svc.onApplicationBootstrap();
+      await jest.advanceTimersByTimeAsync(6_000); // healthy catch-up round at 21:00:06 UTC
+
+      // Outage: requests hang, and every reconnect "succeeds" without a connection (GramJS connect → false).
+      c.recentMessages.mockImplementation(never);
+      client.connectSilentlyFails = true;
+      await jest.advanceTimersByTimeAsync(14 * 60_000);
+      expect(alerts).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(2 * 60_000);
+      expect(alerts).toHaveBeenCalledTimes(1);
+      expect(alerts.mock.calls[0][0]).toBe('TELEGRAM_READER_STALLED');
+      expect(alerts.mock.calls[0][1]).toContain('since 02:30 IST');
+      await jest.advanceTimersByTimeAsync(60 * 60_000);
+      expect(alerts).toHaveBeenCalledTimes(1); // once per outage
+
+      // Network back: the next retry connects, the catch-up round stores the 3 posts made meanwhile.
+      client.connectSilentlyFails = false;
+      const nowS = () => Math.floor(Date.now() / 1000);
+      c.recentMessages.mockReset();
+      c.recentMessages.mockImplementation(async () => [
+        msg({ tgMessageId: 33, date: nowS() - 60, text: 'c' }),
+        msg({ tgMessageId: 32, date: nowS() - 1_800, text: 'b' }),
+        msg({ tgMessageId: 31, date: nowS() - 3_000, text: 'a' }),
+      ]);
+      await jest.advanceTimersByTimeAsync(6 * 60_000); // backoff is capped at 5 min
+      expect(svc.status().state).toBe('listening');
+      expect(alerts).toHaveBeenCalledTimes(2);
+      expect(alerts.mock.calls[1][0]).toBe('TELEGRAM_READER_RECOVERED');
+      expect(alerts.mock.calls[1][1]).toContain('Caught up 3 post(s)');
+      await jest.advanceTimersByTimeAsync(30 * 60_000);
+      expect(alerts).toHaveBeenCalledTimes(2);
+      await svc.onModuleDestroy();
+    });
+
+    it('a stall alert that could not be sent is retried; a short blip sends nothing', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, c, alerts } = live();
+      jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      await svc.onApplicationBootstrap();
+      await jest.advanceTimersByTimeAsync(6_000);
+      c.recentMessages.mockImplementation(never);
+      await jest.advanceTimersByTimeAsync(5 * 60_000); // 5-min blip: restart, but no alert
+      expect(alerts).not.toHaveBeenCalled();
+      alerts.mockResolvedValueOnce(false); // e.g. DNS still down for api.telegram.org
+      await jest.advanceTimersByTimeAsync(12 * 60_000);
+      expect(alerts).toHaveBeenCalledTimes(2); // first send failed → retried on the next tick
+      await jest.advanceTimersByTimeAsync(10 * 60_000);
+      expect(alerts).toHaveBeenCalledTimes(2);
+      await svc.onModuleDestroy();
+    });
+
+    it('a revoked session alerts once after 15 min and says to reconnect in Settings', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, client, alerts } = live();
+      jest.spyOn((svc as any).logger, 'error').mockImplementation(() => undefined);
+      client.connectError = Object.assign(new Error('x'), { errorMessage: 'AUTH_KEY_UNREGISTERED' });
+      await svc.onApplicationBootstrap();
+      await jest.advanceTimersByTimeAsync(16 * 60_000);
+      expect(alerts).toHaveBeenCalledTimes(1);
+      expect(alerts.mock.calls[0][1]).toContain('reconnect it in Settings');
+      await svc.onModuleDestroy();
+    });
+
+    it('TELEGRAM_POLL_SEC=0 (push only): no stall restarts and no alerts, as before', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, factory, alerts } = live({ TELEGRAM_POLL_SEC: '0' });
+      await svc.onApplicationBootstrap();
+      await jest.advanceTimersByTimeAsync(30 * 60_000);
+      expect(factory.create).toHaveBeenCalledTimes(1);
+      expect(alerts).not.toHaveBeenCalled();
+      await svc.onModuleDestroy();
+    });
+
+    it('catch-up keeps the newest 5 always, and older ones only when under 48 h old', async () => {
+      const { svc, c } = live();
+      const now = Math.floor(Date.now() / 1000);
+      const ages = [10, 20, 30, 40, 50, 3_600, 3 * 86_400, 4 * 86_400]; // seconds old, newest first
+      c.recentMessages.mockImplementation(async () => ages.map((a, i) => msg({ tgMessageId: 100 - i, date: now - a, text: `p${i}` })));
+      await svc.start();
+      expect(await svc.pollOnce()).toBe(6);
+      await svc.stop();
+    });
+
+    it('the summary line counts raw updates of any type and still prints while not listening', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, client } = live();
+      jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      await svc.start();
+      client.rawHandler!();
+      client.rawHandler!();
+      expect(svc.logSummary()).toContain('updates=2 (raw, any type)');
+      client.connectSilentlyFails = true;
+      await svc.restart();
+      expect(svc.status().state).toBe('backoff');
+      expect(svc.logSummary()).toContain('(state backoff');
       await svc.stop();
     });
   });

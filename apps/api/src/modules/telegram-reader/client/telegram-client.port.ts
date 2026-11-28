@@ -68,6 +68,12 @@ export interface TgClient {
   /** New messages AND edits. Registered once per client. */
   onMessage(handler: (m: TgIncomingMessage) => void): void;
   /**
+   * Called for every raw update Telegram pushes (any type, connection-state pseudo-updates excluded).
+   * Diagnostic only: separates "Telegram pushes nothing to this connection" from "pushes arrive but no
+   * NewMessage is built" (prod: received=0 every 10 min). Optional so fakes can omit it.
+   */
+  onAnyUpdate?(handler: () => void): void;
+  /**
    * Tell Telegram this connection wants live updates (getMe + updates.GetState) and warm the entity
    * cache (dialogs). A session resumed with connect() alone receives no pushes until this is called
    * (prod 2026-10-23: received=0 from any chat for 10 min). Optional so test fakes can omit it.

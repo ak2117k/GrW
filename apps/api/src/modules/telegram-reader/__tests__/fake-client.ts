@@ -11,9 +11,13 @@ export class FakeTgClient implements TgClient {
   dialogs: TgDialog[] = [];
   calls: string[] = [];
 
+  /** GramJS on a dead network: connect() resolves, but nothing is connected. */
+  connectSilentlyFails = false;
+
   async connect(): Promise<void> {
     this.calls.push('connect');
     if (this.connectError) throw this.connectError;
+    if (this.connectSilentlyFails) return;
     this.connected = true;
   }
 
@@ -52,6 +56,12 @@ export class FakeTgClient implements TgClient {
 
   onMessage(h: (m: TgIncomingMessage) => void): void {
     this.handler = h;
+  }
+
+  rawHandler: (() => void) | null = null;
+
+  onAnyUpdate(h: () => void): void {
+    this.rawHandler = h;
   }
 
   async logOut(): Promise<void> {

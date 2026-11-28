@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { Api, TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions';
-import { NewMessage, NewMessageEvent } from 'telegram/events';
+import { NewMessage, NewMessageEvent, Raw } from 'telegram/events';
+import { UpdateConnectionState } from 'telegram/network';
 import { EditedMessage, EditedMessageEvent } from 'telegram/events/EditedMessage';
 import { Logger as GramLogger, LogLevel } from 'telegram/extensions/Logger';
 import { computeCheck } from 'telegram/Password';
@@ -45,7 +46,10 @@ class GramJsClient implements TgClient {
   }
 
   async connect(): Promise<void> {
-    await this.client.connect();
+    // GramJS RESOLVES false (it does not throw) when every connection try failed — e.g. a network outage
+    // (prod 2026-11-27 21:01 UTC). Every later request then waits forever, so this must be an error.
+    const ok = await this.client.connect();
+    if (ok === false) throw new Error('telegram connect failed: no connection after GramJS retries (network unreachable?)');
   }
 
   async disconnect(): Promise<void> {
@@ -127,6 +131,12 @@ class GramJsClient implements TgClient {
       (e: EditedMessageEvent) => handler(toIncoming(e.message, true, this.client)),
       new EditedMessage({}),
     );
+  }
+
+  onAnyUpdate(handler: () => void): void {
+    this.client.addEventHandler((u: unknown) => {
+      if (!(u instanceof UpdateConnectionState)) handler();
+    }, new Raw({}));
   }
 
   async logOut(): Promise<void> {

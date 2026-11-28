@@ -3,6 +3,7 @@ import { Api, TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import { NewMessage, NewMessageEvent, Raw } from 'telegram/events';
 import { UpdateConnectionState } from 'telegram/network';
+import { FLOOD_SLEEP_THRESHOLD_S } from '../services/telegram-listener-health';
 import { EditedMessage, EditedMessageEvent } from 'telegram/events/EditedMessage';
 import { Logger as GramLogger, LogLevel } from 'telegram/extensions/Logger';
 import { computeCheck } from 'telegram/Password';
@@ -38,7 +39,7 @@ class GramJsClient implements TgClient {
       connectionRetries: 5,
       retryDelay: 2000,
       autoReconnect: true,
-      floodSleepThreshold: 60,
+      floodSleepThreshold: FLOOD_SLEEP_THRESHOLD_S, // below the listener's 30 s request timeout: longer floods surface as FloodWaitError
       baseLogger: new GramLogger(LogLevel.NONE),
       deviceModel: 'GrW reader',
       appVersion: '1.0',

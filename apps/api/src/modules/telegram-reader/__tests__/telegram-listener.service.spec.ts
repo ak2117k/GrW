@@ -5,6 +5,8 @@ import { TELEGRAM_MESSAGE_EVENT } from '../telegram-reader.events';
 import { TelegramListenerService, backoffMs, readerEnabled } from '../services/telegram-listener.service';
 import { TgIncomingMessage } from '../client/telegram-client.port';
 import { FakeTgClient } from './fake-client';
+import { Logger } from '@nestjs/common';
+import { __resetOpsAlerts, sendOpsAlert } from '../../../common/utils/ops-alert';
 
 function msg(over: Partial<TgIncomingMessage> = {}): TgIncomingMessage {
   return {
@@ -413,6 +415,14 @@ describe('TelegramListenerService', () => {
       expect(alerts.mock.calls[1][1]).toContain('Caught up 3 post(s)');
       await jest.advanceTimersByTimeAsync(30 * 60_000);
       expect(alerts).toHaveBeenCalledTimes(2);
+
+      // A second outage after the recovery alerts again (the outage flags were reset).
+      c.recentMessages.mockImplementation(never);
+      client.connectSilentlyFails = true;
+      await jest.advanceTimersByTimeAsync(20 * 60_000);
+      expect(alerts).toHaveBeenCalledTimes(3);
+      expect(alerts.mock.calls[2][0]).toBe('TELEGRAM_READER_STALLED');
+      expect(alerts.mock.calls[2][1]).toContain('Telegram has not answered for');
       await svc.onModuleDestroy();
     });
 
@@ -478,6 +488,164 @@ describe('TelegramListenerService', () => {
       expect(svc.status().state).toBe('backoff');
       expect(svc.logSummary()).toContain('(state backoff');
       await svc.stop();
+    });
+
+    // ---- review 2026-11-28 ----
+    const two = [
+      { id: 'ch1', tgChannelId: '-1001', title: 'Alpha' },
+      { id: 'ch2', tgChannelId: '-1002', title: 'Beta' },
+    ];
+    const nowS = () => Math.floor(Date.now() / 1000);
+
+    it('a channel that keeps failing leaves catch-up after 3 tries (logged once); RECOVERED is still sent and names it', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, c, client, prisma, alerts } = live();
+      prisma.telegramChannel.findMany.mockResolvedValue(two as any);
+      const warn = jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      await svc.onApplicationBootstrap();
+      await jest.advanceTimersByTimeAsync(6_000);
+      c.recentMessages.mockImplementation(never);
+      client.connectSilentlyFails = true;
+      await jest.advanceTimersByTimeAsync(20 * 60_000);
+      expect(alerts).toHaveBeenCalledTimes(1);
+
+      // Network back, but the owner left Beta: GramJS throws a plain Error (not an RPC error) every time.
+      client.connectSilentlyFails = false;
+      c.recentMessages.mockReset();
+      c.recentMessages.mockImplementation(async (chatId: string) => {
+        if (chatId === '-1002') throw new Error('Could not find the input entity for {"channelId":"2"}');
+        return [msg({ tgMessageId: 50, date: nowS() - 60, text: 'x' })];
+      });
+      await jest.advanceTimersByTimeAsync(6 * 60_000);
+      expect(alerts).toHaveBeenCalledTimes(2);
+      expect(alerts.mock.calls[1][0]).toBe('TELEGRAM_READER_RECOVERED');
+      expect(alerts.mock.calls[1][1]).toContain('Caught up 1 post(s)');
+      expect(alerts.mock.calls[1][1]).toContain('Could not read: "Beta"');
+      const beta = c.recentMessages.mock.calls.filter(([id]: [string]) => id === '-1002').map(([, n]: [string, number]) => n);
+      expect(beta.slice(0, 3)).toEqual([100, 100, 100]);
+      expect(beta.length).toBeGreaterThan(3);
+      expect(beta.slice(3).every((n: number) => n === 5)).toBe(true); // no 100-post fetch forever
+      expect(warn.mock.calls.filter(([l]) => String(l).includes('catch-up skipped for "Beta"'))).toHaveLength(1);
+      await svc.onModuleDestroy();
+    });
+
+    it('an RPC answer (CHANNEL_PRIVATE) ends that channel\'s catch-up at once; refreshChannels trims un-ticked channels', async () => {
+      const { svc, c, prisma } = live();
+      jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      prisma.telegramChannel.findMany.mockResolvedValue(two as any);
+      c.recentMessages.mockImplementation(async (chatId: string) => {
+        if (chatId === '-1002') throw Object.assign(new Error('rpc'), { errorMessage: 'CHANNEL_PRIVATE' });
+        return [];
+      });
+      await svc.start();
+      await svc.pollOnce();
+      await svc.pollOnce();
+      expect(c.recentMessages.mock.calls.filter(([id]: [string]) => id === '-1002').map(([, n]: [string, number]) => n)).toEqual([100, 5]);
+
+      await svc.restart(); // fresh catch-up for both
+      expect([...(svc as any).catchUpLeft]).toEqual(['-1001', '-1002']);
+      prisma.telegramChannel.findMany.mockResolvedValue([two[0]] as any);
+      await svc.refreshChannels();
+      expect([...(svc as any).catchUpLeft]).toEqual(['-1001']);
+      await svc.stop();
+    });
+
+    it('pushes from a replaced (abandoned) client are ignored: they cannot hide a stall of the current one', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, factory } = live();
+      jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      const zombie = new FakeTgClient() as any;
+      zombie.subscribeUpdates = jest.fn(never); // its connect times out and it is abandoned
+      zombie.recentMessages = jest.fn(async () => []);
+      const current = new FakeTgClient() as any;
+      current.subscribeUpdates = jest.fn(async () => undefined);
+      current.recentMessages = jest.fn(never); // the current client is stalled
+      factory.create.mockReset();
+      factory.create.mockReturnValueOnce(zombie).mockReturnValue(current);
+
+      await svc.onApplicationBootstrap();
+      await jest.advanceTimersByTimeAsync(95_000 + 1_000); // 90 s connect timeout → backoff 5 s → current client
+      expect(factory.create).toHaveBeenCalledTimes(2);
+      expect(zombie.calls).toContain('disconnect');
+      expect(svc.status().state).toBe('listening');
+
+      // The abandoned client's GramJS retry loop connected anyway and delivers pushes every 30 s.
+      for (let i = 0; i < 10; i++) {
+        zombie.handler(msg({ chatId: '-1999', tgMessageId: 500 + i }));
+        zombie.rawHandler?.();
+        await jest.advanceTimersByTimeAsync(30_000);
+      }
+      expect((svc as any).lastProgressAt).toBeNull();
+      expect(factory.create).toHaveBeenCalledTimes(3); // the current client was restarted for its stall
+      expect(svc.logSummary()).toContain('received=0 (live push');
+      await svc.onModuleDestroy();
+    });
+
+    it('FLOOD_WAIT 45 s on every poll pauses polling for the wait and is never a stall or an outage', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, c, factory, alerts } = live();
+      jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      c.recentMessages.mockRejectedValue(Object.assign(new Error('flood'), { errorMessage: 'FLOOD_WAIT_X', seconds: 45 }));
+      await svc.onApplicationBootstrap();
+      await jest.advanceTimersByTimeAsync(30 * 60_000);
+      expect(factory.create).toHaveBeenCalledTimes(1);
+      expect(alerts).not.toHaveBeenCalled();
+      const calls = c.recentMessages.mock.calls.length;
+      expect(calls).toBeGreaterThanOrEqual(38); // ~ one try per 45 s pause over 30 min…
+      expect(calls).toBeLessThanOrEqual(41); // …not one per 6 s
+      await svc.onModuleDestroy();
+    });
+
+    it('a slow catch-up round (> 3 min, every fetch answering) is not a stall', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc, c, factory, prisma } = live();
+      jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      prisma.telegramChannel.findMany.mockResolvedValue(
+        Array.from({ length: 10 }, (_, i) => ({ id: `ch${i}`, tgChannelId: `-10${i}`, title: `C${i}` })) as any,
+      );
+      c.recentMessages.mockImplementation(() => new Promise((r) => setTimeout(() => r([]), 28_000))); // 10 × 28 s = 280 s round
+      await svc.onApplicationBootstrap();
+      await jest.advanceTimersByTimeAsync(5 * 60_000);
+      expect(factory.create).toHaveBeenCalledTimes(1);
+      await svc.onModuleDestroy();
+    });
+
+    it('the backoff attempt resets only after the link has answered for 5 min', async () => {
+      jest.useFakeTimers({ now: T0 });
+      const { svc } = live();
+      await svc.start();
+      (svc as any).attempt = 3;
+      await jest.advanceTimersByTimeAsync(4 * 60_000);
+      expect((svc as any).attempt).toBe(3);
+      await jest.advanceTimersByTimeAsync(90_000);
+      expect((svc as any).attempt).toBe(0);
+      await svc.stop();
+    });
+
+    it('with the real sendOpsAlert, a STALLED send that failed is retried after the 30-min cooldown, then not again', async () => {
+      jest.useFakeTimers({ now: T0 });
+      __resetOpsAlerts();
+      const { svc, c, client } = live();
+      jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      const opsWarn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const fetch = jest.fn().mockRejectedValueOnce(new Error('getaddrinfo ENOTFOUND')).mockResolvedValue({ ok: true, status: 200 });
+      (svc as any).sendAlert = (k: string, t: string) =>
+        sendOpsAlert(k, t, { env: { TELEGRAM_ALERT_BOT_TOKEN: 't', TELEGRAM_ALERT_CHAT_ID: 'c' }, fetch });
+      await svc.onApplicationBootstrap();
+      await jest.advanceTimersByTimeAsync(6_000);
+      c.recentMessages.mockImplementation(never);
+      client.connectSilentlyFails = true;
+      await jest.advanceTimersByTimeAsync(16 * 60_000);
+      expect(fetch).toHaveBeenCalledTimes(1); // failed (DNS)
+      await jest.advanceTimersByTimeAsync(28 * 60_000);
+      expect(fetch).toHaveBeenCalledTimes(1); // cooldown
+      await jest.advanceTimersByTimeAsync(3 * 60_000);
+      expect(fetch).toHaveBeenCalledTimes(2); // retried, delivered
+      await jest.advanceTimersByTimeAsync(60 * 60_000);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      await svc.onModuleDestroy();
+      opsWarn.mockRestore();
+      __resetOpsAlerts();
     });
   });
 

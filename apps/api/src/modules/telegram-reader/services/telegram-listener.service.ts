@@ -17,6 +17,8 @@ import { TELEGRAM_MESSAGE_EVENT, TelegramMediaRef, TelegramMessageEvent } from '
 import {
   CATCHUP_LIMIT,
   CATCHUP_MAX_AGE_MS,
+  CATCHUP_MAX_TRIES,
+  STABLE_RESET_MS,
   CONNECT_TIMEOUT_MS,
   DISCONNECT_TIMEOUT_MS,
   DOWNLOAD_TIMEOUT_MS,
@@ -116,6 +118,12 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
   /** Channels whose catch-up (deeper first fetch after a (re)connect) is still to run. */
   private catchUpLeft = new Set<string>();
   private catchUpStored = 0;
+  /** Non-transient catch-up failures per channel; after CATCHUP_MAX_TRIES the channel is skipped (logged once). */
+  private catchUpTries = new Map<string, number>();
+  /** Titles of channels catch-up gave up on since the last (re)connect (named in the recovery alert). */
+  private catchUpBroken: string[] = [];
+  /** First answer after the latest failure; the backoff resets once the link has been up STABLE_RESET_MS. */
+  private stableSince: number | null = null;
   /** Every round that failed for all channels after a good one logs once. */
   private pollFailing = false;
   private pollRound = 0;
@@ -189,22 +197,32 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
       client = await this.store.withSecrets(meta.userId, async (s) =>
         this.factory.create(meta.apiId, s.apiHash, s.session),
       );
-      client.onMessage((m) => void this.handle(m));
-      client.onAnyUpdate?.(() => {
-        this.rawUpdates++;
+      // Only the CURRENT client counts: a replaced / timed-out client whose GramJS retry loop later connects
+      // anyway must not feed pushes in, nor reset lastProgressAt / the backoff (review 2026-11-28).
+      const c = client;
+      c.onMessage((m) => {
+        if (c === this.client) void this.handle(m);
+      });
+      c.onAnyUpdate?.(() => {
+        if (c === this.client) this.rawUpdates++;
       });
       // Bounded in time: on a dead network GramJS connect() RESOLVES unconnected and every later request
       // (getMe in subscribeUpdates) waits forever — prod 2026-11-27 21:01 UTC the listener hung here ~18 h.
-      const c = client;
-      await withTimeout(
-        (async () => {
-          await c.connect();
-          if (!c.isConnected()) throw new Error('connect finished but not connected (network unreachable?)');
-          await c.subscribeUpdates?.();
-        })(),
-        CONNECT_TIMEOUT_MS,
-        'telegram connect',
-      );
+      const opening = (async () => {
+        await c.connect();
+        if (!c.isConnected()) throw new Error('connect finished but not connected (network unreachable?)');
+        await c.subscribeUpdates?.();
+      })();
+      try {
+        await withTimeout(opening, CONNECT_TIMEOUT_MS, 'telegram connect');
+      } catch (err) {
+        // If the abandoned attempt still connects later, close it again then (GramJS's retry loop ignores destroy()).
+        void opening.then(
+          () => (c !== this.client ? closeQuietly(c) : undefined),
+          () => (c !== this.client ? closeQuietly(c) : undefined),
+        );
+        throw err;
+      }
       if (gen !== this.generation) {
         await closeQuietly(client);
         return;
@@ -214,7 +232,10 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
       this.lastError = null;
       this.listeningSince = Date.now();
       this.catchUpLeft = new Set(this.enabled.keys());
+      this.catchUpTries.clear();
+      this.catchUpBroken = [];
       this.catchUpStored = 0;
+      this.stableSince = null;
       if (!this.pollOn) this.attempt = 0; // push only: no poll round will prove the link, so trust the connect
       if (meta.status !== 'connected') await this.store.markStatus(meta.userId, 'connected', null);
       this.logger.log(`telegram-reader: listening (${this.enabled.size} channel(s))`);
@@ -239,10 +260,14 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     this.schedulePoll(this.generation, this.pollSec * 1000);
   }
 
-  /** Telegram answered (or a live update arrived): the link is alive. */
+  /**
+   * Telegram answered (or a live update arrived) on the CURRENT client: the link is alive. The backoff
+   * attempt resets only after the link has stayed up STABLE_RESET_MS, so a flapping link backs off.
+   */
   private markProgress(now = Date.now()): void {
     this.lastProgressAt = Math.max(now, this.lastProgressAt ?? 0);
-    this.attempt = 0;
+    if (this.stableSince === null) this.stableSince = now;
+    else if (now - this.stableSince >= STABLE_RESET_MS) this.attempt = 0;
   }
 
   /** One-shot timer chain (not setInterval) so a FLOOD_WAIT can stretch the next delay. */
@@ -269,7 +294,7 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
 
   /** Telegram asked us to slow down: no poll for `wait` s, then double interval for 10 min. One warning each. */
   private noteFloodWait(wait: number): void {
-    this.markProgress(); // Telegram answered: alive, just asking us to wait
+    this.markProgress(); // Telegram answered: alive, just asking us to wait (callers only pass the current client's floods)
     this.floodPauseUntil = Date.now() + wait * 1000;
     this.floodSlowUntil = this.floodPauseUntil + FLOOD_SLOW_MS;
     const slowSec = Math.max(this.pollSec, Math.min(FLOOD_SLOW_CAP_SEC, this.pollSec * 2));
@@ -299,7 +324,9 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
         try {
           // Every request is bounded: a request on a dead GramJS sender never settles (prod 2026-11-27).
           let msgs = await withTimeout(fetchRecent(chatId, catchUp ? CATCHUP_LIMIT : POLL_LIMIT), REQUEST_TIMEOUT_MS, 'poll');
+          if (c !== this.client) break;
           alive = true;
+          this.markProgress(); // per answer, not per round: a slow catch-up round (image downloads) is not a stall
           if (catchUp) {
             const oldest = Date.now() - CATCHUP_MAX_AGE_MS;
             msgs = msgs.filter((m, i) => i < POLL_LIMIT || m.date * 1000 >= oldest); // no old history re-emitted
@@ -312,13 +339,30 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
             this.catchUpStored += stored;
           }
         } catch (err) {
+          if (c !== this.client) break; // a dead client's error says nothing about the current one
           const wait = floodWaitSeconds(err);
           if (wait) {
-            this.noteFloodWait(wait); // Telegram asked us to slow down: skip this round and back off
+            this.noteFloodWait(wait); // Telegram asked us to slow down: skip this round and back off (not a stall)
             break;
           }
-          if (rpcCode(err)) alive = true; // Telegram answered (e.g. CHANNEL_PRIVATE): the link itself is fine
+          const answered = !!rpcCode(err);
+          if (answered) {
+            alive = true; // Telegram answered (e.g. CHANNEL_PRIVATE): the link itself is fine
+            this.markProgress();
+          }
           lastErr = describe(err);
+          // A channel that keeps failing must not hold catch-up (and the recovery alert) open forever. A
+          // timeout is the link, not the channel, so it does not count; an RPC answer / any other error does.
+          if (catchUp && !(err instanceof TelegramTimeoutError)) {
+            const tries = (this.catchUpTries.get(chatId) ?? 0) + 1;
+            this.catchUpTries.set(chatId, tries);
+            if (answered || tries >= CATCHUP_MAX_TRIES) {
+              this.catchUpLeft.delete(chatId);
+              const title = this.enabled.get(chatId)?.title ?? chatId;
+              this.catchUpBroken.push(title);
+              this.logger.warn(`telegram-reader: catch-up skipped for "${title}" after ${tries} failed fetch(es): ${lastErr}`);
+            }
+          }
         }
       }
       if (alive && c === this.client) this.notePollAlive(found, catchingUp);
@@ -348,9 +392,15 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     }
     if (!this.outageDue) return;
     this.outageCaught += found;
-    if (this.catchUpLeft.size > 0) return; // wait until every channel has been caught up
-    const text = recoveredAlertText({ downSince: this.outageSince, now: Date.now(), caughtUp: this.outageCaught });
+    if (this.catchUpLeft.size > 0) return; // wait until every channel has been caught up (or given up on)
+    this.closeOutage();
+  }
+
+  /** The outage is over: one recovery alert, and the next outage alerts again. */
+  private closeOutage(): void {
+    const text = recoveredAlertText({ downSince: this.outageSince, now: Date.now(), caughtUp: this.outageCaught, broken: this.catchUpBroken });
     this.logger.log(`telegram-reader: ${text}`);
+    // Best effort, once: sendOpsAlert's 30-min per-key cooldown can drop a 2nd recovery inside 30 min (accepted).
     void this.sendAlert('TELEGRAM_READER_RECOVERED', text).catch(() => false);
     this.outageDue = false;
     this.outageAlerted = false;
@@ -392,6 +442,8 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
       select: { id: true, tgChannelId: true, title: true },
     });
     this.enabled = new Map(rows.map((r) => [r.tgChannelId, { id: r.id, title: r.title }]));
+    // A channel un-ticked during catch-up must not keep catch-up (and the recovery alert) open.
+    for (const id of [...this.catchUpLeft]) if (!this.enabled.has(id)) this.catchUpLeft.delete(id);
   }
 
   /**
@@ -621,7 +673,11 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     if (!this.pollOn || this.stateValue === 'idle' || this.stateValue === 'off') return;
     const alertMs = envMinutes(this.config.get<string>('TELEGRAM_STALL_ALERT_MIN'), STALL_ALERT_MIN_DEFAULT) * 60_000;
     const downSince = Math.max(this.lastProgressAt ?? this.bootAt, this.floodPauseUntil);
-    if (now - downSince < alertMs) return;
+    if (now - downSince < alertMs) {
+      // Answers came back by a path that did not close the outage (e.g. live pushes while polls fail).
+      if (this.outageDue && this.stateValue === 'listening' && this.catchUpLeft.size === 0) this.closeOutage();
+      return;
+    }
     const text = stalledAlertText({ downSince, now, state: this.stateValue, lastError: this.lastError });
     if (!this.outageDue) {
       this.outageDue = true;
@@ -630,6 +686,8 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
       this.logger.warn(`telegram-reader: ${text}`);
     }
     if (this.outageAlerted) return;
+    // false = not delivered (unconfigured / Telegram unreachable / still in sendOpsAlert's 30-min per-key
+    // cooldown after a failed try): tried again on later ticks, so a real send happens at most every 30 min.
     this.outageAlerted = await this.sendAlert('TELEGRAM_READER_STALLED', text).catch(() => false);
   }
 
@@ -639,6 +697,7 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     const c = this.client;
     this.client = null;
     this.listeningSince = null;
+    this.stableSince = null;
     this.polling = false; // a round still waiting on the dead client must not block the next client's polls
     this.pollRound++;
     if (c) await closeQuietly(c);

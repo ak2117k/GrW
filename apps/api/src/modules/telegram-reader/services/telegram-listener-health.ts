@@ -22,6 +22,16 @@ export const DISCONNECT_TIMEOUT_MS = 10_000;
 export const CATCHUP_LIMIT = 100;
 /** …but beyond the usual newest few it keeps only posts this recent (no old history re-emitted). */
 export const CATCHUP_MAX_AGE_MS = 48 * 3_600_000;
+/** A channel whose catch-up fetch fails this often (non-timeout errors) is skipped; an RPC answer skips it at once. */
+export const CATCHUP_MAX_TRIES = 3;
+/** The reconnect backoff resets only after the link has answered steadily this long (a flapping link backs off). */
+export const STABLE_RESET_MS = 5 * 60_000;
+/**
+ * GramJS sleeps through a FLOOD_WAIT up to this many seconds INSIDE the request. Must stay well below
+ * REQUEST_TIMEOUT_MS, or a 31–60 s flood looks like a dead link (timeout) instead of reaching the
+ * listener's explicit FLOOD_WAIT pause (review 2026-11-28).
+ */
+export const FLOOD_SLEEP_THRESHOLD_S = 5;
 
 export class TelegramTimeoutError extends Error {
   constructor(what: string, ms: number) {
@@ -78,7 +88,7 @@ export function durationText(ms: number): string {
 export function stalledAlertText(a: { downSince: number; now: number; state: string; lastError: string | null }): string {
   const revoked = a.state === 'revoked';
   return (
-    `GrW Telegram reader STALLED: no channel post read for ${durationText(a.now - a.downSince)} (since ${istHm(a.downSince)}; state ${a.state}` +
+    `GrW Telegram reader STALLED: Telegram has not answered for ${durationText(a.now - a.downSince)} (since ${istHm(a.downSince)}; state ${a.state}` +
     `${a.lastError ? `, last error ${a.lastError}` : ''}). ` +
     (revoked
       ? 'The Telegram session is no longer valid: reconnect it in Settings.'
@@ -86,9 +96,11 @@ export function stalledAlertText(a: { downSince: number; now: number; state: str
   );
 }
 
-export function recoveredAlertText(a: { downSince: number; now: number; caughtUp: number }): string {
+export function recoveredAlertText(a: { downSince: number; now: number; caughtUp: number; broken?: string[] }): string {
+  const broken = [...new Set(a.broken ?? [])];
   return (
-    `GrW Telegram reader recovered: posts flowing again after ${durationText(a.now - a.downSince)} (down since ${istHm(a.downSince)}). ` +
-    `Caught up ${a.caughtUp} post(s) missed meanwhile.`
+    `GrW Telegram reader recovered: Telegram answering again after ${durationText(a.now - a.downSince)} (down since ${istHm(a.downSince)}). ` +
+    `Caught up ${a.caughtUp} post(s) missed meanwhile.` +
+    (broken.length ? ` Could not read: ${broken.map((t) => `"${t}"`).join(', ')} (check the channel is still joined).` : '')
   );
 }

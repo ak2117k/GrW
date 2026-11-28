@@ -42,9 +42,11 @@ describe('telegram-listener-health', () => {
     expect(durationText(17 * 60_000)).toBe('17 min');
     expect(durationText(18 * 3_600_000 + 5 * 60_000)).toBe('18 h 5 min');
     expect(stalledAlertText({ downSince: down, now: down + 16 * 60_000, state: 'backoff', lastError: 'telegram connect timed out after 90 s' })).toBe(
-      'GrW Telegram reader STALLED: no channel post read for 16 min (since 02:31 IST; state backoff, last error telegram connect timed out after 90 s). ' +
+      'GrW Telegram reader STALLED: Telegram has not answered for 16 min (since 02:31 IST; state backoff, last error telegram connect timed out after 90 s). ' +
         'Restarting the client with backoff; missed posts are caught up when it reconnects.',
     );
     expect(recoveredAlertText({ downSince: down, now: down + 20 * 60_000, caughtUp: 7 })).toContain('after 20 min (down since 02:31 IST). Caught up 7 post(s)');
+    expect(recoveredAlertText({ downSince: down, now: down + 20 * 60_000, caughtUp: 0 })).not.toContain('Could not read');
+    expect(recoveredAlertText({ downSince: down, now: down + 20 * 60_000, caughtUp: 0, broken: ['Beta', 'Beta'] })).toContain('Could not read: "Beta" (check');
   });
 });

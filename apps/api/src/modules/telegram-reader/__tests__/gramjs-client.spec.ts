@@ -18,6 +18,11 @@ describe('GramJsClient', () => {
     await expect(c.connect()).resolves.toBeUndefined();
   });
 
+  it('GramJS sleeps through floods only well below the 30 s request timeout (longer ones reach the listener as FLOOD_WAIT)', () => {
+    const { inner } = client();
+    expect(inner.floodSleepThreshold).toBeLessThanOrEqual(10);
+  });
+
   it('onAnyUpdate counts real updates only, not connection-state pseudo-updates', () => {
     const { c, inner } = client();
     const handlers: Array<(u: unknown) => void> = [];

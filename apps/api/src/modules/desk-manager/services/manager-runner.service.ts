@@ -20,6 +20,10 @@ export interface DeskPacketBuilder {
 export const RUNNER_TICK_MS = 30_000;
 /** Health: no completed run for idleEveryMin + this while a venue is open → alert + manager OPENs blocked. */
 export const SILENCE_GRACE_MIN = 5;
+/** No completed run for this long while a venue is open → one ops alert per gap. */
+export const MISSED_RUN_ALERT_MIN = 15;
+/** A failed run (any error) alerts at most this often. */
+export const FAILED_RUN_ALERT_MS = 30 * 60_000;
 /** WATCH re-check bounds (minutes). */
 const WATCH_MIN = 1;
 const WATCH_MAX = 60;
@@ -69,6 +73,9 @@ export class ManagerRunnerService implements DeskWakePort, OnModuleInit, OnModul
   private callsToday = 0;
   private capAlertDay: string | null = null;
   private ownerWarned = false;
+  /** The gap start (ms) the missed-run alert was sent for. */
+  private silentAlertedFor: number | null = null;
+  private failAlertAt: Date | null = null;
 
   constructor(
     @Inject(DESK_MANAGER_CONFIG) private readonly cfg: DeskManagerConfig,
@@ -175,6 +182,7 @@ export class ManagerRunnerService implements DeskWakePort, OnModuleInit, OnModul
       if (out !== 'abandoned') return out;
       state.abandoned = true;
       this.log.warn(`desk manager run abandoned after ${this.cfg.runTimeoutMs} ms`);
+      this.runFailed(now, `abandoned after ${this.cfg.runTimeoutMs} ms`);
       if (!state.runId) return null;
       await this.repo
         .finishRun(state.runId, { finishedAt: this.at(now, startedReal), error: `abandoned after ${this.cfg.runTimeoutMs} ms: nothing acted on` })
@@ -196,6 +204,7 @@ export class ManagerRunnerService implements DeskWakePort, OnModuleInit, OnModul
     try {
       packet = await this.builder.build(owner, now, this.cfg);
     } catch (e) {
+      this.runFailed(now, `packet: ${errText(e)}`);
       await finish({ finishedAt: this.at(now, startedReal), packetMs: Date.now() - p0, error: `packet: ${errText(e)}` });
       return { runId, decisions: 0 };
     }
@@ -211,6 +220,7 @@ export class ManagerRunnerService implements DeskWakePort, OnModuleInit, OnModul
       text = r.text;
       aiMs = r.ms;
     } catch (e) {
+      if (!state.abandoned) this.runFailed(now, `ai: ${errText(e)}`);
       await finish({ finishedAt: this.at(now, startedReal), packet, packetMs, aiMs: Date.now() - a0, error: `ai: ${errText(e)}` });
       return { runId, decisions: 0 };
     }
@@ -218,6 +228,7 @@ export class ManagerRunnerService implements DeskWakePort, OnModuleInit, OnModul
 
     const parsed = parseManagerReply(text);
     if (!parsed.ok) {
+      this.runFailed(now, `reply: ${parsed.error}`);
       await finish({ finishedAt: this.at(now, startedReal), packet, packetMs, aiMs, reply: { raw: text.slice(0, 20_000) }, error: `reply: ${parsed.error}` });
       return { runId, decisions: 0 };
     }
@@ -272,13 +283,25 @@ export class ManagerRunnerService implements DeskWakePort, OnModuleInit, OnModul
   private checkSilence(now: Date): void {
     const since = Math.max(this.lastCompleted?.getTime() ?? 0, this.venueOpenSince?.getTime() ?? now.getTime());
     const silentMin = (now.getTime() - since) / 60_000;
-    if (silentMin < this.cfg.idleEveryMin + SILENCE_GRACE_MIN) return;
-    if (!this.openBlocked) this.log.warn(`desk manager silent for ${Math.round(silentMin)} min: manager OPENs blocked`);
-    this.openBlocked = true;
+    if (silentMin >= this.cfg.idleEveryMin + SILENCE_GRACE_MIN) {
+      if (!this.openBlocked) this.log.warn(`desk manager silent for ${Math.round(silentMin)} min: manager OPENs blocked`);
+      this.openBlocked = true;
+    }
+    // Missed-run alert (audit 2026-11-27: no alert when no desk run): once per gap, keyed by the gap's start so the
+    // ops-alert cooldown never swallows a new gap.
+    if (silentMin < MISSED_RUN_ALERT_MIN || this.silentAlertedFor === since) return;
+    this.silentAlertedFor = since;
     void this.alert(
-      'desk-manager-silent',
+      `desk-manager-silent:${new Date(since).toISOString()}`,
       `Desk manager has not completed a run for ${Math.round(silentMin)} min while a venue is open (last completed ${this.lastCompleted?.toISOString() ?? 'never'}). Manager OPENs are blocked until it completes one.`,
     );
+  }
+
+  /** A run ended in an error (packet, AI, reply, abandoned): one ops alert per 30 min. */
+  private runFailed(now: Date, error: string): void {
+    if (this.failAlertAt && now.getTime() - this.failAlertAt.getTime() < FAILED_RUN_ALERT_MS) return;
+    this.failAlertAt = now;
+    void this.alert('desk-manager-run-failed', `Desk manager run failed: ${error.slice(0, 400)}. Nothing from that run was acted on. Further failures in the next 30 min are not announced.`);
   }
 
   private capped(): boolean {

@@ -39,12 +39,16 @@ function make(o: { env?: Record<string, string>; busy?: boolean; text?: string; 
   };
   const svc = new ManagerRunnerService(cfg, builder, actions, llm as never, repo as never);
   const alerts: string[] = [];
+  const texts: string[] = [];
   svc.venueOpen = () => o.venueOpen ?? true;
-  svc.alert = async (key: string) => {
+  svc.alert = async (key: string, text: string) => {
     alerts.push(key);
+    texts.push(text);
   };
-  return { svc, cfg, builder, actions, llm, repo, alerts };
+  return { svc, cfg, builder, actions, llm, repo, alerts, texts };
 }
+const silent = (keys: string[]) => keys.filter((k) => k.startsWith('desk-manager-silent'));
+const failedAlerts = (keys: string[]) => keys.filter((k) => k.startsWith('desk-manager-run-failed'));
 
 beforeEach(() => jest.useFakeTimers());
 afterEach(() => {
@@ -144,10 +148,10 @@ describe('ManagerRunnerService', () => {
     await m.svc.tick(min(10));
     await m.svc.tick(min(14));
     expect(m.svc.opensBlocked()).toBe(false);
-    expect(m.alerts).toEqual([]);
+    expect(silent(m.alerts)).toEqual([]);
     await m.svc.tick(min(15));
     expect(m.svc.opensBlocked()).toBe(true);
-    expect(m.alerts).toEqual(['desk-manager-silent']);
+    expect(silent(m.alerts)).toHaveLength(1);
     expect(m.repo.finishRun).toHaveBeenCalledWith('run1', expect.objectContaining({ error: 'ai: vertex 529' }));
     m.llm.decide.mockResolvedValue({ text: reply(NO_ACTION), ms: 1, model: 'm' });
     await m.svc.tick(min(20));
@@ -163,7 +167,47 @@ describe('ManagerRunnerService', () => {
     open = true;
     m.llm.decide.mockRejectedValue(new Error('down'));
     await m.svc.tick(min(600));
-    expect(m.alerts).toEqual([]);
+    expect(silent(m.alerts)).toEqual([]);
+  });
+
+  it('missed-run alert: once per gap (> 15 min without a completed run while a venue is open), again for a new gap', async () => {
+    const m = make();
+    m.llm.decide.mockRejectedValue(new Error('vertex 529'));
+    for (let t = 0; t <= 60; t += 1) await m.svc.tick(min(t));
+    expect(silent(m.alerts)).toHaveLength(1);
+    m.llm.decide.mockResolvedValue({ text: reply(NO_ACTION), ms: 1, model: 'm' });
+    await m.svc.tick(min(70));
+    expect(m.svc.lastCompletedAt()).toEqual(min(70));
+    m.llm.decide.mockRejectedValue(new Error('down again'));
+    for (let t = 71; t <= 84; t += 1) await m.svc.tick(min(t));
+    expect(silent(m.alerts)).toHaveLength(1);
+    for (let t = 85; t <= 120; t += 1) await m.svc.tick(min(t));
+    expect(silent(m.alerts)).toHaveLength(2);
+    expect(new Set(silent(m.alerts)).size).toBe(2); // distinct keys: the ops-alert cooldown never swallows a new gap
+  });
+
+  it('failed-run alert: any run error alerts, at most once per 30 min', async () => {
+    const m = make();
+    m.llm.decide.mockRejectedValue(new Error('vertex 529'));
+    await m.svc.tick(T0);
+    expect(failedAlerts(m.alerts)).toHaveLength(1);
+    expect(m.texts.find((t) => t.includes('vertex 529'))).toBeDefined();
+    await m.svc.tick(min(10));
+    await m.svc.tick(min(20));
+    expect(failedAlerts(m.alerts)).toHaveLength(1);
+    await m.svc.tick(min(30));
+    expect(failedAlerts(m.alerts)).toHaveLength(2);
+    m.builder.build.mockRejectedValueOnce(new Error('db timeout'));
+    await m.svc.tick(min(40));
+    expect(failedAlerts(m.alerts)).toHaveLength(2);
+    await m.svc.tick(min(60));
+    expect(failedAlerts(m.alerts)).toHaveLength(3);
+  });
+
+  it('a malformed reply is a failed run too', async () => {
+    const m = make({ text: 'not json' });
+    await m.svc.runOnce(['cadence'], T0);
+    expect(failedAlerts(m.alerts)).toHaveLength(1);
   });
 
   it('exits executed before opens; invalid decisions stored INVALID and never executed', async () => {

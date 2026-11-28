@@ -227,6 +227,8 @@ export class SignalIntakeRepository {
    * before the cutoff, which the live feed fills every session. candles_1d is only a fallback when its day is newer:
    * on prod it is a lazy broker cache with no row since 2026-09-30 (the old reader returned 30-Sep NIFTY ~22,400, or
    * nothing for the other indices, so the re-match never fired). One query, one indexed backward seek per source.
+   * Both sources are bounded to REF_LOOKBACK_DAYS before the cutoff: a stale daily close is never a reference (no ref = no check).
+   * On the day after a holiday the reference may be the feed's flat holiday copy of the last close — harmless for the 15% band.
    */
   async refCloses(at: Date): Promise<Map<string, number>> {
     const cut = new Date(Math.floor((at.getTime() + IST_OFFSET_MS) / DAY_MS) * DAY_MS - IST_OFFSET_MS);
@@ -237,14 +239,16 @@ export class SignalIntakeRepository {
         WHERE exchange = ${ref.exchange} AND token = ${ref.token} AND ts < ${cut} AND ts >= ${floor}${sessionMinuteFilter(ref.exchange)}
         ORDER BY ts DESC LIMIT 1)`,
       Prisma.sql`(SELECT ${name}::text AS name, '1d'::text AS src, ${day} AS day, close FROM candles_1d
-        WHERE exchange = ${ref.exchange} AND token = ${ref.token} AND ts < ${cut}
+        WHERE exchange = ${ref.exchange} AND token = ${ref.token} AND ts < ${cut} AND ts >= ${floor}
         ORDER BY ts DESC LIMIT 1)`,
     ]);
     const rows = await this.prisma.$queryRaw<Array<{ name: string; src: string; day: string; close: number }>>`${Prisma.join(parts, ' UNION ALL ')}`;
+    const floorDay = new Date(floor.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
     const best = new Map<string, { day: string; minute: boolean; close: number }>();
     for (const r of rows) {
       const close = Number(r.close);
       if (!Object.prototype.hasOwnProperty.call(INDEX_UNDERLYINGS, r.name) || !Number.isFinite(close) || close <= 0) continue;
+      if (String(r.day) < floorDay) continue; // belt and braces: the SQL bound already excludes it
       const cand = { day: String(r.day), minute: r.src === '1m', close };
       const cur = best.get(r.name);
       // A newer session wins; on the same day the minute close (the real session end) beats the broker daily bar.

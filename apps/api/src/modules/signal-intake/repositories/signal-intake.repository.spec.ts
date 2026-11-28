@@ -92,3 +92,22 @@ describe('SignalIntakeRepository.refCloses — previous session close from candl
     expect(Object.fromEntries(m)).toEqual({ SENSEX: 83339.26 });
   });
 });
+
+describe('SignalIntakeRepository.refCloses — a stale daily close is never a reference (review of 6939d3df)', () => {
+  const at = new Date('2026-11-27T09:35:00Z');
+  it('both the candles_1m and the candles_1d branch carry the lookback floor (cutoff - 10 days)', async () => {
+    const prisma = { $queryRaw: jest.fn(async () => []) };
+    await new SignalIntakeRepository(prisma as never).refCloses(at);
+    const q = capturedSql(prisma.$queryRaw.mock.calls as unknown[][]);
+    const floor = '2026-11-16T18:30:00.000Z';
+    const floors = q.values.filter((v) => v instanceof Date && v.toISOString() === floor).length;
+    expect(floors).toBe(12); // 6 indices x 2 sources
+    for (const branch of q.text.split('UNION ALL')) expect(branch).toMatch(/ts < \$\d+ AND ts >= \$\d+/);
+  });
+
+  it('only the 30-Sep daily bar (no 1m session in the lookback): no reference', async () => {
+    const prisma = { $queryRaw: jest.fn(async () => [{ name: 'NIFTY', src: '1d', day: '2026-10-01', close: 22421.95 }]) };
+    const m = await new SignalIntakeRepository(prisma as never).refCloses(at);
+    expect(m.size).toBe(0);
+  });
+});

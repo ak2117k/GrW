@@ -1,7 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { DESK_MANAGER_CONFIG, type DeskManagerConfig } from '../desk-manager.config';
 import { evaluateGuard } from '../domain/desk-guard';
-import { dayPnlPath } from '../domain/pnl-path';
+import { guardDayPath } from '../domain/pnl-path';
+import { parseAutoExitConfig } from '../../sentinel-executor/domain/auto-exit.config';
 import type { GuardState } from '../domain/desk.types';
 import { DeskDayRepository } from '../repositories/desk-day.repository';
 
@@ -17,7 +18,9 @@ const MAX_PAUSE_MIN = 390;
 
 /**
  * The desk guard (plan Task 1, spec §5.5): code only, the AI cannot override it. Blocks every automatic LIVE
- * entry (signal, reentry, manager) when the owner's day P&L path breaches a limit or a pause is in force.
+ * entry (signal, reentry, manager) when the DESK's day P&L path breaches a limit or a pause is in force. The path
+ * counts only the desk manager's own trades (origin 'manager', not on AI_AUTO_EXIT_HOLD); the owner's manual,
+ * held and other trades are reported as path.ownerPnl and never decide (supreme fixes W1, 2026-11-28).
  * Never consulted for the owner's own orders or for paper. `check` FAILS CLOSED: if the day cannot be read,
  * the entry is blocked with DESK_GUARD_UNAVAILABLE. A pause never loosens an existing one; only resume / reset
  * lift it.
@@ -34,10 +37,11 @@ export class DeskGuardService implements DeskGuardPort {
   async state(userId: string, now: Date, underlying: string | null = null): Promise<GuardState> {
     const [closed, open, day] = await Promise.all([
       this.repo.closedToday(userId, now),
-      this.repo.openPnl(userId, now),
+      this.repo.openTrades(userId),
       this.repo.guardDay(userId, now),
     ]);
-    return evaluateGuard(dayPnlPath(closed, open), this.cfg.guard, { until: day.pausedUntil, scope: day.pauseScope }, underlying, now);
+    const hold = parseAutoExitConfig(process.env).hold ?? [];
+    return evaluateGuard(guardDayPath(closed, open, hold), this.cfg.guard, { until: day.pausedUntil, scope: day.pauseScope }, underlying, now);
   }
 
   async check(userId: string, source: GuardSource, underlying: string | null, now: Date): Promise<GuardState> {
@@ -47,7 +51,7 @@ export class DeskGuardService implements DeskGuardPort {
     } catch (err) {
       const why = `DESK_GUARD_UNAVAILABLE: ${errText(err)}`;
       this.logger.error(`[desk-guard] ${source} entry on ${underlying ?? '?'} blocked — ${why}`);
-      g = { blocked: true, reasons: [why], path: dayPnlPath([], 0), pausedUntil: null, pauseScope: null };
+      g = { blocked: true, reasons: [why], path: guardDayPath([], [], []), pausedUntil: null, pauseScope: null };
     }
     if (g.blocked) {
       try {

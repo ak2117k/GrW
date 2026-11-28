@@ -55,6 +55,9 @@ export type GuardDayPath = DayPnlPath & { ownerPnl: OwnerPnl };
  * put and 3 manual losers blocked the desk ~270 min on a +₹2,409 day). Holdings and paper never reach the guard
  * (the repository reads POSITION, non-paper).
  */
+// The hold list is read at check time: a contract the owner adds to AI_AUTO_EXIT_HOLD mid-day drops ALL its trades
+// today (open and already closed, losers included) out of the guard path into ownerPnl — the owner's call
+// (removing it from the list puts them back).
 export function countsForGuard(t: { trackerId: string; symbol: string; origin: TradeOrigin }, hold: readonly string[]): boolean {
   return t.origin !== 'manual' && !isHeld([...hold], { id: t.trackerId, symbol: t.symbol });
 }

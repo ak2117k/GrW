@@ -16,11 +16,17 @@ export interface GuardDayState {
 
 const EMPTY: GuardDayState = { pausedUntil: null, pauseScope: null, resetAt: null };
 
-/** signal_orders.source → the trade's origin. No order row = the owner's own (manual) trade. */
-function originOf(source: string | null | undefined): TradeOrigin {
+/** signal_orders.source of an app order → the trade's origin (an unrecognised source is 'unknown', still counted). */
+function originOf(source: string): TradeOrigin {
   if (source === 'signal' || source === 'reentry' || source === 'manager') return source;
-  return source == null ? 'manual' : 'unknown';
+  return 'unknown';
 }
+
+/** signal_orders statuses that can stand behind a live position. */
+const LIVE_ORDER_STATUSES = ['FILLED', 'PARTIAL', 'UNCERTAIN'] as const;
+const ORDER_LOOKBACK_MS = 7 * 86_400_000;
+/** A linked tracker that CLOSED this close to (or after) the unlinked tracker's open is treated as re-created. */
+const RECREATE_SLACK_MS = 15 * 60_000;
 
 /**
  * The desk guard's reads and writes (plan Task 1). Reads EVERY live position tracker (IST day, NSE + MCX) with its
@@ -44,11 +50,11 @@ export class DeskDayRepository {
         exitTime: { gte: from, lte: now },
         NOT: { id: { startsWith: 'paper:' } },
       },
-      select: { id: true, symbol: true, entryPrice: true, exitPrice: true, qty: true, exitTime: true, pnl: true },
+      select: { id: true, symbol: true, exchange: true, token: true, entryTime: true, entryPrice: true, exitPrice: true, qty: true, exitTime: true, pnl: true },
       orderBy: { exitTime: 'asc' },
     });
     if (rows.length === 0) return [];
-    const sourceBy = await this.sourcesOf(rows.map((r) => r.id));
+    const originBy = await this.originsOf(userId, rows, now);
     return rows.map((r) => ({
       trackerId: r.id,
       symbol: r.symbol,
@@ -57,7 +63,7 @@ export class DeskDayRepository {
       // A closed row without a stored pnl is priced from its exit (value factor 1) — never silently 0, which
       // would end a loss streak.
       pnl: Number.isFinite(r.pnl) ? (r.pnl as number) : r.exitPrice != null ? (r.exitPrice - r.entryPrice) * r.qty : 0,
-      origin: originOf(sourceBy.has(r.id) ? sourceBy.get(r.id) : undefined),
+      origin: originBy.get(r.id) ?? 'manual',
     }));
   }
 
@@ -75,7 +81,7 @@ export class DeskDayRepository {
       select: { id: true, symbol: true, exchange: true, token: true, entryPrice: true, entryTime: true, qty: true, pnl: true, lastLtp: true },
     });
     if (rows.length === 0) return [];
-    const sourceBy = await this.sourcesOf(rows.map((r) => r.id));
+    const originBy = await this.originsOf(userId, rows, now);
     const out: GuardOpenTrade[] = [];
     for (const r of rows) {
       const stored = typeof r.pnl === 'number' && Number.isFinite(r.pnl) ? r.pnl : null;
@@ -85,7 +91,7 @@ export class DeskDayRepository {
         const prevClose = await this.prevSessionClose(r.exchange, r.token, dayStart).catch(() => null);
         todayPnl = carriedTodayPnl({ pnl, entryPrice: r.entryPrice, ltp: r.lastLtp ?? null, qty: r.qty, prevClose });
       }
-      out.push({ trackerId: r.id, symbol: r.symbol, pnl: stored, todayPnl, origin: originOf(sourceBy.has(r.id) ? sourceBy.get(r.id) : undefined) });
+      out.push({ trackerId: r.id, symbol: r.symbol, pnl: stored, todayPnl, origin: originBy.get(r.id) ?? 'manual' });
     }
     return out;
   }
@@ -105,15 +111,69 @@ export class DeskDayRepository {
     return null;
   }
 
-  /** tracker id → signal_orders.source (first row wins; a row with a null source is the signal trader). */
-  private async sourcesOf(trackerIds: string[]): Promise<Map<string, string | null>> {
-    const orders = await this.prisma.signalOrder.findMany({
-      where: { trackerId: { in: trackerIds } },
+  /**
+   * tracker id → origin. 'manual' ONLY on positive evidence that no app order is behind the position (a real-money
+   * guard must not let an app trade escape as "manual"):
+   *  1. a signal_orders row linked by trackerId → its source (oldest row wins; a null source = the signal trader);
+   *  2. otherwise (the executor's NO_TRACKER branch, the window before linking, a re-created tracker) any of the
+   *     user's live-status app orders (FILLED / PARTIAL / UNCERTAIN, last 7 days, created before the tracker
+   *     closed) for the same contract — exchange+token or tradingsymbol — that is still open: never linked, linked
+   *     to a tracker that no longer exists, or linked to a CLOSED tracker that closed at/after this tracker opened
+   *     (−15 min: a reconcile re-created it). An order still serving ANOTHER open tracker is that tracker's, not
+   *     this one's. Any match ⇒ that order's source;
+   *  3. no match ⇒ 'manual'.
+   * Every app path that trades live money (signal trader, reentry, desk manager OPEN) writes a signal_orders row,
+   * so this one table is the evidence for all of them.
+   */
+  private async originsOf(
+    userId: string,
+    rows: Array<{ id: string; symbol: string; exchange: string | null; token: string | null; entryTime: Date | null; exitTime?: Date | null }>,
+    now: Date,
+  ): Promise<Map<string, TradeOrigin>> {
+    const out = new Map<string, TradeOrigin>();
+    const linked = await this.prisma.signalOrder.findMany({
+      where: { trackerId: { in: rows.map((r) => r.id) } },
       select: { trackerId: true, source: true },
+      orderBy: { createdAt: 'asc' },
     });
-    const sourceBy = new Map<string, string | null>();
-    for (const o of orders) if (o.trackerId && !sourceBy.has(o.trackerId)) sourceBy.set(o.trackerId, o.source ?? 'signal');
-    return sourceBy;
+    for (const o of linked) if (o.trackerId && !out.has(o.trackerId)) out.set(o.trackerId, originOf(o.source ?? 'signal'));
+    const unlinked = rows.filter((r) => !out.has(r.id));
+    if (unlinked.length === 0) return out;
+
+    const tokens = [...new Set(unlinked.map((r) => r.token).filter((t): t is string => !!t))];
+    const symbols = [...new Set(unlinked.map((r) => r.symbol).filter(Boolean))];
+    const cands = await this.prisma.signalOrder.findMany({
+      where: {
+        userId,
+        status: { in: [...LIVE_ORDER_STATUSES] },
+        createdAt: { gte: new Date(now.getTime() - ORDER_LOOKBACK_MS) },
+        OR: [{ token: { in: tokens } }, { tradingsymbol: { in: symbols } }],
+      },
+      select: { trackerId: true, source: true, exchange: true, token: true, tradingsymbol: true, createdAt: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (cands.length === 0) return out;
+    const linkedIds = [...new Set(cands.map((c) => c.trackerId).filter((t): t is string => !!t))];
+    const trackerOf = new Map<string, { status: string; exitTime: Date | null }>();
+    if (linkedIds.length > 0) {
+      const ts = await this.prisma.tradeTracker.findMany({ where: { userId, id: { in: linkedIds } }, select: { id: true, status: true, exitTime: true } });
+      for (const t of ts) trackerOf.set(t.id, { status: t.status, exitTime: t.exitTime ?? null });
+    }
+    for (const r of unlinked) {
+      const until = (r.exitTime ?? now).getTime();
+      const opened = r.entryTime ? r.entryTime.getTime() : 0;
+      const hit = cands.find((c) => {
+        const same = (!!r.token && c.token === r.token && (!r.exchange || c.exchange === r.exchange)) || c.tradingsymbol === r.symbol;
+        if (!same || c.createdAt.getTime() > until) return false;
+        if (!c.trackerId) return true;
+        const t = trackerOf.get(c.trackerId);
+        if (!t) return true; // linked tracker row is gone (re-created)
+        if (t.status === 'OPEN') return false; // still serving another open position
+        return t.exitTime !== null && t.exitTime.getTime() >= opened - RECREATE_SLACK_MS;
+      });
+      if (hit) out.set(r.id, originOf(hit.source ?? 'signal'));
+    }
+    return out;
   }
 
   /** Today's pause / reset (a row left from an earlier IST day is ignored). */

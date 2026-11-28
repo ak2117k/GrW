@@ -2,18 +2,28 @@ import { DeskDayRepository } from './desk-day.repository';
 
 type Row = { id: string; userId: string; symbol: string; kind: string; status: string; entryPrice: number; exitPrice: number | null; qty: number; exitTime: Date | null; pnl: number | null; entryTime?: Date | null; exchange?: string; token?: string; lastLtp?: number | null };
 type Bar = { exchange: string; token: string; ts: Date; close: number };
+type Order = { trackerId: string | null; source: string | null; userId?: string; status?: string; exchange?: string; token?: string; tradingsymbol?: string; createdAt?: Date };
 
 const NOW = new Date('2026-11-26T08:00:00Z'); // 13:30 IST
 const IST_MIDNIGHT = new Date('2026-11-25T18:30:00Z');
 
 /** A tiny in-memory prisma that honours the where clauses the repository sends. */
-function make(trackers: Row[], orders: Array<{ trackerId: string; source: string | null }> = [], state: Record<string, unknown> | null = null, bars: Bar[] = []) {
+function make(trackers: Row[], orders: Order[] = [], state: Record<string, unknown> | null = null, bars: Bar[] = []) {
   const match = (r: Row, w: any) =>
     r.userId === w.userId &&
-    r.kind === w.kind &&
-    r.status === w.status &&
+    (w.kind === undefined || r.kind === w.kind) &&
+    (w.status === undefined || r.status === w.status) &&
+    (!w.id?.in || w.id.in.includes(r.id)) &&
     !(w.NOT?.id?.startsWith && r.id.startsWith(w.NOT.id.startsWith)) &&
     (!w.exitTime || (r.exitTime !== null && r.exitTime >= w.exitTime.gte && r.exitTime <= w.exitTime.lte));
+  // Two query shapes: linked rows (trackerId in ids) and the contract fallback (user + live status + token/symbol).
+  const orderMatch = (o: Order, w: any) =>
+    w.trackerId
+      ? w.trackerId.in.includes(o.trackerId)
+      : (o.userId ?? 'owner') === w.userId &&
+        w.status.in.includes(o.status ?? 'FILLED') &&
+        (o.createdAt ?? NOW) >= w.createdAt.gte &&
+        w.OR.some((c: any) => (c.token && o.token !== undefined && c.token.in.includes(o.token)) || (c.tradingsymbol && o.tradingsymbol !== undefined && c.tradingsymbol.in.includes(o.tradingsymbol)));
   const prisma = {
     tradeTracker: {
       findMany: jest.fn(async ({ where }: any) => trackers.filter((r) => match(r, where)).sort((a, b) => (a.exitTime?.getTime() ?? 0) - (b.exitTime?.getTime() ?? 0))),
@@ -22,7 +32,7 @@ function make(trackers: Row[], orders: Array<{ trackerId: string; source: string
         return { _sum: { pnl: rs.length ? rs.reduce((s, r) => s + (r.pnl ?? 0), 0) : null } };
       }),
     },
-    signalOrder: { findMany: jest.fn(async ({ where }: any) => orders.filter((o) => where.trackerId.in.includes(o.trackerId))) },
+    signalOrder: { findMany: jest.fn(async ({ where }: any) => orders.filter((o) => orderMatch(o, where))) },
     deskGuardState: {
       findUnique: jest.fn(async () => state),
       upsert: jest.fn(async ({ create, update }: any) => (state = { ...(state ?? create), ...update })),
@@ -164,8 +174,57 @@ describe('DeskDayRepository', () => {
     const { repo } = make([maz, m], [{ trackerId: 'm', source: 'signal' }], null, [{ exchange: 'NFO', token: '137759', ts: new Date('2026-11-25T09:59:00Z'), close: 30 }]);
     const out = await repo.openTrades('owner', NOW);
     expect(out.map((t) => [t.trackerId, t.origin, t.pnl])).toEqual([['maz', 'manual', -4399], ['m', 'signal', -1200]]);
-    expect(out[0].todayPnl).not.toBeCloseTo(-4399, 0); // carried: today's move only
+    // carried: today's move only = (ltp − prevClose) × the tracker's pnl per point
+    expect(out[0].todayPnl).toBeCloseTo((25.35 - 30) * (-4399 / (25.35 - 44.9)), 6); // ≈ −1046.3
     expect(out[1].todayPnl).toBe(-1200); // opened today: whole pnl
+  });
+
+  describe("origin: 'manual' only on positive evidence (no app order for the contract)", () => {
+    const openRow = (id: string, over: Partial<Row> = {}): Row => ({
+      id, userId: 'owner', symbol: 'NIFTY02DEC2625000CE', kind: 'POSITION', status: 'OPEN', entryPrice: 100, exitPrice: null, qty: 75,
+      exitTime: null, pnl: -900, entryTime: new Date('2026-11-26T05:00:00Z'), exchange: 'NFO', token: '43210', lastLtp: 88, ...over,
+    });
+    const filled = (over: Partial<Order> = {}): Order => ({
+      trackerId: null, source: 'signal', userId: 'owner', status: 'FILLED', exchange: 'NFO', token: '43210', tradingsymbol: 'NIFTY02DEC2625000CE',
+      createdAt: new Date('2026-11-26T04:59:00Z'), ...over,
+    });
+
+    it('NO_TRACKER: a FILLED app order never linked to the tracker → counted with its source', async () => {
+      const { repo } = make([openRow('t')], [filled({ source: 'manager' })]);
+      expect((await repo.openTrades('owner', NOW))[0].origin).toBe('manager');
+    });
+
+    it('matches by tradingsymbol when the token differs', async () => {
+      const { repo } = make([openRow('t')], [filled({ token: '99999', source: 'reentry' })]);
+      expect((await repo.openTrades('owner', NOW))[0].origin).toBe('reentry');
+    });
+
+    it('a re-created tracker: the order is linked to an older CLOSED tracker of the same contract that closed as this one opened → counted', async () => {
+      const old = { ...openRow('old'), status: 'CLOSED', exitTime: new Date('2026-11-26T05:00:30Z') };
+      const { repo } = make([old, openRow('new', { entryTime: new Date('2026-11-26T05:01:00Z') })], [filled({ trackerId: 'old' })]);
+      expect((await repo.openTrades('owner', NOW)).find((t) => t.trackerId === 'new')?.origin).toBe('signal');
+    });
+
+    it('a re-created tracker whose old tracker row is gone → counted', async () => {
+      const { repo } = make([openRow('new')], [filled({ trackerId: 'deleted' })]);
+      expect((await repo.openTrades('owner', NOW))[0].origin).toBe('signal');
+    });
+
+    it('closed today and never linked → counted too', async () => {
+      const c = { ...openRow('c'), status: 'CLOSED', exitTime: new Date('2026-11-26T06:00:00Z'), exitPrice: 90, pnl: -750 };
+      const { repo } = make([c], [filled()]);
+      expect((await repo.closedToday('owner', NOW))[0].origin).toBe('signal');
+    });
+
+    it('still manual: no order for the contract, an order that is still the live tracker of ANOTHER open position, an old closed trade, a rejected order', async () => {
+      const other = openRow('app', { symbol: 'X', token: '43210' });
+      const oldClosed = { ...openRow('past'), status: 'CLOSED', exitTime: new Date('2026-11-25T08:00:00Z') };
+      const { repo } = make(
+        [openRow('own'), other, oldClosed],
+        [filled({ trackerId: 'app' }), filled({ trackerId: 'past' }), filled({ status: 'REJECTED' }), filled({ token: '1', tradingsymbol: 'OTHER' })],
+      );
+      expect((await repo.openTrades('owner', NOW)).find((t) => t.trackerId === 'own')?.origin).toBe('manual');
+    });
   });
 
   it('reset clears the pause and stamps resetAt', async () => {

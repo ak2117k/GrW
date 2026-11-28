@@ -8,4 +8,4 @@ User=grw
 EnvironmentFile=/opt/grw/env/ops.env
 EnvironmentFile=/opt/grw/env/compose.env
 ExecStart=/bin/bash /opt/grw/app/scripts/ops/restore-test.sh
-ExecStopPost=/bin/bash -c 'curl -sS -m 10 "https://api.telegram.org/bot${TELEGRAM_ALERT_BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_ALERT_CHAT_ID}" --data-urlencode "text=GrW restore test: $SERVICE_RESULT" >/dev/null || true'
+ExecStopPost=/bin/bash -c 'echo "url = https://api.telegram.org/bot$${TELEGRAM_ALERT_BOT_TOKEN}/sendMessage" | curl -sS -m 10 -K - --data-urlencode "chat_id=$${TELEGRAM_ALERT_CHAT_ID}" --data-urlencode "text=GrW restore test: $SERVICE_RESULT" >/dev/null || true'

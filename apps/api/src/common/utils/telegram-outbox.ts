@@ -59,6 +59,11 @@ function scrub(text: string, secrets: string[]): string {
   return out;
 }
 
+/** Cut by code point, never inside a surrogate pair (a lone surrogate makes the Prisma insert fail). */
+function cut(text: string, max: number): string {
+  return text.length <= max ? text : Array.from(text).slice(0, max).join('');
+}
+
 export function toOutboxRow(entry: TelegramOutboxEntry, secrets: string[] = []): TelegramOutboxRow {
   const id = Number(entry.messageId);
   return {
@@ -66,9 +71,9 @@ export function toOutboxRow(entry: TelegramOutboxEntry, secrets: string[] = []):
     source: String(entry.source).slice(0, 200),
     method: String(entry.method).slice(0, 64),
     chatId: String(entry.chatId ?? '').slice(0, 64),
-    text: scrub(String(entry.text ?? ''), secrets).slice(0, OUTBOX_TEXT_MAX),
+    text: cut(scrub(String(entry.text ?? ''), secrets), OUTBOX_TEXT_MAX),
     ok: entry.ok === true,
-    error: entry.error ? scrub(String(entry.error), secrets).slice(0, OUTBOX_ERROR_MAX) : null,
+    error: entry.error ? cut(scrub(String(entry.error), secrets), OUTBOX_ERROR_MAX) : null,
     messageId: entry.messageId != null && Number.isInteger(id) ? id : null,
   };
 }

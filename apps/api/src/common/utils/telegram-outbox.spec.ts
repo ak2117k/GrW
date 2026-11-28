@@ -22,6 +22,13 @@ describe('telegram outbox', () => {
     expect(toOutboxRow(base).error).toBeNull();
   });
 
+  it('cuts text by code point, never leaving half an emoji (a lone surrogate fails the insert)', () => {
+    const row = toOutboxRow({ ...base, text: `${'a'.repeat(499)}😀😀tail` });
+    expect(Array.from(row.text)).toHaveLength(OUTBOX_TEXT_MAX);
+    expect(row.text.endsWith('a😀')).toBe(true);
+    expect(/[\ud800-\udbff](?![\udc00-\udfff])/.test(row.text)).toBe(false);
+  });
+
   it('hands the row to the recorder without waiting for it', () => {
     const rows: TelegramOutboxRow[] = [];
     let resolve!: () => void;

@@ -35,23 +35,29 @@ env_file_value() { # KEY FILE -> value on stdout (surrounding quotes and a trail
   printf '%s' "$line"
 }
 # Both keys from ops.env, or both from api.env (never a token from one file with a chat from the other).
+# Sets the CALLER's locals `tok` / `chat` (bash dynamic scope): the api.env values are never assigned to
+# the exported TELEGRAM_ALERT_* globals, so later children (docker, prisma, git) never inherit them.
 load_alert_keys() {
-  [[ -n "${TELEGRAM_ALERT_BOT_TOKEN:-}" && -n "${TELEGRAM_ALERT_CHAT_ID:-}" ]] && return 0
-  local tok chat
-  tok="$(env_file_value TELEGRAM_ALERT_BOT_TOKEN "$API_ENV")" || return 0
-  chat="$(env_file_value TELEGRAM_ALERT_CHAT_ID "$API_ENV")" || return 0
-  TELEGRAM_ALERT_BOT_TOKEN="$tok"; TELEGRAM_ALERT_CHAT_ID="$chat"
+  tok="${TELEGRAM_ALERT_BOT_TOKEN:-}"; chat="${TELEGRAM_ALERT_CHAT_ID:-}"
+  [[ -n "$tok" && -n "$chat" ]] && return 0
+  local t c
+  if t="$(env_file_value TELEGRAM_ALERT_BOT_TOKEN "$API_ENV")" && c="$(env_file_value TELEGRAM_ALERT_CHAT_ID "$API_ENV")"; then
+    tok="$t"; chat="$c"
+  fi
+  return 0
 }
 
 notify() {
   # xtrace off while the token is in play: a `bash -x` debug run must not print it. Restored after.
-  local had_x=0
+  local had_x=0 tok="" chat=""
   { [[ $- == *x* ]] && had_x=1; set +x; } 2>/dev/null
   load_alert_keys
-  if [[ -n "${TELEGRAM_ALERT_BOT_TOKEN:-}" && -n "${TELEGRAM_ALERT_CHAT_ID:-}" ]]; then
-    curl -sS -m 10 "https://api.telegram.org/bot${TELEGRAM_ALERT_BOT_TOKEN}/sendMessage" \
-      --data-urlencode "chat_id=${TELEGRAM_ALERT_CHAT_ID}" \
-      --data-urlencode "text=GrW deploy: $*" >/dev/null || true
+  if [[ -n "$tok" && -n "$chat" ]]; then
+    # The URL (it carries the token) goes in curl's config on stdin, never in argv: argv is world-readable
+    # via ps / /proc/<pid>/cmdline. A here-string is not argv.
+    curl -sS -m 10 -K - \
+      --data-urlencode "chat_id=${chat}" \
+      --data-urlencode "text=GrW deploy: $*" >/dev/null <<<"url = \"https://api.telegram.org/bot${tok}/sendMessage\"" || true
   else
     log "alert NOT SENT (no TELEGRAM_ALERT_BOT_TOKEN / TELEGRAM_ALERT_CHAT_ID in ops.env or api.env): $*"
   fi

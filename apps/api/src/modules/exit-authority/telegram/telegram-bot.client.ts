@@ -93,6 +93,7 @@ export class TelegramBotClient {
    * telegram_outbox audit row (every attempt is recorded, fire-and-forget).
    */
   async sendMessage(text: string, buttons?: InlineButton[][], source = 'exit-authority'): Promise<number> {
+    let id: number;
     try {
       const result = (await this.call('sendMessage', {
         chat_id: this.chatId(),
@@ -100,14 +101,15 @@ export class TelegramBotClient {
         disable_web_page_preview: true,
         ...(buttons?.length ? { reply_markup: keyboard(buttons) } : {}),
       })) as { message_id?: unknown };
-      const id = Number(result?.message_id);
+      id = Number(result?.message_id);
       if (!Number.isFinite(id)) throw new TelegramApiError('sendMessage', 'Telegram returned no message_id');
-      this.record('sendMessage', source, text, true, null, id);
-      return id;
     } catch (err) {
       this.record('sendMessage', source, text, false, err, null);
       throw err;
     }
+    // Outside the try by construction: recording can never turn a delivered message into a thrown error.
+    this.record('sendMessage', source, text, true, null, id);
+    return id;
   }
 
   /** Replaces a message's text (and buttons: omitted ⇒ buttons removed). "Not modified" counts as success. */

@@ -249,27 +249,27 @@ ts_case "unreadable state counts as incomplete" 1 2 "" "" || failures=$((failure
 # and keeps xtrace off while they are in play.
 tg_case() { # name body — body runs with a fake api.env ($API_ENV) and curl's args recorded to $tgcalls
   ( source "$here/deploy.sh"; set +e; log() { echo "LOG $*" >> "$tglog"; }
-    tgcalls="$(mktemp)"; tglog="$(mktemp)"; API_ENV="$(mktemp)"
-    curl() { printf '%s\n' "$@" >> "$tgcalls"; }
+    tgcalls="$(mktemp)"; tgargs="$(mktemp)"; tgcfg="$(mktemp)"; tglog="$(mktemp)"; API_ENV="$(mktemp)"
+    curl() { printf '%s\n' "$@" >> "$tgargs"; cat >> "$tgcfg"; cat "$tgargs" "$tgcfg" > "$tgcalls"; }   # argv and stdin (curl -K -) kept apart
     TELEGRAM_ALERT_BOT_TOKEN=""; TELEGRAM_ALERT_CHAT_ID=""
     eval "$2" )
 }
 tg_case "notify falls back to api.env when ops.env keys are empty" '
   printf "FOO=1\nTELEGRAM_ALERT_BOT_TOKEN=123:abcTOKEN\nTELEGRAM_ALERT_CHAT_ID=-1009\n" > "$API_ENV"
   notify "deployed abc1234"; rc=$?
-  if [[ $rc -eq 0 ]] && grep -qx "https://api.telegram.org/bot123:abcTOKEN/sendMessage" "$tgcalls" \
+  if [[ $rc -eq 0 ]] && grep -qxF "url = \"https://api.telegram.org/bot123:abcTOKEN/sendMessage\"" "$tgcfg" && ! grep -q api.telegram.org "$tgargs" \
      && grep -qx "chat_id=-1009" "$tgcalls" && grep -qx "text=GrW deploy: deployed abc1234" "$tgcalls"; then echo "ok   notify falls back to api.env when ops.env keys are empty"
   else echo "FAIL notify falls back to api.env: rc=$rc calls: $(tr "\n" ";" < "$tgcalls")"; exit 1; fi' || failures=$((failures + 1))
 tg_case "api.env values may be quoted or CRLF-terminated" '
   printf "TELEGRAM_ALERT_BOT_TOKEN=\"123:q\"\r\nTELEGRAM_ALERT_CHAT_ID='"'"'77'"'"'\r\n" > "$API_ENV"
   notify x
-  if grep -qx "https://api.telegram.org/bot123:q/sendMessage" "$tgcalls" && grep -qx "chat_id=77" "$tgcalls"; then echo "ok   api.env values may be quoted or CRLF-terminated"
+  if grep -qxF "url = \"https://api.telegram.org/bot123:q/sendMessage\"" "$tgcfg" && ! grep -q api.telegram.org "$tgargs" && grep -qx "chat_id=77" "$tgcalls"; then echo "ok   api.env values may be quoted or CRLF-terminated"
   else echo "FAIL api.env quoted/CRLF: calls: $(tr "\n" ";" < "$tgcalls" | cat -v)"; exit 1; fi' || failures=$((failures + 1))
 tg_case "ops.env keys win over api.env" '
   printf "TELEGRAM_ALERT_BOT_TOKEN=fromapi\nTELEGRAM_ALERT_CHAT_ID=2\n" > "$API_ENV"
   TELEGRAM_ALERT_BOT_TOKEN=fromops; TELEGRAM_ALERT_CHAT_ID=1
   notify x
-  if grep -qx "https://api.telegram.org/botfromops/sendMessage" "$tgcalls" && grep -qx "chat_id=1" "$tgcalls"; then echo "ok   ops.env keys win over api.env"
+  if grep -qxF "url = \"https://api.telegram.org/botfromops/sendMessage\"" "$tgcfg" && ! grep -q api.telegram.org "$tgargs" && grep -qx "chat_id=1" "$tgcalls"; then echo "ok   ops.env keys win over api.env"
   else echo "FAIL ops.env keys win: calls: $(tr "\n" ";" < "$tgcalls")"; exit 1; fi' || failures=$((failures + 1))
 tg_case "no keys anywhere: nothing sent, logged as NOT SENT, rc 0" '
   rm -f "$API_ENV"; notify "deployed abc"; rc=$?
@@ -282,6 +282,30 @@ tg_case "xtrace never prints the token" '
   ( set -x; notify x; notify y ) 2> "$trace"
   if grep -q SECRETTOK "$tgcalls" && ! grep -q SECRETTOK "$trace"; then echo "ok   xtrace never prints the token"
   else echo "FAIL xtrace prints the token: $(grep -c SECRETTOK "$trace") trace lines"; exit 1; fi' || failures=$((failures + 1))
+
+tg_case "the token is never in curl's argv (ps / /proc), and api.env values never reach the exported globals" '
+  printf "TELEGRAM_ALERT_BOT_TOKEN=123:ARGVTOK\nTELEGRAM_ALERT_CHAT_ID=5\n" > "$API_ENV"
+  notify x
+  if grep -q ARGVTOK "$tgcfg" && ! grep -q ARGVTOK "$tgargs" && grep -qx -- "-K" "$tgargs" && grep -qx -- "-" "$tgargs" \
+     && [[ -z "$TELEGRAM_ALERT_BOT_TOKEN" && -z "$TELEGRAM_ALERT_CHAT_ID" ]]; then echo "ok   the token is never in curl argv, and api.env values never reach the exported globals"
+  else echo "FAIL token in argv or globals: args=[$(tr "\n" " " < "$tgargs")] globals=[${#TELEGRAM_ALERT_BOT_TOKEN}/${#TELEGRAM_ALERT_CHAT_ID}]"; exit 1; fi' || failures=$((failures + 1))
+
+# The systemd units' failure curls (ExecStopPost): systemd expands ${VAR} into argv itself, so the token must be
+# written $${...} (expanded by bash from the environment) and handed to curl on stdin (-K -), never in argv.
+# Each line is run as systemd would ($$ -> $, %% -> %) with a fake curl on PATH that records argv and stdin.
+( set +e; units_dir="$here/../../deploy/systemd"; fakebin="$(mktemp -d)"; rec="$(mktemp -d)"; bad=""; n=0
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >> "%s/args"; cat >> "%s/cfg"\n' "$rec" "$rec" > "$fakebin/curl"; chmod +x "$fakebin/curl"
+  for unit in "$units_dir"/*.service; do
+    line="$(grep -m1 '^ExecStopPost=.*api\.telegram\.org' "$unit")" || continue
+    n=$((n + 1)); : > "$rec/args"; : > "$rec/cfg"
+    cmd="${line#ExecStopPost=/bin/bash -c \'}"; cmd="${cmd%\'}"; cmd="${cmd//\$\$/\$}"; cmd="${cmd//%%/%}"
+    env PATH="$fakebin:$PATH" TELEGRAM_ALERT_BOT_TOKEN=123:UNITTOK TELEGRAM_ALERT_CHAT_ID=9 SERVICE_RESULT=exit-code EXIT_STATUS=1 bash -c "$cmd"
+    if grep -q UNITTOK "$rec/args" || ! grep -qx "url = https://api.telegram.org/bot123:UNITTOK/sendMessage" "$rec/cfg" \
+       || grep -q '[^$]\${TELEGRAM_ALERT_BOT_TOKEN}' <<<"$line"; then bad="$bad $(basename "$unit")"; fi
+  done
+  if [[ $n -ge 4 && -z "$bad" ]]; then echo "ok   systemd failure curls ($n units) take the token on stdin, never in argv"
+  else echo "FAIL systemd failure curls put the token in argv or do not send:$bad (units checked: $n)"; exit 1; fi
+) || failures=$((failures + 1))
 
 # notify_once must never abort the unit when its stamp cannot be written (prod 2026-11-28: state/notified-fetch
 # was root-owned, `touch` failed under set -e and the fetch-failure alert died with the unit).

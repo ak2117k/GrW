@@ -61,6 +61,8 @@ const istYmd = (d: Date) => new Date(d.getTime() + IST_OFFSET_MS).toISOString().
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** An update links to the channel's signals of the last few days. */
 const UPDATE_LOOKBACK_MS = 4 * 86_400_000;
+/** Describe-only image reads may use this share of the daily vision cap; the rest is kept for images that are the call. */
+const VISION_DESCRIBE_SHARE = 0.7;
 /** A busy-slot parse is retried at most this many times. */
 const LLM_MAX_ATTEMPTS = 3;
 /** The one-off re-classification reads at most this many stored rows per boot. */
@@ -97,6 +99,8 @@ export class SignalIntakeService {
   private visionDay = '';
   private visionUsed = 0;
   private visionInflight = 0;
+  /** The IST day the vision reserve was last logged (once per day). */
+  private visionReserveLoggedDay = '';
   /** In-process count of INFO extractions today (a floor under the ai_calls count). */
   private infoDay = '';
   private infoUsed = 0;
@@ -332,6 +336,19 @@ export class SignalIntakeService {
     const used = opts.backfill ? 0 : await this.visionUsedToday();
     if (used >= this.config.visionDailyCap) {
       await skip(`daily vision cap ${this.config.visionDailyCap} reached`);
+      return;
+    }
+    // VISION RESERVE (final review 2026-11-28, item 3): a describe-only read (the caption already decided the class:
+    // a call, a recap / P&L screenshot, an update, a view) stops once the day's live reads pass 70% of the cap, so
+    // posts whose image IS the call always have budget. Logged once per IST day when it kicks in.
+    const reserveAt = Math.floor(this.config.visionDailyCap * VISION_DESCRIBE_SHARE);
+    if (describeOnly && !opts.backfill && used >= reserveAt) {
+      const day = istYmd(this.now());
+      if (this.visionReserveLoggedDay !== day) {
+        this.visionReserveLoggedDay = day;
+        this.logger.warn(`[signal-intake] vision reserve: ${used}/${this.config.visionDailyCap} live reads today — describe-only image reads stop at ${reserveAt}; the rest is kept for images that are the call`);
+      }
+      await skip(`vision reserve: describe-only reads stop at ${reserveAt} of the daily cap ${this.config.visionDailyCap}`);
       return;
     }
     if (!opts.backfill) {
@@ -708,6 +725,28 @@ export class SignalIntakeService {
     };
   }
 
+  /**
+   * The same channel's earlier signal this call re-posts: same underlying, strike, instrument kind and side, received
+   * in the last 2 sessions (today's IST day and the previous weekday's), before this post. Null when none.
+   */
+  private async channelRepostOf(channelId: string, p: ParsedSignal, postedAt: Date): Promise<{ id: string; receivedAt: Date } | null> {
+    const today = istYmd(postedAt);
+    let prev = new Date(`${today}T00:00:00Z`);
+    do prev = new Date(prev.getTime() - 86_400_000);
+    while (prev.getUTCDay() === 0 || prev.getUTCDay() === 6);
+    const since = new Date(`${prev.toISOString().slice(0, 10)}T00:00:00+05:30`);
+    const rows = await this.repo.latestInChannel(channelId, since, 50);
+    const hit = rows.find(
+      (s) =>
+        s.receivedAt.getTime() <= postedAt.getTime() &&
+        s.underlying === p.underlying &&
+        (s.strike ?? null) === (p.strike ?? null) &&
+        s.instrumentKind === p.instrumentKind &&
+        s.side === p.side,
+    );
+    return hit ? { id: hit.id, receivedAt: hit.receivedAt } : null;
+  }
+
   private async createFromParsed(
     evt: TelegramMessageEvent,
     postedAt: Date,
@@ -725,6 +764,15 @@ export class SignalIntakeService {
     const dup = await this.repo.duplicateOf(key, new Date(postedAt.getTime() - W));
     if (dup) {
       await this.repo.saveClass({ ...base, status: 'DUPLICATE', parser, signalId: dup, llmResult, reason: reMatched ? `same idea re-posted in this channel; ${reMatched}` : 'same idea re-posted in this channel' });
+      return;
+    }
+    // REPOST OF THE CHANNEL'S OWN CALL (final review 2026-11-28, item 9): a call matching one of the SAME channel's
+    // signals from the last 2 sessions (same underlying, strike, option type, side) is that call re-posted — a recap
+    // ("TARGET ACHIEVED 🎯 BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140"), never a new signal. RECAP is inert.
+    const repost = await this.channelRepostOf(evt.channelId, p, postedAt);
+    if (repost) {
+      const why = `repost of this channel's call ${repost.id} (${istYmd(repost.receivedAt)}: same underlying, strike, type and side)`;
+      await this.repo.saveClass({ ...base, status: 'RECAP', parser, llmResult, reason: why });
       return;
     }
     const ex = await this.expiryAndContract(p, postedAt);

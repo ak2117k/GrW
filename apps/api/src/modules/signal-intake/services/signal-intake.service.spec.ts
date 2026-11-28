@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { AssistBusyError } from '../../ai-assist/assist-slot';
 import type { ClusterRow } from '../domain/cluster';
 import type { LlmParseReply, VisionReply } from '../domain/llm-schema';
@@ -849,6 +850,38 @@ describe('SignalIntakeService — supreme fixes W3 (audit 2026-11-27)', () => {
       expect(m.mem.classes.get('m2')).toMatchObject({ status: 'UPDATE', updateKind: 'TRAIL_SL', signalId: 'sig1', llmResult: expect.objectContaining({ description: DESC }) });
     });
 
+    it('final review item 3: past 70% of the cap, describe-only reads are skipped; image-as-the-call posts still read; logged once a day', async () => {
+      const logs = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      const warns = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        // 84 of 120 used (70%).
+        const { v, classify } = vision({}, { used: 84 });
+        const m = make({ vision: v });
+        // A caption that is the call: the image would only be described → skipped, class unchanged.
+        await m.svc.handle(img(m, 'm1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+        // A recap screenshot (P&L): describe-only too → skipped.
+        await m.svc.handle(img(m, 'm2', 'A', 'Live Analysis of 23th OCT\nBANKNIFTY 52000CE 180 TO 260', 1));
+        expect(classify).not.toHaveBeenCalled();
+        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', parser: 'rule' });
+        expect(m.mem.classes.get('m2')).toMatchObject({ status: 'RECAP' });
+        expect(done(m).map((d) => d.skipped)).toEqual([expect.stringMatching(/^vision reserve: /), expect.stringMatching(/^vision reserve: /)]);
+        // An image with no caption call (the image IS the call): read.
+        await m.svc.handle(img(m, 'm3', 'A', '', 2));
+        await flush();
+        expect(classify).toHaveBeenCalledTimes(1);
+        const reserveLines = [...logs.mock.calls, ...warns.mock.calls].map((c) => String(c[0])).filter((l) => /vision reserve/.test(l));
+        expect(reserveLines).toHaveLength(1);
+        // Below 70% a describe-only read runs as before.
+        const low = vision({}, { used: 83 });
+        const n = make({ vision: low.v });
+        await n.svc.handle(img(n, 'm1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+        expect(low.classify).toHaveBeenCalledTimes(1);
+      } finally {
+        logs.mockRestore();
+        warns.mockRestore();
+      }
+    });
+
     it('a describe-only read that is capped / fails never overwrites the caption class', async () => {
       const capped = make({ vision: vision({}, { used: 120 }).v });
       await capped.svc.handle(img(capped, 'm1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
@@ -923,6 +956,35 @@ describe('SignalIntakeService — supreme fixes W3 (audit 2026-11-27)', () => {
       expect(m.mem.classes.get('m2')).toMatchObject({ status: 'RECAP' });
       expect(m.mem.classes.get('m3')).toMatchObject({ status: 'SIGNAL' });
       expect(m.mem.signals.map((s) => [s.underlying, s.strike, s.sl])).toEqual([['BANKNIFTY', 52000, 250]]);
+    });
+
+    it('final review item 9: a repost of one of the SAME channel\'s calls from the last 2 sessions is RECAP, not a new signal', async () => {
+      const m = make();
+      await m.svc.handle(m.msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+      expect(m.mem.signals).toHaveLength(1);
+      // Monday (Fri → Mon: the previous session), the call reposted with its outcome.
+      const MON = 3 * 24 * 60;
+      m.setNow(new Date(T0.getTime() + (MON + 1) * 60_000));
+      await m.svc.handle(m.msg('m2', 'A', 'TARGET ACHIEVED 🎯 BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', MON));
+      expect(m.mem.signals).toHaveLength(1);
+      expect(m.mem.classes.get('m2')).toMatchObject({ status: 'RECAP', reason: expect.stringMatching(/repost of this channel's call sig1/) });
+      // A genuinely new strike is a new signal.
+      await m.svc.handle(m.msg('m3', 'A', 'TARGET ACHIEVED 🎯 BUY NIFTY 24100 CE ABOVE 120 SL 100 TGT 140', MON));
+      expect(m.mem.classes.get('m3')).toMatchObject({ status: 'SIGNAL' });
+      // The same call in ANOTHER channel is its own signal.
+      await m.svc.handle(m.msg('m4', 'B', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', MON));
+      expect(m.mem.classes.get('m4')).toMatchObject({ status: 'SIGNAL' });
+      expect(m.mem.signals.map((s) => [s.channelId, s.strike])).toEqual([['A', 24000], ['A', 24100], ['B', 24000]]);
+    });
+
+    it('final review item 9: a call older than the last 2 sessions does not make a repost RECAP', async () => {
+      const m = make();
+      await m.svc.handle(m.msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+      // Fri → Tue: two sessions later (Mon, Tue): Friday's call is out of the window.
+      const TUE = 4 * 24 * 60;
+      m.setNow(new Date(T0.getTime() + (TUE + 1) * 60_000));
+      await m.svc.handle(m.msg('m2', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', TUE));
+      expect(m.mem.classes.get('m2')).toMatchObject({ status: 'SIGNAL' });
     });
 
     it('a pure result post that the rule parser could read as a bare entry is RECAP', async () => {

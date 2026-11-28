@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { CONFIRM_TIMEOUT_MS } from '../../exit-authority/domain/timings';
+import { isDrillAlarm } from '../../exit-authority/domain/drill';
 import type { ConfirmRequest, ConfirmResult, SupremeConfirmPort } from '../../exit-authority/exit-authority.tokens';
 import type { TransportRequest } from '../../ai-gateway/transport.types';
 import { DESK_MANAGER_CONFIG, type DeskManagerConfig } from '../desk-manager.config';
@@ -62,6 +63,10 @@ export class SupremeConfirmService implements SupremeConfirmPort {
     }
     const result: ConfirmResult = { ...reply, latencyMs: Date.now() - started };
     this.logger.warn(`[supreme-confirm] ${req.symbol} (tracker ${req.trackerId}) agent ${req.agentDecision}${req.agentDisagrees ? ' (agent disagreed)' : ''} → ${result.decision} in ${result.latencyMs} ms: ${result.reason}`);
+    // An authority DRILL confirm (exit-authority/domain/drill.ts) is observe-only: no desk_manager_decisions row, so it
+    // never reaches the manager's memory, scorecard or grading (the answer is kept on the drill alarm's payload and
+    // the call itself in ai_calls).
+    if (isDrillAlarm(req.alarm)) return result;
     // Audit off the answer's path: the caller races this call against its own 30 s.
     void this.record(req, result, raw).catch((err) => this.logger.warn(`[supreme-confirm] audit row not written: ${errText(err)}`));
     return result;

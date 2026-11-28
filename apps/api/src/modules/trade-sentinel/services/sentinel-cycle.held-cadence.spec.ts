@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { SentinelCycleService, type TickReading } from './sentinel-cycle.service';
+import { RECENT_LOOK_WINDOW, SentinelCycleService, type TickReading } from './sentinel-cycle.service';
 import type { RosterEntry } from './roster.service';
 import { ADVISORY_VERDICT, LIVE_GAP_FIRE, parseJudgeGateConfig, type JudgeGateConfig } from './judge-gate';
 import type { AlarmRow } from '../../exit-authority/exit-authority.tokens';
@@ -206,5 +206,73 @@ describe('authority drill: the drill alarm\'s look never writes an EXIT_NOW', ()
     const t = makeSvc({ open: [alarm({})], recent: [agentRow('15:44:00')], verdict: EXIT });
     await t.pass('15:45:30');
     expect(t.record.mock.calls[0][0].verdict).toBe('EXIT_NOW');
+  });
+});
+
+describe('review round 1 (2026-11-28): drill looks only when the drill alarm is the only reason; non-agent rows never reset the clocks', () => {
+  beforeEach(quiet);
+  afterEach(() => jest.restoreAllMocks());
+  const drillAlarmRow = (over: Partial<AlarmRow> = {}): AlarmRow => ({
+    id: 'al-d', userId: USER, trackerId: 't-crude', symbol: SYMBOL, rule: 'FLOOR', urgency: 'normal',
+    reason: 'DRILL: test alarm', wouldHave: 'DRILL (nothing is sold)', deadline: null, severityN: null, sourceRef: null,
+    payload: { drill: true }, status: 'OPEN', raisedAt: ist('15:45:00'), lastRaisedAt: ist('15:45:00'), answeredAt: null,
+    answerVerdictId: null, answer: null, alertedAt: null, alertCount: 0, telegramMessageId: null, snoozedUntil: null, ...over,
+  });
+  const desk = (hms: string) => ({
+    verdict: 'HOLD', createdAt: ist(hms), promptVersion: 'desk-manager/1', reviewInSec: 0, packet: {}, netPnl: -620, triggeredBy: ['desk-manager'],
+    exitTrigger: null,
+  });
+
+  it('a REAL fire merged into the drill alarm\'s look: a normal real look — EXIT_NOW stays EXIT_NOW, reason untagged', async () => {
+    const t = makeSvc({ open: [drillAlarmRow()], recent: [agentRow('15:25:00')], verdict: EXIT, gate: parseJudgeGateConfig({ SENTINEL_LIVE_MAX_GAP_MIN: '0' }) }); // past the 900 s cap: the fire reaches the look
+    t.evaluate.mockReturnValue({ fires: [{ name: 'level-break', detail: 'broke 7950' }], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' });
+    await t.pass('15:45:30');
+    const row = t.record.mock.calls[0][0];
+    expect(row.triggeredBy).toEqual(expect.arrayContaining([ALARM_FIRE, 'level-break']));
+    expect(row).toMatchObject({ verdict: 'EXIT_NOW', reason: 'the 15m broke the low' });
+  });
+
+  it('a drill-only look tags every verdict\'s reason (a HOLD too), so it can never answer a real alarm', async () => {
+    const t = makeSvc({ open: [drillAlarmRow()], recent: [agentRow('15:44:00')] });
+    await t.pass('15:45:30');
+    expect(t.record.mock.calls[0][0]).toMatchObject({ verdict: 'HOLD', reason: '[advisory: authority drill] still inside the 15m range' });
+  });
+
+  it('a drill look\'s row newer than a REAL alarm does not count as its answer: the forced look still runs', async () => {
+    const real = { ...drillAlarmRow(), id: 'al-real', payload: {}, reason: 'GREEN_TO_RED', raisedAt: ist('15:45:00'), lastRaisedAt: ist('15:45:00') };
+    const drillRow = agentRow('15:45:10', { reason: '[advisory: authority drill] still inside the 15m range' });
+    const t = makeSvc({ open: [real], recent: [drillRow, agentRow('15:40:00')] });
+    await t.pass('15:46:30');
+    expect(t.judge).toHaveBeenCalledTimes(1);
+    expect(t.record.mock.calls[0][0].triggeredBy).toContain(ALARM_FIRE);
+  });
+
+  it('the rate cap and the heartbeat clock measure from the AGENT\'s look: a newer desk-manager row resets neither', async () => {
+    // Agent at 15:21:35, desk HOLD at 15:24:34 (prod CRUDEOIL 2026-11-27). A material fire at 15:37:00 is past the
+    // 900 s cap from the agent's look (15:36:35) — before the fix the desk row capped it until 15:39:34.
+    const t = makeSvc({ gate: parseJudgeGateConfig({ SENTINEL_LIVE_MAX_GAP_MIN: '0' }), recent: [desk('15:24:34'), agentRow('15:21:35')] });
+    t.evaluate.mockReturnValue({ fires: [{ name: 'context-factor-flip', detail: 'x' }], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' });
+    await t.pass('15:37:00');
+    expect(t.judge).toHaveBeenCalledTimes(1);
+    // The tripwire's heartbeat clock is handed the agent's look, not the desk row.
+    expect(t.evaluate.mock.calls[0][1]).toEqual(ist('15:21:35'));
+  });
+
+  it('a held position\'s 60-min clock ignores a newer desk-manager row', async () => {
+    const HELD = 'MAZDOCK29DEC261760PE';
+    const t = makeSvc({
+      gate: parseJudgeGateConfig({ AI_AUTO_EXIT_HOLD: HELD }),
+      entries: [entry({ trackerId: 't-maz', symbol: HELD, exchange: 'NFO' })],
+      recent: [desk('11:10:00'), agentRow('10:15:00')],
+    });
+    await t.pass('11:16:30');
+    expect(t.judge).toHaveBeenCalledTimes(1);
+  });
+
+  it('the agent\'s row is found behind up to RECENT_LOOK_WINDOW−1 newer non-agent rows', async () => {
+    const t = makeSvc({ recent: [...Array.from({ length: 9 }, (_, i) => desk(`15:3${i}:00`)), agentRow('15:29:00')] });
+    await t.pass('15:39:30');
+    expect(t.recentForTracker).toHaveBeenCalledWith('t-crude', RECENT_LOOK_WINDOW, { liveOnly: true });
+    expect(t.judge).toHaveBeenCalledTimes(1); // the live gap from the agent's 15:29 look (the desk rows are not looks)
   });
 });

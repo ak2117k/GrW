@@ -25,3 +25,9 @@ export const exitAnswer = (note: string): string => `${EXIT_ANSWER} (${note})`;
 
 /** True when an alarm answer / verdict is an agent exit (EXIT_NOW, with or without a note). */
 export const isExitAnswer = (v: string | null | undefined): boolean => /^EXIT_NOW\b/i.test(String(v ?? '').trim());
+
+/**
+ * The verdict word an EXIT_NOW is stored under when it must never reach the executor (a held position, an authority
+ * drill look): the executor polls `verdict = 'EXIT_NOW'` only. Re-exported by trade-sentinel judge-gate.
+ */
+export const ADVISORY_VERDICT = 'EXIT_ADVISORY';

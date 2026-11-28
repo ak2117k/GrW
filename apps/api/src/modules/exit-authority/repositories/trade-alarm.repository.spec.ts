@@ -1,7 +1,7 @@
 import type { PrismaService } from '../../../common/prisma/prisma.service';
 import { TradeAlarmRepository } from './trade-alarm.repository';
 
-type Verdict = { id: string; trackerId: string; verdict: string; createdAt: Date; promptVersion: string };
+type Verdict = { id: string; trackerId: string; verdict: string; createdAt: Date; promptVersion: string; reason?: string };
 type Alarm = { id: string; status: string; answeredAt?: Date | null; answerVerdictId?: string | null; answer?: string | null };
 
 /** A tiny in-memory sentinel_verdicts / trade_alarms honouring the where clauses the repository sends. */
@@ -50,6 +50,18 @@ describe('TradeAlarmRepository.latestAgentVerdict — only the sentinel judge an
     const repo = new TradeAlarmRepository(prisma as unknown as PrismaService);
     await expect(repo.latestAgentVerdict('trk1', at(10))).resolves.toEqual({ id: 'agent', verdict: 'EXIT_NOW', createdAt: at(20) });
     await expect(repo.latestAgentVerdict('trk1', at(25))).resolves.toBeNull();
+  });
+
+  it('authority drill: a drill look\'s row (drill-tagged reason, any verdict) never answers a REAL alarm; only the drill alarm (includeDrill)', async () => {
+    const prisma = fakePrisma([
+      { ...base, id: 'real-look', createdAt: at(20), promptVersion: 'v12/t2', reason: 'thesis intact' },
+      { ...base, id: 'drill-adv', createdAt: at(30), promptVersion: 'v12/t2', verdict: 'EXIT_ADVISORY', reason: '[advisory: authority drill] broke' },
+      { ...base, id: 'drill-hold', createdAt: at(40), promptVersion: 'v12/t2', reason: '[advisory: authority drill] holding' },
+    ]);
+    const repo = new TradeAlarmRepository(prisma as unknown as PrismaService);
+    await expect(repo.latestAgentVerdict('trk1', at(10))).resolves.toEqual({ id: 'real-look', verdict: 'HOLD', createdAt: at(20) });
+    await expect(repo.latestAgentVerdict('trk1', at(25))).resolves.toBeNull();
+    await expect(repo.latestAgentVerdict('trk1', at(25), { includeDrill: true })).resolves.toEqual({ id: 'drill-hold', verdict: 'HOLD', createdAt: at(40) });
   });
 });
 

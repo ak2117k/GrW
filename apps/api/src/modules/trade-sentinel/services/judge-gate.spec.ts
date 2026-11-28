@@ -26,7 +26,6 @@ const facts = (over: Partial<GateFacts> = {}): GateFacts => ({
   nowMs: NOW, last: { verdict: 'HOLD', createdAt: new Date(NOW - 5 * MIN) }, held: false, hardRisk: false,
   floorBreached: false, triggerCrossed: false, adverseMove: false, carried: new Set(), ...over,
 });
-const never = () => false;
 
 describe('parseJudgeGateConfig', () => {
   it('defaults: on, 15-min cap, 60-min held heartbeat, 10-min live gap, close guard = GATE_CLOSE_MIN, delta on', () => {
@@ -54,14 +53,14 @@ describe('parseJudgeGateConfig', () => {
 
 describe('gateJudgement — the cap', () => {
   it('drops a wake inside the interval, carrying only edge-triggered and already-carried fires', () => {
-    const r = gateJudgement(fire('giveback-off-peak', 'news-hit', 'oi-wall-shift'), facts({ carried: new Set(['oi-wall-shift']) }), cfg, never);
+    const r = gateJudgement(fire('giveback-off-peak', 'news-hit', 'oi-wall-shift'), facts({ carried: new Set(['oi-wall-shift']) }), cfg);
     expect(r.dropped).toBe('cap');
     expect(r.decision.shouldEvaluate).toBe(false);
     expect(r.suppressed).toEqual(['giveback-off-peak', 'news-hit', 'oi-wall-shift']);
     expect(r.carry.map((f) => f.name)).toEqual(['news-hit', 'oi-wall-shift']);
   });
   it('passes at the interval', () => {
-    const r = gateJudgement(fire('giveback-off-peak'), facts({ last: { verdict: 'HOLD', createdAt: new Date(NOW - 15 * MIN) } }), cfg, never);
+    const r = gateJudgement(fire('giveback-off-peak'), facts({ last: { verdict: 'HOLD', createdAt: new Date(NOW - 15 * MIN) } }), cfg);
     expect(r.dropped).toBeNull();
     expect(r.decision.shouldEvaluate).toBe(true);
   });
@@ -74,41 +73,41 @@ describe('gateJudgement — the cap', () => {
     ['exit-candidate', { last: { verdict: 'EXIT_ARMED', createdAt: new Date(NOW - MIN) } }],
     ['exit-candidate', { last: { verdict: 'EXIT_NOW', createdAt: new Date(NOW - MIN) } }],
   ] as const)('bypass %s', (name, over) => {
-    const r = gateJudgement(fire('giveback-off-peak'), facts(over as Partial<GateFacts>), cfg, never);
+    const r = gateJudgement(fire('giveback-off-peak'), facts(over as Partial<GateFacts>), cfg);
     expect(r.dropped).toBeNull();
     expect(r.bypass).toBe(name);
   });
   it('bypass exit-confirm (the exit-discipline confirmation re-look)', () => {
     expect(capBypass(fire('exit-confirm'), facts())).toBe('exit-confirm');
-    expect(gateJudgement(fire('exit-confirm'), facts(), cfg, never).dropped).toBeNull();
+    expect(gateJudgement(fire('exit-confirm'), facts(), cfg).dropped).toBeNull();
   });
   it('off (or unbound) is a no-op', () => {
     const d = fire('giveback-off-peak');
-    expect(gateJudgement(d, facts(), parseJudgeGateConfig({ SENTINEL_JUDGE_GATE: 'false' }), never).decision).toBe(d);
-    expect(gateJudgement(d, facts(), undefined, never).decision).toBe(d);
+    expect(gateJudgement(d, facts(), parseJudgeGateConfig({ SENTINEL_JUDGE_GATE: 'false' })).decision).toBe(d);
+    expect(gateJudgement(d, facts(), undefined).decision).toBe(d);
   });
 });
 
 describe('gateJudgement — held', () => {
   const held = (msAgo: number) => facts({ held: true, last: { verdict: 'EXIT_NOW', createdAt: new Date(NOW - msAgo) } });
   it('drops every fire, new-risk ones included; the heartbeat is the clock alone, at most once per 60 min', () => {
-    expect(gateJudgement(fire('news-hit', 'level-break'), held(40 * MIN), cfg, never)).toMatchObject({ dropped: 'held', suppressed: ['news-hit', 'level-break'] });
-    expect(gateJudgement(fire('news-hit'), held(40 * MIN), cfg, never).decision.shouldEvaluate).toBe(false);
+    expect(gateJudgement(fire('news-hit', 'level-break'), held(40 * MIN), cfg)).toMatchObject({ dropped: 'held', suppressed: ['news-hit', 'level-break'] });
+    expect(gateJudgement(fire('news-hit'), held(40 * MIN), cfg).decision.shouldEvaluate).toBe(false);
     // A fire never makes it due early, whatever the normal cadence says (prod 2026-11-27 MAZDOCK: 13 Opus EXIT_NOWs).
-    expect(gateJudgement(fire('news-hit'), held(40 * MIN), cfg, () => true).decision.shouldEvaluate).toBe(false);
-    expect(gateJudgement(HEARTBEAT, held(30 * MIN), cfg, () => true)).toMatchObject({ dropped: 'held', suppressed: ['heartbeat'] });
-    expect(gateJudgement(HEARTBEAT, held(59 * MIN), cfg, never).decision.shouldEvaluate).toBe(false);
-    expect(gateJudgement(HEARTBEAT, held(60 * MIN), cfg, never).decision).toEqual(HEARTBEAT);
+    expect(gateJudgement(fire('news-hit'), held(40 * MIN), cfg).decision.shouldEvaluate).toBe(false);
+    expect(gateJudgement(HEARTBEAT, held(30 * MIN), cfg)).toMatchObject({ dropped: 'held', suppressed: ['heartbeat'] });
+    expect(gateJudgement(HEARTBEAT, held(59 * MIN), cfg).decision.shouldEvaluate).toBe(false);
+    expect(gateJudgement(HEARTBEAT, held(60 * MIN), cfg).decision).toEqual(HEARTBEAT);
     // At 60 min the look is owed even on a pass whose tripwire said nothing (no material move) or only fired.
-    expect(gateJudgement(NOT_DUE, held(60 * MIN), cfg, never).decision).toEqual(HEARTBEAT);
-    expect(gateJudgement(fire('giveback-off-peak', 'exit-confirm'), held(61 * MIN), cfg, never)).toMatchObject({
+    expect(gateJudgement(NOT_DUE, held(60 * MIN), cfg).decision).toEqual(HEARTBEAT);
+    expect(gateJudgement(fire('giveback-off-peak', 'exit-confirm'), held(61 * MIN), cfg)).toMatchObject({
       decision: HEARTBEAT, dropped: 'held', suppressed: ['giveback-off-peak', 'exit-confirm'],
     });
     // First sight of a held position: one look.
-    expect(gateJudgement(NOT_DUE, facts({ held: true, last: null }), cfg, never).decision).toEqual(HEARTBEAT);
+    expect(gateJudgement(NOT_DUE, facts({ held: true, last: null }), cfg).decision).toEqual(HEARTBEAT);
   });
   it('is never upgraded to the strong tier and never bypasses', () => {
-    const r = gateJudgement(HEARTBEAT, held(61 * MIN), cfg, never);
+    const r = gateJudgement(HEARTBEAT, held(61 * MIN), cfg);
     expect(r.decision.trigger).toBe('HEARTBEAT');
     expect(r.upgraded).toBe(false);
   });
@@ -153,7 +152,7 @@ describe('advisory verdicts — an EXIT_NOW that must never reach the executor',
 describe('gateJudgement — tier', () => {
   const old = (verdict: string) => facts({ last: { verdict, createdAt: new Date(NOW - 20 * MIN) } });
   it('a routine wake stays routine after a HOLD', () => {
-    expect(gateJudgement(HEARTBEAT, old('HOLD'), cfg, never).decision.trigger).toBe('HEARTBEAT');
+    expect(gateJudgement(HEARTBEAT, old('HOLD'), cfg).decision.trigger).toBe('HEARTBEAT');
   });
   it.each([
     ['an EXIT_ARMED', old('EXIT_ARMED')],
@@ -161,7 +160,7 @@ describe('gateJudgement — tier', () => {
     ['hard risk', { ...old('HOLD'), hardRisk: true }],
     ['a floor breach', { ...old('HOLD'), floorBreached: true }],
   ])('a routine wake after %s goes to the strong tier', (_n, f) => {
-    const r = gateJudgement(HEARTBEAT, f, cfg, never);
+    const r = gateJudgement(HEARTBEAT, f, cfg);
     expect(r.decision.trigger).toBe('FIRE');
     expect(r.upgraded).toBe(true);
   });
@@ -234,34 +233,34 @@ describe('hardRiskWindow — intraday cash counts to the 15:15 MIS square-off', 
 
 describe('gateJudgement — the 2026-10-29 bypasses (square-off due, green-to-red)', () => {
   it('a square-off-due fire is never capped, and is named', () => {
-    const r = gateJudgement(fire('square-off-due'), facts(), cfg, never);
+    const r = gateJudgement(fire('square-off-due'), facts(), cfg);
     expect(r.dropped).toBeNull();
     expect(r.bypass).toBe('square-off-due');
   });
 
   it('green-to-red owed: the capped giveback passes once (prod CRUDEOIL 2026-10-29)', () => {
-    const owed = gateJudgement(fire('giveback-off-peak', 'news-hit'), facts({ greenToRed: true, greenToRedOwed: true }), cfg, never);
+    const owed = gateJudgement(fire('giveback-off-peak', 'news-hit'), facts({ greenToRed: true, greenToRedOwed: true }), cfg);
     expect(owed.dropped).toBeNull();
     expect(owed.bypass).toBe('green-to-red');
     // Spent (judged on it already this peak): the cap is back.
-    const spent = gateJudgement(fire('giveback-off-peak'), facts({ greenToRed: true, greenToRedOwed: false }), cfg, never);
+    const spent = gateJudgement(fire('giveback-off-peak'), facts({ greenToRed: true, greenToRedOwed: false }), cfg);
     expect(spent.dropped).toBe('cap');
   });
 
   it('green-to-red owed raises a routine heartbeat to the strong tier', () => {
-    const r = gateJudgement(HEARTBEAT, facts({ greenToRed: true, greenToRedOwed: true }), cfg, never);
+    const r = gateJudgement(HEARTBEAT, facts({ greenToRed: true, greenToRedOwed: true }), cfg);
     expect(r.decision.trigger).toBe('FIRE');
     expect(r.upgraded).toBe(true);
   });
 
   it('giveback-green: only a giveback-off-peak fire on a net-green peak, once', () => {
-    expect(gateJudgement(fire('giveback-off-peak'), facts({ givebackGreenOwed: true }), cfg, never).bypass).toBe('giveback-green');
-    expect(gateJudgement(fire('volume-anomaly'), facts({ givebackGreenOwed: true }), cfg, never).dropped).toBe('cap');
-    expect(gateJudgement(fire('giveback-off-peak'), facts({ givebackGreenOwed: false }), cfg, never).dropped).toBe('cap');
+    expect(gateJudgement(fire('giveback-off-peak'), facts({ givebackGreenOwed: true }), cfg).bypass).toBe('giveback-green');
+    expect(gateJudgement(fire('volume-anomaly'), facts({ givebackGreenOwed: true }), cfg).dropped).toBe('cap');
+    expect(gateJudgement(fire('giveback-off-peak'), facts({ givebackGreenOwed: false }), cfg).dropped).toBe('cap');
   });
 
   it('absent facts (older callers) change nothing; the switches parse', () => {
-    expect(gateJudgement(fire('giveback-off-peak'), facts(), cfg, never).dropped).toBe('cap');
+    expect(gateJudgement(fire('giveback-off-peak'), facts(), cfg).dropped).toBe('cap');
     const off = parseJudgeGateConfig({ SENTINEL_SQUARE_OFF_LOOK: 'false', SENTINEL_GREEN_TO_RED_BYPASS: 'false', SENTINEL_SQUARE_OFF_RELOOK_MIN: '0' });
     expect(off).toMatchObject({ squareOffLook: false, greenToRed: false, squareOffRelookMin: 0 });
   });

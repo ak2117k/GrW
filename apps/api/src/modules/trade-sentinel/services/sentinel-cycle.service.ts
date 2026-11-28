@@ -39,7 +39,8 @@ import {
   type GateFacts,
   type JudgeGateConfig,
 } from './judge-gate';
-import { DRILL_ADVISORY_WHY, isDrillAlarm } from '../../exit-authority/domain/drill';
+import { DRILL_ADVISORY_WHY, isDrillAlarm, isDrillReason } from '../../exit-authority/domain/drill';
+import { isAgentVerdictStamp } from '../../exit-authority/domain/agent-verdict';
 import { squareOffLook, type SquareOffDecision, type SquareOffLook } from './square-off-look';
 import { ALARM_FIRE, alarmLookFire, lastAgentVerdictMs, leadAlarm, packetAlarm, type AlarmFire } from './alarm-look';
 import { ALARM_CHART_READER, ALARM_CHART_TIMEOUT_MS, alarmChartBlock, type AlarmChartReader, type PacketAlarmChart } from './alarm-chart';
@@ -407,6 +408,18 @@ export function previousFactorValues(
     if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
   }
   return out;
+}
+
+/** Live rows read per pass: enough that desk-manager / rule rows cannot crowd out the agent's own last look. */
+export const RECENT_LOOK_WINDOW = 10;
+
+/**
+ * The trade agent's own look: a sentinel judge stamp (exit-authority/domain/agent-verdict.ts whitelist). A row with
+ * no stamp at all is treated as a look (prod rows always carry one; older fixtures do not). A desk-manager row
+ * (`desk-manager/1`), a code-rule row (`rule:…`) or a signal-trader row is NOT a look and never resets a clock.
+ */
+export function isAgentLookRow(r: { promptVersion?: string | null }): boolean {
+  return r.promptVersion == null || isAgentVerdictStamp(r.promptVersion);
 }
 
 /**
@@ -1188,12 +1201,19 @@ export class SentinelCycleService {
     // LIVE-ONLY: an overnight-review row is not a live look (see recentForTracker).
     // With exit discipline on, enough rows to count a run of EXIT_NOWs for the
     // exit-confirm re-look (§7); otherwise exactly the one row, as before.
+    // 2026-11-28: a window of RECENT_LOOK_WINDOW rows, so desk-manager / rule rows cannot crowd the agent's own
+    // last look out of it (`lastAgent` below); the exit-confirm run still reads only its first N rows.
+    const confirmRows = this.discipline?.enabled ? EXIT_CONFIRM_MAX_RELOOKS + 1 : 1;
     const recent = await this.verdicts.recentForTracker(
       entry.trackerId,
-      this.discipline?.enabled ? EXIT_CONFIRM_MAX_RELOOKS + 1 : 1,
+      Math.max(confirmRows, RECENT_LOOK_WINDOW),
       { liveOnly: true },
     );
     const last = recent[0];
+    // The AGENT's last look (supreme fixes 2026-11-28): the heartbeat clock, the judge gate's rate cap / held clock /
+    // review time and the 1-min re-judge gap measure from it, so a desk-manager HOLD/TIGHTEN row or a code-rule row
+    // never resets them (prod CRUDEOIL 2026-11-27: the 15:24 desk row pushed the next look to 15:40).
+    const lastAgent = recent.find(isAgentLookRow);
 
     // The ratchet is updated BEFORE the skip decision, deliberately: a floor that
     // arms on a quiet tick and pulls back before the next evaluation has still
@@ -1317,12 +1337,13 @@ export class SentinelCycleService {
         // news-hit, event-near); otherwise no key — exactly today's input.
         ...newsIn,
       };
-    const lastVerdictAt = last ? last.createdAt : null;
+    // The agent's last look (not a desk / rule row): the heartbeat clock and its material-change baseline.
+    const lastVerdictAt = lastAgent ? lastAgent.createdAt : null;
     const heartbeatContext: HeartbeatContext = {
         // The LATCHED value, not `computeGreenFloor`'s per-tick snapshot — a
         // cadence that read the snapshot would oscillate with the market.
         greenFloorArmed: armedForCadence,
-        lastJudged: previousJudged(last),
+        lastJudged: previousJudged(lastAgent),
         current: {
           ltp: tick.ltp,
           qty: tick.qty,
@@ -1341,14 +1362,14 @@ export class SentinelCycleService {
     // verdict, and nothing else guarantees one soon — so while the latest live
     // verdict is EXIT_NOW, ask again after PERSIST_MIN_SEC (at most 3 in a row).
     const confirm = this.discipline?.enabled
-      ? exitConfirmFire({ recent, now, relookMs: this.discipline.persistMinSec * 1000, maxRelooks: EXIT_CONFIRM_MAX_RELOOKS })
+      ? exitConfirmFire({ recent: recent.slice(0, confirmRows), now, relookMs: this.discipline.persistMinSec * 1000, maxRelooks: EXIT_CONFIRM_MAX_RELOOKS })
       : null;
     // Re-judge suppression sits BEFORE carried fires and exit-confirm: a carried
     // fire never reached the judge and an exit-confirm re-look is the EXIT_NOW
     // confirmation path, so neither may be dropped here.
     // Judge gate facts (null when the gate is off ⇒ every input below is exactly as before).
     const gate = this.gateCfg?.enabled
-      ? this.gateFactsFor(entry, state, tickF, floorSolve.noiseFloor, greenFloorArmedLatched, last, now)
+      ? this.gateFactsFor(entry, state, tickF, floorSolve.noiseFloor, greenFloorArmedLatched, lastAgent, now, last)
       : null;
     const rejudgeSnap: RejudgeSnapshot = {
       ...rejudgeSnapshot(tick, noiseInput?.n ?? null, now.getTime()),
@@ -1384,7 +1405,7 @@ export class SentinelCycleService {
         this.logger.log(`[rejudge] held position — fires suppressed: ${entry.symbol} (tracker ${entry.trackerId}; ${futiled.suppressed.join(', ')}); heartbeat kept`);
       }
     }
-    // Judge gate (judge-gate.ts): held ⇒ heartbeat only, ≤ 1 per 30 min; the rate
+    // Judge gate (judge-gate.ts): held ⇒ heartbeat only, one clock look per 60 min; the rate
     // cap with its safety bypasses; a routine wake on an exit candidate or under
     // risk is raised to the strong tier.
     const gated = gate
@@ -1392,7 +1413,6 @@ export class SentinelCycleService {
           futiled.decision,
           { ...gate.facts, carried: new Set(state.carriedFires.map((f) => f.name)) },
           this.gateCfg,
-          () => heartbeatDue(tripwireIn, lastVerdictAt, now, heartbeatContext),
         )
       : null;
     if (gated?.dropped) {
@@ -1452,7 +1472,13 @@ export class SentinelCycleService {
     const held = !!holdList && isHeldPosition(holdList, entry);
     const alarmFire =
       alarmRow && !held
-        ? alarmLookFire(alarmRow, lastAgentVerdictMs(recent), state.alarmLookAt ?? null, now.getTime())
+        ? alarmLookFire(
+            alarmRow,
+            // A drill look's row (reason carries the drill tag) never counts as the answer to a REAL alarm.
+            lastAgentVerdictMs(isDrillAlarm(alarmRow) ? recent : recent.filter((r) => !isDrillReason(r.reason))),
+            state.alarmLookAt ?? null,
+            now.getTime(),
+          )
         : null;
     if (alarmFire) {
       decision = withAlarmFire(decision, alarmFire);
@@ -1472,7 +1498,7 @@ export class SentinelCycleService {
     // AGENT's last verdict: a desk-manager or rule row is not a look. The agent backoff and the in-flight lock below
     // still apply. Prod 2026-11-27 CRUDEOIL16DEC268350CE (live MCX): 19 min between looks.
     if (!decision.shouldEvaluate) {
-      const lastAgentMs = lastAgentVerdictMs(recent);
+      const lastAgentMs = lastAgent ? new Date(lastAgent.createdAt).getTime() : null;
       const owed = liveLookOwed({
         cfg: this.gateCfg,
         held,
@@ -2229,6 +2255,8 @@ export class SentinelCycleService {
     greenFloorArmedLatched: boolean,
     last: SentinelVerdictLike | undefined,
     now: Date,
+    /** The latest live row of ANY writer (a desk TIGHTEN row carries an exitTrigger): only the trigger-crossed read. */
+    lastAny: SentinelVerdictLike | undefined = last,
   ): {
     facts: Omit<GateFacts, 'carried'>;
     snap: Partial<RejudgeSnapshot>;
@@ -2248,7 +2276,7 @@ export class SentinelCycleService {
       floorLevel !== null && Number.isFinite(floorLevel) && Number.isFinite(tick.ltp) && (tick.ltp - floorLevel) * dir < 0;
 
     // The latest live verdict's machine-readable exit level.
-    const triggerCrossed = exitTriggerCrossed(last?.exitTrigger, tick);
+    const triggerCrossed = exitTriggerCrossed(lastAny?.exitTrigger, tick);
 
     // Hard-risk windows the cycle can see: the last minutes of the session (not for
     // delivery holdings; for intraday cash, counted to the broker's MIS square-off)
@@ -2674,15 +2702,23 @@ export class SentinelCycleService {
     // OWNER_HOLD) and an authority DRILL alarm's look never write an EXIT_NOW: it is stored as EXIT_ADVISORY with the
     // reason tagged, and no exit trigger (a trigger would arm a price exit). The executor polls EXIT_NOW only.
     const holdList = this.gateCfg?.hold ?? this.futileCfg?.hold;
+    // A DRILL look only when the drill alarm's fire is the look's ONLY reason (review 2026-11-28): any real fire, a
+    // due heartbeat or the live-gap merged into the same pass makes it a normal real look (EXIT_NOW stays EXIT_NOW;
+    // the escalation runner still answers the drill alarm from it, observe-only).
     const drillLook =
       state.drillAlarmId !== undefined &&
-      decision.fires.some((f) => f.name === ALARM_FIRE && (f as Partial<AlarmFire>).alarmId === state.drillAlarmId);
+      !decision.heartbeat &&
+      decision.fires.length > 0 &&
+      decision.fires.every((f) => f.name === ALARM_FIRE && (f as Partial<AlarmFire>).alarmId === state.drillAlarmId);
     const advisoryWhy = drillLook
       ? DRILL_ADVISORY_WHY
       : holdList && isHeldPosition(holdList, entry)
         ? 'owner hold (AI_AUTO_EXIT_HOLD)'
         : null;
-    const stored = advisoryWhy ? advisoryVerdict(verdict.verdict, verdict.reason, advisoryWhy) : { verdict: verdict.verdict, reason: verdict.reason };
+    // A drill look's row is tagged whatever its verdict, so it never answers a REAL alarm (alarm look, escalation runner).
+    const stored = advisoryWhy
+      ? advisoryVerdict(verdict.verdict, verdict.reason, advisoryWhy, { tagAll: drillLook })
+      : { verdict: verdict.verdict, reason: verdict.reason };
     if (advisoryWhy && stored.verdict !== verdict.verdict) {
       this.logger.warn(`[sentinel] ${entry.symbol} (tracker ${entry.trackerId}): ${verdict.verdict} recorded as ${stored.verdict} — ${advisoryWhy}; nothing is sold`);
     }

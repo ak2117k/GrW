@@ -6,6 +6,7 @@ import {
   AGENT_RETRY_MAX_MS,
   JUDGE_CONCURRENCY,
   OI_CAPTURE_INTERVAL_MS,
+  RECENT_LOOK_WINDOW,
   SentinelCycleService,
   THESIS_RETRY_COOLDOWN_MS,
   TICK_SOURCE,
@@ -988,7 +989,7 @@ describe('SentinelCycleService — exit discipline: noise giveback and the exit-
 
     await t.svc.runForUser(USER, NOW);
 
-    expect(t.recentForTracker).toHaveBeenCalledWith('t1', EXIT_CONFIRM_MAX_RELOOKS + 1, { liveOnly: true });
+    expect(t.recentForTracker).toHaveBeenCalledWith('t1', Math.max(EXIT_CONFIRM_MAX_RELOOKS + 1, RECENT_LOOK_WINDOW), { liveOnly: true });
     expect(t.buildPacket).toHaveBeenCalledTimes(1);
     expect(t.buildPacket.mock.calls[0][3]).toEqual([expect.objectContaining({ name: 'exit-confirm' })]);
     expect(t.judge.mock.calls[0][1]).toBe('FIRE');
@@ -1004,7 +1005,7 @@ describe('SentinelCycleService — exit discipline: noise giveback and the exit-
     expect(t.buildPacket).not.toHaveBeenCalled();
   });
 
-  it.each([['absent', undefined], ['EXIT_DISCIPLINE_ENABLED=false', OFF]])('(c) discipline %s ⇒ no noise input, no re-look, one-row read', async (_l, cfg) => {
+  it.each([['absent', undefined], ['EXIT_DISCIPLINE_ENABLED=false', OFF]])('(c) discipline %s ⇒ no noise input, no re-look, the agent-look window read', async (_l, cfg) => {
     const t = makeSvc(cfg);
     t.build.mockResolvedValue([watched('t1')]);
     t.tickFor.mockResolvedValue(noisy());
@@ -1014,7 +1015,7 @@ describe('SentinelCycleService — exit discipline: noise giveback and the exit-
     await t.svc.runForUser(USER, NOW);
 
     expect(tripwireInput(t.evaluate).noise ?? null).toBeNull();
-    expect(t.recentForTracker).toHaveBeenCalledWith('t1', 1, { liveOnly: true });
+    expect(t.recentForTracker).toHaveBeenCalledWith('t1', RECENT_LOOK_WINDOW, { liveOnly: true });
     expect(t.buildPacket).not.toHaveBeenCalled();
   });
 });

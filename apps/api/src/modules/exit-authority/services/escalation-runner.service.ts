@@ -2,12 +2,9 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { AI_HEALTH, type AiHealthPort } from '../../ai-gateway/audit/failover-transport';
-import { isExitAnswer } from '../domain/agent-verdict';
+import { ADVISORY_VERDICT, isExitAnswer } from '../domain/agent-verdict';
 import { backstopDue, deadlinePassed, escalationDue, isSnoozed } from '../domain/alarm';
 import { DRILL_TTL_MS, isDrillAlarm } from '../domain/drill';
-
-/** The sentinel's advisory word for a drill look's EXIT_NOW (trade-sentinel judge-gate ADVISORY_VERDICT). */
-const DRILL_EXIT_WORD = 'EXIT_ADVISORY';
 import { REALERT_EVERY_MS, SUPREME_EXIT_AGENT_LOOK_MS } from '../domain/timings';
 import {
   SUPREME_CONFIRM,
@@ -188,14 +185,14 @@ export class EscalationRunner {
     let answer: { id: string; verdict: string } | null =
       a.answeredAt != null && a.answer != null ? { id: a.answerVerdictId ?? '', verdict: a.answer } : null;
     if (!answer) {
-      const v = await this.alarmRepo.latestAgentVerdict(a.trackerId, a.raisedAt);
+      const v = await this.alarmRepo.latestAgentVerdict(a.trackerId, a.raisedAt, { includeDrill: true });
       if (v) {
         await this.alarms.answer(a.id, v.id, v.verdict, now);
         answer = { id: v.id, verdict: v.verdict };
       }
     }
     if (answer) {
-      const wantsOut = answer.verdict === DRILL_EXIT_WORD || isExitAnswer(answer.verdict);
+      const wantsOut = answer.verdict === ADVISORY_VERDICT || isExitAnswer(answer.verdict);
       let confirmLine = '';
       if (wantsOut && typeof a.payload?.drillConfirm !== 'string') {
         const r = await this.drillConfirm(a, answer);

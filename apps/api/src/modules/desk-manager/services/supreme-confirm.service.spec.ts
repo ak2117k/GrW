@@ -97,4 +97,12 @@ describe('SupremeConfirmService', () => {
     expect((await f.svc.confirm(req())).decision).toBe('CONFIRM');
     await flush();
   });
+
+  it('an authority DRILL confirm (alarm payload.drill) writes NO desk_manager_decisions row: never in memory / scorecard / grading', async () => {
+    const h = make();
+    const alarm = { id: 'a-d', rule: 'FLOOR', urgency: 'normal', reason: 'DRILL FLOOR', wouldHave: 'DRILL', raisedAt: new Date('2026-11-27T05:00:00Z'), deadline: null, payload: { drill: true } } as never;
+    expect((await h.svc.confirm(req({ alarm }))).decision).toBe('CONFIRM');
+    await flush();
+    expect(h.prisma.deskManagerDecision.create).not.toHaveBeenCalled();
+  });
 });

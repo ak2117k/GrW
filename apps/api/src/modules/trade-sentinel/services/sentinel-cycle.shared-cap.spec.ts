@@ -1,6 +1,7 @@
 import {
   JUDGE_CONCURRENCY,
   LIVE_RESERVED_SLOTS,
+  RECENT_LOOK_WINDOW,
   SentinelCycleService,
   SharedJobExpired,
   type TickReading,
@@ -245,7 +246,7 @@ describe('SentinelCycleService — an overnight verdict is not the live "last lo
       { tickFor: jest.fn().mockResolvedValue(tick) } as never,
     );
     await svc.runForUser('u1', T0);
-    expect(recentForTracker).toHaveBeenCalledWith('a', 1, { liveOnly: true });
+    expect(recentForTracker).toHaveBeenCalledWith('a', RECENT_LOOK_WINDOW, { liveOnly: true });
   });
 });
 

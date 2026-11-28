@@ -1,6 +1,7 @@
 import { isDerivativeSegment, type Segment } from '../charges';
 import type { TripwireFire } from '../tripwires/types';
 import type { TripwireResult } from './tripwire.service';
+import { ADVISORY_VERDICT as ADVISORY_VERDICT_WORD } from '../../exit-authority/domain/agent-verdict';
 
 /**
  * JUDGE GATE — the last cost control before a judgement is dispatched
@@ -216,12 +217,16 @@ export function liveGapDecision(lastAgentMs: number | null, nowMs: number): Trip
  * `verdict = 'EXIT_NOW'` only (ai-exit-execution.repository pendingVerdicts), so this row is a record, never an order.
  * Used for a held position (AI_AUTO_EXIT_HOLD: the executor would only skip it OWNER_HOLD) and an authority drill look.
  */
-export const ADVISORY_VERDICT = 'EXIT_ADVISORY';
+export const ADVISORY_VERDICT = ADVISORY_VERDICT_WORD;
 
-/** EXIT_NOW → EXIT_ADVISORY with `[advisory: why]` in front of the reason; any other verdict is returned unchanged. */
-export function advisoryVerdict(verdict: string, reason: string, why: string): { verdict: string; reason: string } {
-  if (verdict !== 'EXIT_NOW') return { verdict, reason };
-  return { verdict: ADVISORY_VERDICT, reason: `[advisory: ${why}] ${reason}` };
+/**
+ * EXIT_NOW → EXIT_ADVISORY with `[advisory: why]` in front of the reason; any other verdict is returned unchanged —
+ * except that `tagAll` (an authority drill look) tags every verdict's reason, so the row is recognisable as a drill.
+ */
+export function advisoryVerdict(verdict: string, reason: string, why: string, opts: { tagAll?: boolean } = {}): { verdict: string; reason: string } {
+  const tagged = `[advisory: ${why}] ${reason}`;
+  if (verdict !== 'EXIT_NOW') return { verdict, reason: opts.tagAll ? tagged : reason };
+  return { verdict: ADVISORY_VERDICT, reason: tagged };
 }
 
 const isCashSegment = (segment: Segment | undefined): boolean => segment !== undefined && !isDerivativeSegment(segment);
@@ -377,16 +382,11 @@ export function capBypass(decision: TripwireResult, f: GateFacts): CapBypass | n
   return null;
 }
 
-/**
- * Apply the three rules. `heartbeatDue` answers the normal-cadence heartbeat
- * question (a sensor fire makes the tripwire skip it, so it is asked only then).
- * Pure apart from calling it.
- */
+/** Apply the three rules. Pure. */
 export function gateJudgement(
   decision: TripwireResult,
   f: GateFacts,
   cfg: JudgeGateConfig | undefined,
-  heartbeatDue: () => boolean,
 ): GateOutcome {
   const pass: GateOutcome = { decision, dropped: null, suppressed: [], carry: [], bypass: null, upgraded: false };
   if (!cfg?.enabled) return pass;
@@ -396,7 +396,6 @@ export function gateJudgement(
     // The clock alone (2026-11-28): one look per heldHeartbeatMs, whatever fired or re-fired and whatever the normal
     // cadence says — a fire never brings it forward, and quiet prices never hold it back. The verdict is advisory
     // (the cycle stores an EXIT_NOW as ADVISORY_VERDICT), so nothing here can reach the executor.
-    void heartbeatDue;
     const heartbeat = sinceMs >= cfg.heldHeartbeatMs;
     const out: TripwireResult = heartbeat ? { fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'HEARTBEAT' } : NONE;
     const suppressed = decision.fires.map((x) => x.name);

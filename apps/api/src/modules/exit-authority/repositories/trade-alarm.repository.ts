@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma, type TradeAlarm } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { isAgentVerdictStamp, SENTINEL_JUDGE_STAMP_PREFIX } from '../domain/agent-verdict';
+import { isDrillReason } from '../domain/drill';
 import type { AlarmRow, AlarmRule, AlarmStatus, AlarmUrgency } from '../exit-authority.tokens';
 
 /** Statuses that still need the agent or the owner. */
@@ -117,7 +118,7 @@ export class TradeAlarmRepository {
    * stamp only (domain/agent-verdict.ts isAgentVerdictStamp). Desk TIGHTEN rows, signal SL rows and code-rule stamps
    * are not an agent look and never answer an alarm.
    */
-  async latestAgentVerdict(trackerId: string, since: Date): Promise<AgentVerdictRef | null> {
+  async latestAgentVerdict(trackerId: string, since: Date, opts: { includeDrill?: boolean } = {}): Promise<AgentVerdictRef | null> {
     const rows = await this.prisma.sentinelVerdict.findMany({
       where: {
         trackerId,
@@ -126,9 +127,11 @@ export class TradeAlarmRepository {
       },
       orderBy: { createdAt: 'desc' },
       take: AGENT_VERDICT_SCAN,
-      select: { id: true, verdict: true, createdAt: true, promptVersion: true },
+      select: { id: true, verdict: true, createdAt: true, promptVersion: true, reason: true },
     });
-    const r = rows.find((x) => isAgentVerdictStamp(x.promptVersion));
+    // Authority drill (domain/drill.ts): a drill look's row (its reason carries the drill tag, whatever the verdict)
+    // never answers a REAL alarm — only the drill alarm itself (`includeDrill`).
+    const r = rows.find((x) => isAgentVerdictStamp(x.promptVersion) && (opts.includeDrill === true || !isDrillReason(x.reason)));
     return r ? { id: r.id, verdict: r.verdict, createdAt: r.createdAt } : null;
   }
 

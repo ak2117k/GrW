@@ -244,5 +244,75 @@ ts_case "unreadable state counts as incomplete" 1 2 "" "" || failures=$((failure
   rm -f "$HOLIDAYS_TS"
   if [[ $r1 -ne 0 && $r2 -eq 0 ]]; then echo "ok   holiday is not market hours; next session is"; else echo "FAIL holiday check ($r1,$r2)"; exit 1; fi ) || failures=$((failures + 1))
 
+# Fix 5 (2026-11-28 audit): the unit's ops.env has the TELEGRAM_ALERT_* keys EMPTY; the values live in
+# api.env. notify() reads just those two keys from api.env when ops.env lacks them, never echoes them,
+# and keeps xtrace off while they are in play.
+tg_case() { # name body — body runs with a fake api.env ($API_ENV) and curl's args recorded to $tgcalls
+  ( source "$here/deploy.sh"; set +e; log() { echo "LOG $*" >> "$tglog"; }
+    tgcalls="$(mktemp)"; tglog="$(mktemp)"; API_ENV="$(mktemp)"
+    curl() { printf '%s\n' "$@" >> "$tgcalls"; }
+    TELEGRAM_ALERT_BOT_TOKEN=""; TELEGRAM_ALERT_CHAT_ID=""
+    eval "$2" )
+}
+tg_case "notify falls back to api.env when ops.env keys are empty" '
+  printf "FOO=1\nTELEGRAM_ALERT_BOT_TOKEN=123:abcTOKEN\nTELEGRAM_ALERT_CHAT_ID=-1009\n" > "$API_ENV"
+  notify "deployed abc1234"; rc=$?
+  if [[ $rc -eq 0 ]] && grep -qx "https://api.telegram.org/bot123:abcTOKEN/sendMessage" "$tgcalls" \
+     && grep -qx "chat_id=-1009" "$tgcalls" && grep -qx "text=GrW deploy: deployed abc1234" "$tgcalls"; then echo "ok   notify falls back to api.env when ops.env keys are empty"
+  else echo "FAIL notify falls back to api.env: rc=$rc calls: $(tr "\n" ";" < "$tgcalls")"; exit 1; fi' || failures=$((failures + 1))
+tg_case "api.env values may be quoted or CRLF-terminated" '
+  printf "TELEGRAM_ALERT_BOT_TOKEN=\"123:q\"\r\nTELEGRAM_ALERT_CHAT_ID='"'"'77'"'"'\r\n" > "$API_ENV"
+  notify x
+  if grep -qx "https://api.telegram.org/bot123:q/sendMessage" "$tgcalls" && grep -qx "chat_id=77" "$tgcalls"; then echo "ok   api.env values may be quoted or CRLF-terminated"
+  else echo "FAIL api.env quoted/CRLF: calls: $(tr "\n" ";" < "$tgcalls" | cat -v)"; exit 1; fi' || failures=$((failures + 1))
+tg_case "ops.env keys win over api.env" '
+  printf "TELEGRAM_ALERT_BOT_TOKEN=fromapi\nTELEGRAM_ALERT_CHAT_ID=2\n" > "$API_ENV"
+  TELEGRAM_ALERT_BOT_TOKEN=fromops; TELEGRAM_ALERT_CHAT_ID=1
+  notify x
+  if grep -qx "https://api.telegram.org/botfromops/sendMessage" "$tgcalls" && grep -qx "chat_id=1" "$tgcalls"; then echo "ok   ops.env keys win over api.env"
+  else echo "FAIL ops.env keys win: calls: $(tr "\n" ";" < "$tgcalls")"; exit 1; fi' || failures=$((failures + 1))
+tg_case "no keys anywhere: nothing sent, logged as NOT SENT, rc 0" '
+  rm -f "$API_ENV"; notify "deployed abc"; rc=$?
+  API_ENV="$(mktemp)"; printf "TELEGRAM_ALERT_BOT_TOKEN=only-token\n" > "$API_ENV"; notify "half"; rc2=$?
+  if [[ $rc -eq 0 && $rc2 -eq 0 && ! -s "$tgcalls" ]] && grep -q "NOT SENT.*deployed abc" "$tglog" && ! grep -q only-token "$tglog"; then echo "ok   no keys anywhere: nothing sent, logged as NOT SENT, rc 0"
+  else echo "FAIL no keys: rc=$rc/$rc2 calls=[$(cat "$tgcalls")] log=[$(cat "$tglog")]"; exit 1; fi' || failures=$((failures + 1))
+tg_case "xtrace never prints the token" '
+  printf "TELEGRAM_ALERT_BOT_TOKEN=123:SECRETTOK\nTELEGRAM_ALERT_CHAT_ID=5\n" > "$API_ENV"
+  trace="$(mktemp)"
+  ( set -x; notify x; notify y ) 2> "$trace"
+  if grep -q SECRETTOK "$tgcalls" && ! grep -q SECRETTOK "$trace"; then echo "ok   xtrace never prints the token"
+  else echo "FAIL xtrace prints the token: $(grep -c SECRETTOK "$trace") trace lines"; exit 1; fi' || failures=$((failures + 1))
+
+# notify_once must never abort the unit when its stamp cannot be written (prod 2026-11-28: state/notified-fetch
+# was root-owned, `touch` failed under set -e and the fetch-failure alert died with the unit).
+( source "$here/deploy.sh"; set +e; log() { :; }
+  STATE_DIR="$(mktemp -d)"; sent=""; notify() { sent="$sent|$*"; }
+  n=0; touch() { n=$((n + 1)); (( n > 1 )) && command touch "$@"; }   # first touch fails (root-owned file)
+  out="$( set -e; notify_once fetch "git fetch FAILING"; echo "alive:$sent" )"
+  if [[ "$out" == "alive:|git fetch FAILING" && -e "$STATE_DIR/notified-fetch" ]]; then echo "ok   notify_once replaces an unwritable stamp and still alerts"
+  else echo "FAIL notify_once with an unwritable stamp: out=[$out]"; exit 1; fi
+) || failures=$((failures + 1))
+( source "$here/deploy.sh"; set +e; log() { :; }
+  STATE_DIR="$(mktemp -d)"; NOTIFY_STAMP_FALLBACK_DIR="$(mktemp -d)"; sent=""; notify() { sent="$sent|$*"; }
+  # The state-dir stamp can be neither written nor replaced: the fallback stamp keeps the hourly throttle.
+  touch() { [[ "$1" == "$STATE_DIR"/* ]] && return 1; command touch "$@"; }; rm() { return 1; }
+  out="$( set -e; notify_once fetch "a"; notify_once fetch "b"; echo "alive:$sent" )"
+  if [[ "$out" == "alive:|a" && -e "$NOTIFY_STAMP_FALLBACK_DIR/grw-deploy-notified-fetch" ]]; then echo "ok   notify_once falls back to a /tmp stamp, stays throttled and never aborts"
+  else echo "FAIL notify_once with no writable state stamp: out=[$out]"; exit 1; fi
+) || failures=$((failures + 1))
+( source "$here/deploy.sh"; set +e; log() { :; }
+  STATE_DIR="$(mktemp -d)"; NOTIFY_STAMP_FALLBACK_DIR="$(mktemp -d)"; sent=""; notify() { sent="$sent|$*"; }
+  touch() { return 1; }; rm() { return 1; }   # nothing writable at all: alert every run rather than never
+  out="$( set -e; notify_once fetch "a"; notify_once fetch "b"; echo "alive:$sent" )"
+  if [[ "$out" == "alive:|a|b" ]]; then echo "ok   notify_once with no writable stamp anywhere still alerts and never aborts"
+  else echo "FAIL notify_once with nothing writable: out=[$out]"; exit 1; fi
+) || failures=$((failures + 1))
+( source "$here/deploy.sh"; set +e; log() { :; }
+  STATE_DIR="$(mktemp -d)"; sent=""; notify() { sent="$sent|$*"; }
+  notify_once fetch "a"; notify_once fetch "b"
+  if [[ "$sent" == "|a" ]]; then echo "ok   notify_once still alerts at most once an hour per key"
+  else echo "FAIL notify_once throttle: sent=[$sent]"; exit 1; fi
+) || failures=$((failures + 1))
+
 if (( failures > 0 )); then echo "$failures test(s) failed"; exit 1; fi
 echo "all deploy tests passed"

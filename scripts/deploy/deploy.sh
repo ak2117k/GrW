@@ -19,19 +19,65 @@ COMPOSE=(docker compose -f "$APP_DIR/deploy/docker-compose.prod.yml" --env-file 
 
 log() { echo "[deploy $(date -u +%FT%TZ)] $*"; }
 
+# The alert bot's keys. The unit's ops.env has TELEGRAM_ALERT_BOT_TOKEN / _CHAT_ID EMPTY on prod; the
+# real values live in the app's api.env (audit 2026-11-28: every "deployed <sha>" and deploy-failure
+# alert was silently dropped). So when ops.env lacks either key, read exactly those two from api.env.
+# api.env is the app's file, not shell: it is grep'ed, never sourced, and the values are never echoed.
+API_ENV="${API_ENV:-$GRW_ROOT/env/api.env}"
+env_file_value() { # KEY FILE -> value on stdout (surrounding quotes and a trailing CR stripped); 1 if absent/empty
+  local line q
+  [[ -r "$2" ]] || return 1
+  line="$(grep -m1 -E "^$1=" "$2" 2>/dev/null)" || return 1
+  line="${line#*=}"; line="${line%$'\r'}"
+  q="${line:0:1}"
+  if [[ ${#line} -ge 2 && ( "$q" == '"' || "$q" == "'" ) && "${line: -1}" == "$q" ]]; then line="${line:1:${#line}-2}"; fi
+  [[ -n "$line" ]] || return 1
+  printf '%s' "$line"
+}
+# Both keys from ops.env, or both from api.env (never a token from one file with a chat from the other).
+load_alert_keys() {
+  [[ -n "${TELEGRAM_ALERT_BOT_TOKEN:-}" && -n "${TELEGRAM_ALERT_CHAT_ID:-}" ]] && return 0
+  local tok chat
+  tok="$(env_file_value TELEGRAM_ALERT_BOT_TOKEN "$API_ENV")" || return 0
+  chat="$(env_file_value TELEGRAM_ALERT_CHAT_ID "$API_ENV")" || return 0
+  TELEGRAM_ALERT_BOT_TOKEN="$tok"; TELEGRAM_ALERT_CHAT_ID="$chat"
+}
+
 notify() {
-  [[ -n "${TELEGRAM_ALERT_BOT_TOKEN:-}" && -n "${TELEGRAM_ALERT_CHAT_ID:-}" ]] || return 0
-  curl -sS -m 10 "https://api.telegram.org/bot${TELEGRAM_ALERT_BOT_TOKEN}/sendMessage" \
-    --data-urlencode "chat_id=${TELEGRAM_ALERT_CHAT_ID}" \
-    --data-urlencode "text=GrW deploy: $*" >/dev/null || true
+  # xtrace off while the token is in play: a `bash -x` debug run must not print it. Restored after.
+  local had_x=0
+  { [[ $- == *x* ]] && had_x=1; set +x; } 2>/dev/null
+  load_alert_keys
+  if [[ -n "${TELEGRAM_ALERT_BOT_TOKEN:-}" && -n "${TELEGRAM_ALERT_CHAT_ID:-}" ]]; then
+    curl -sS -m 10 "https://api.telegram.org/bot${TELEGRAM_ALERT_BOT_TOKEN}/sendMessage" \
+      --data-urlencode "chat_id=${TELEGRAM_ALERT_CHAT_ID}" \
+      --data-urlencode "text=GrW deploy: $*" >/dev/null || true
+  else
+    log "alert NOT SENT (no TELEGRAM_ALERT_BOT_TOKEN / TELEGRAM_ALERT_CHAT_ID in ops.env or api.env): $*"
+  fi
+  if (( had_x )); then set -x; fi
+  return 0
 }
 
 # Alert at most once an hour per key, for conditions that persist across timer
 # runs (e.g. git fetch failing), where notify() every 2 minutes would be spam.
+# Never aborts the unit over its stamp: prod's state/notified-fetch was root-owned (unit runs as grw),
+# so `touch` failed under set -e and the fetch-failure alert died with it. An unwritable stamp is
+# replaced (state/ is grw's, so grw may unlink it), else a /tmp stamp keeps the throttle, else the
+# alert goes out unthrottled: better every run than never.
+NOTIFY_STAMP_FALLBACK_DIR="${NOTIFY_STAMP_FALLBACK_DIR:-${TMPDIR:-/tmp}}"
 notify_once() {
-  local stamp="$STATE_DIR/notified-$1"
-  mkdir -p "$STATE_DIR"
-  if [[ -z "$(find "$stamp" -mmin -60 2>/dev/null)" ]]; then touch "$stamp"; notify "$2"; fi
+  local stamp="$STATE_DIR/notified-$1" fallback="$NOTIFY_STAMP_FALLBACK_DIR/grw-deploy-notified-$1"
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  if [[ -n "$(find "$stamp" -mmin -60 2>/dev/null)" || -n "$(find "$fallback" -mmin -60 2>/dev/null)" ]]; then return 0; fi
+  if ! touch "$stamp" 2>/dev/null; then
+    rm -f "$stamp" 2>/dev/null || true
+    if ! touch "$stamp" 2>/dev/null; then
+      log "cannot write $stamp (owner?); throttling via $fallback"
+      touch "$fallback" 2>/dev/null || log "cannot write $fallback either; alert unthrottled"
+    fi
+  fi
+  notify "$2"
 }
 
 # NSE session guard. Args are optional (day-of-week 1-7, HHMM) so tests need no clock.

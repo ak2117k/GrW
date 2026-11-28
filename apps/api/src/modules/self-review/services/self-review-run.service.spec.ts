@@ -355,6 +355,20 @@ describe('SelfReviewRunService', () => {
     expect(repo.setDiagnosisIfEmpty).not.toHaveBeenCalled();
   });
 
+  it('reusing an earlier DONE run’s diagnosis of the same session finishes DONE, without a new AI call', async () => {
+    const diagnose = jest.fn(async () => {
+      throw new Error('must not be called');
+    });
+    const { svc, repo } = make({ diagnosis: { diagnose } });
+    const prior = { id: 'earlier', diagnosis: { misses: [], promptVersion: 'd9' }, summary: { byKind: { OVERNIGHT_VERDICT: { n: 99, right: 0, wrong: 99, nullCount: 0, hitRate: 0 } } } };
+    (repo.doneRunsFor as jest.Mock).mockResolvedValue([prior]);
+    await svc.run(NOW);
+    expect(diagnose).not.toHaveBeenCalled();
+    const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { status: string; error: string | null }];
+    expect(finish[1].status).toBe('DONE');
+    expect(finish[1].error ?? '').not.toMatch(/diagnosis/);
+  });
+
   it('a stopped-out trade setup is diagnosed, with the news idea it came from (owner 2026-10-28)', async () => {
     const diagnose = jest.fn(async () => null);
     const idea = { headline: 'Steel prices rise', idea: 'CE_IDEA', rationale: 'margins up', invalidation: 'gap down' };

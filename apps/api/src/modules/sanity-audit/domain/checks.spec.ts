@@ -172,6 +172,7 @@ describe('lastDueReviewSession / selfReviewRan', () => {
     const now = at('2026-10-30T20:00:00Z');
     expect(selfReviewRan({ ...r, firstDoneAt: at('2026-10-30T13:15:00.048Z') }, now)).toBeNull();
     expect(selfReviewRan({ ...r, firstDoneAt: null }, now)!.subjectId).toBe('self-review:2026-10-30');
+    expect(selfReviewRan({ ...r, firstDoneAt: null }, now)!.message).toMatch(/no DONE run by 01:00 IST \(a PARTIAL run .*does not count\)/);
     expect(selfReviewRan({ ...r, firstDoneAt: at('2026-10-31T03:30:00Z') }, at('2026-10-31T04:00:00Z'))).not.toBeNull();
   });
 });

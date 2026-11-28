@@ -25,6 +25,12 @@ describe('SelfReviewRepository run status readers', () => {
     expect(selfReviewRun.findFirst).toHaveBeenCalledTimes(2);
   });
 
+  it('doneRunsFor (diagnosis reuse) stays DONE-only: a PARTIAL run has no diagnosis to reuse, so a catch-up retries it', async () => {
+    const { repo, selfReviewRun } = make();
+    await repo.doneRunsFor('2026-11-27');
+    expect(selfReviewRun.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { sessionDate: '2026-11-27', status: 'DONE' } }));
+  });
+
   it('finishRun accepts PARTIAL', async () => {
     const { repo, selfReviewRun } = make();
     await repo.finishRun('r1', { status: 'PARTIAL', error: 'diagnosis: reply stopped: max_tokens' });

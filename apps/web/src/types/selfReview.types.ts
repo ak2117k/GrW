@@ -145,7 +145,8 @@ export interface SkillStats {
   note: string;
 }
 
-export type RunStatus = 'RUNNING' | 'DONE' | 'FAILED';
+/** PARTIAL (2026-11-28): scored, but the AI diagnosis failed — no findings, lessons or tickets that night. */
+export type RunStatus = 'RUNNING' | 'DONE' | 'PARTIAL' | 'FAILED';
 
 export interface SelfReviewRun {
   id: string;

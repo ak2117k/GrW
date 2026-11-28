@@ -66,7 +66,8 @@ export function nightStatuses(runs: readonly SelfReviewRun[], now: Date, n = 7):
       out.push({ session, state: 'REVIEWED', tone: 'good', text: `${label}: reviewed at ${istTime(diagnosed.finishedAt ?? diagnosed.startedAt)} — ${count} finding${count === 1 ? '' : 's'}` });
     } else if (mine.some((r) => r.status === 'RUNNING')) {
       out.push({ session, state: 'RUNNING', tone: 'neutral', text: `${label}: review running now` });
-    } else if (mine.some((r) => r.status === 'DONE')) {
+    } else if (mine.some((r) => r.status === 'DONE' || r.status === 'PARTIAL')) {
+      // PARTIAL (2026-11-28): scored, but the AI diagnosis failed (e.g. cut off at max_tokens).
       out.push({ session, state: 'NO_DIAGNOSIS', tone: 'bad', text: `${label}: review ran but the AI diagnosis did not (no findings written)` });
     } else if (mine.length > 0) {
       const err = mine.find((r) => r.error)?.error;

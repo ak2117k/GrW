@@ -214,6 +214,7 @@ export function proposalStatusVariant(status: string): 'success' | 'danger' | 'w
 export function runStatusVariant(status: string): 'success' | 'danger' | 'warning' | 'info' | 'neutral' {
   if (status === 'DONE') return 'success';
   if (status === 'FAILED') return 'danger';
+  if (status === 'PARTIAL') return 'warning'; // scored, AI diagnosis failed
   if (status === 'RUNNING') return 'info';
   return 'neutral';
 }

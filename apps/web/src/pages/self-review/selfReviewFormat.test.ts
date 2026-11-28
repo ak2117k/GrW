@@ -18,6 +18,7 @@ import {
   lessonsAddedList,
   pct,
   pendingBadge,
+  runStatusVariant,
   sessionLabel,
   sortLessons,
   targetLabel,
@@ -157,6 +158,9 @@ describe('misc', () => {
     expect(pendingBadge(undefined)).toBe('');
     expect(pendingBadge(3)).toBe('3');
     expect(pendingBadge(12)).toBe('9+');
+  });
+  it('runStatusVariant: PARTIAL (scored, AI diagnosis failed) is a warning', () => {
+    expect(['DONE', 'PARTIAL', 'FAILED', 'RUNNING', 'x'].map(runStatusVariant)).toEqual(['success', 'warning', 'danger', 'info', 'neutral']);
   });
 });
 

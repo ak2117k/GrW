@@ -325,7 +325,10 @@ export interface SelfReviewRow {
   firstDoneAt: Date | null;
 }
 
-/** The night's self-review of the session finished (DONE) by its deadline. */
+/**
+ * The night's self-review of the session finished (DONE) by its deadline. A PARTIAL run (2026-11-28: scored, but
+ * the AI diagnosis failed, e.g. cut off at max_tokens) does not count, so that night is flagged and the text says so.
+ */
 export function selfReviewRan(r: SelfReviewRow, now: Date): Finding | null {
   if (now < r.deadline) return null;
   if (r.firstDoneAt && r.firstDoneAt <= r.deadline) return null;
@@ -334,7 +337,7 @@ export function selfReviewRan(r: SelfReviewRow, now: Date): Finding | null {
     subjectAt: r.deadline,
     message: r.firstDoneAt
       ? `self-review of ${r.session} ran late: first DONE run ${r.firstDoneAt.toISOString()} (due by 01:00 IST)`
-      : `self-review of ${r.session}: no DONE run by 01:00 IST`,
+      : `self-review of ${r.session}: no DONE run by 01:00 IST (a PARTIAL run — scored, AI diagnosis failed — does not count)`,
     detail: { session: r.session, deadline: r.deadline.toISOString(), firstDoneAt: r.firstDoneAt ? r.firstDoneAt.toISOString() : null },
   };
 }

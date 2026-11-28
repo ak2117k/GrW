@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { sessionMinuteFilter } from '../../market-hub/candles/session-sql';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import type { ClusterRow, RecentSignal } from '../domain/cluster';
 import type { InfoItem } from '../domain/info';
@@ -96,6 +97,11 @@ export interface OutcomeWrite {
 export const CLASS_VERSION = 4;
 /** Rows of an older class version are re-read only this far back (a rule change re-reads recent posts, not history). */
 export const RECLASS_RECENT_MS = 7 * 86_400_000;
+
+const IST_OFFSET_MS = 330 * 60_000;
+const DAY_MS = 86_400_000;
+/** How far back the candles_1m seek may walk for the previous session (covers long holiday breaks). */
+const REF_LOOKBACK_DAYS = 10;
 
 export interface InfoRow {
   messageId: string;
@@ -214,20 +220,37 @@ export class SignalIntakeRepository {
     return hit?.llmReply ?? null;
   }
 
-  /** The last daily close strictly before `at` of each derivative index (candles_1d; "X se dur nahi" reference). */
+  /**
+   * The previous session's close of each derivative index — the strike-sanity spot and the "X se dur nahi"
+   * reference. The cutoff is IST midnight of `at`'s day (the caller caches per IST day; today's bars are never the
+   * reference). Source: the last session minute (venue session, market-hub/candles/session-sql) in candles_1m
+   * before the cutoff, which the live feed fills every session. candles_1d is only a fallback when its day is newer:
+   * on prod it is a lazy broker cache with no row since 2026-09-30 (the old reader returned 30-Sep NIFTY ~22,400, or
+   * nothing for the other indices, so the re-match never fired). One query, one indexed backward seek per source.
+   */
   async refCloses(at: Date): Promise<Map<string, number>> {
-    const out = new Map<string, number>();
-    await Promise.all(
-      Object.entries(INDEX_UNDERLYINGS).map(async ([name, ref]) => {
-        const bar = await this.prisma.hubCandle1d.findFirst({
-          where: { exchange: ref.exchange, token: ref.token, ts: { lt: at } },
-          orderBy: { ts: 'desc' },
-          select: { close: true },
-        });
-        if (bar && Number.isFinite(bar.close) && bar.close > 0) out.set(name, bar.close);
-      }),
-    );
-    return out;
+    const cut = new Date(Math.floor((at.getTime() + IST_OFFSET_MS) / DAY_MS) * DAY_MS - IST_OFFSET_MS);
+    const floor = new Date(cut.getTime() - REF_LOOKBACK_DAYS * DAY_MS);
+    const day = Prisma.sql`to_char(ts AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD')`;
+    const parts = Object.entries(INDEX_UNDERLYINGS).flatMap(([name, ref]) => [
+      Prisma.sql`(SELECT ${name}::text AS name, '1m'::text AS src, ${day} AS day, close FROM candles_1m
+        WHERE exchange = ${ref.exchange} AND token = ${ref.token} AND ts < ${cut} AND ts >= ${floor}${sessionMinuteFilter(ref.exchange)}
+        ORDER BY ts DESC LIMIT 1)`,
+      Prisma.sql`(SELECT ${name}::text AS name, '1d'::text AS src, ${day} AS day, close FROM candles_1d
+        WHERE exchange = ${ref.exchange} AND token = ${ref.token} AND ts < ${cut}
+        ORDER BY ts DESC LIMIT 1)`,
+    ]);
+    const rows = await this.prisma.$queryRaw<Array<{ name: string; src: string; day: string; close: number }>>`${Prisma.join(parts, ' UNION ALL ')}`;
+    const best = new Map<string, { day: string; minute: boolean; close: number }>();
+    for (const r of rows) {
+      const close = Number(r.close);
+      if (!Object.prototype.hasOwnProperty.call(INDEX_UNDERLYINGS, r.name) || !Number.isFinite(close) || close <= 0) continue;
+      const cand = { day: String(r.day), minute: r.src === '1m', close };
+      const cur = best.get(r.name);
+      // A newer session wins; on the same day the minute close (the real session end) beats the broker daily bar.
+      if (!cur || cand.day > cur.day || (cand.day === cur.day && cand.minute && !cur.minute)) best.set(r.name, cand);
+    }
+    return new Map([...best].map(([name, b]) => [name, b.close]));
   }
 
   /**

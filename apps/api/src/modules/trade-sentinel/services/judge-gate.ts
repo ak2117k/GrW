@@ -16,10 +16,11 @@ import type { TripwireResult } from './tripwire.service';
  *
  *  1. HELD (AI_AUTO_EXIT_HOLD, matched exactly like the executor's OWNER_HOLD
  *     guard). No sensor-driven judgement at all — not even a new-risk fire — and
- *     the heartbeat at most once per `heldHeartbeatMs` (default 30 min). The
- *     packet carries `ownerHold: true`, so the judge knows the answer is
- *     informational. Nothing here can exit anything; the executor's OWNER_HOLD
- *     skip is untouched.
+ *     one clock heartbeat per `heldHeartbeatMs` (default 60 min since 2026-11-28,
+ *     was 30). The packet carries `ownerHold: true`, so the judge knows the answer
+ *     is informational, and the cycle stores its EXIT_NOW as ADVISORY_VERDICT so
+ *     the executor never even tries it (prod 2026-11-27: 13 MAZDOCK EXIT_NOWs →
+ *     12 executions SKIPPED OWNER_HOLD). The executor's OWNER_HOLD skip is untouched.
  *
  *  2. RATE CAP. At most one judgement per position per `minIntervalMs`
  *     (SENTINEL_MIN_JUDGE_INTERVAL_SEC, default 900 s), measured from the latest
@@ -119,6 +120,12 @@ export interface JudgeGateConfig {
   squareOffRelookMin: number;
   /** SENTINEL_GREEN_TO_RED_BYPASS (default true): the green-to-red cap bypass. Rollback: `false`. */
   greenToRed: boolean;
+  /**
+   * SENTINEL_LIVE_MAX_GAP_MIN (default 10; 0 = off): a LIVE (real-money, not held) F&O / MCX / intraday position is
+   * looked at at least this often while its venue is open — past the material-change heartbeat, the rate cap and the
+   * re-judge rules (liveLookOwed). Prod 2026-11-27: CRUDEOIL16DEC268350CE went 19 min (1152 s) between looks.
+   */
+  liveMaxGapMs: number;
 }
 
 type Env = Record<string, string | undefined>;
@@ -142,7 +149,8 @@ export function parseJudgeGateConfig(env: Env): JudgeGateConfig {
     enabled: !isOff(env.SENTINEL_JUDGE_GATE),
     // 0 is a legitimate "no cap" (the bypasses then never matter).
     minIntervalMs: nonNegative(env.SENTINEL_MIN_JUDGE_INTERVAL_SEC, 900) * 1000,
-    heldHeartbeatMs: positive(env.SENTINEL_HELD_HEARTBEAT_MIN, 30) * 60_000,
+    // 60 (was 30) since 2026-11-28: MAZDOCK29DEC261760PE (held) drew 13 Opus EXIT_NOWs on 2026-11-27, every one skipped OWNER_HOLD.
+    heldHeartbeatMs: positive(env.SENTINEL_HELD_HEARTBEAT_MIN, 60) * 60_000,
     hold: [
       ...new Set(
         String(env.AI_AUTO_EXIT_HOLD ?? '')
@@ -162,7 +170,58 @@ export function parseJudgeGateConfig(env: Env): JudgeGateConfig {
     squareOffLook: !isOff(env.SENTINEL_SQUARE_OFF_LOOK),
     squareOffRelookMin: nonNegative(env.SENTINEL_SQUARE_OFF_RELOOK_MIN, 5),
     greenToRed: !isOff(env.SENTINEL_GREEN_TO_RED_BYPASS),
+    liveMaxGapMs: nonNegative(env.SENTINEL_LIVE_MAX_GAP_MIN, 10) * 60_000,
   };
+}
+
+/** The fire name of the live-gap look (verdict triggeredBy, packet trigger). */
+export const LIVE_GAP_FIRE = 'live-gap';
+
+/**
+ * Whether a live position is owed a look because the agent has not looked for `liveMaxGapMs`. Only a real (not
+ * paper), not-held position whose venue is open, and never a delivery holding (no intraday risk; dozens of them would
+ * each cost six looks an hour). `lastAgentMs` is the AGENT's last verdict (alarm-look lastAgentVerdictMs: a desk row
+ * or a rule row is not a look); null = never looked. Off when the gate is off/unbound or the gap is 0.
+ *
+ * Why (prod 2026-11-27, CRUDEOIL16DEC268350CE, live MCX): looks at 15:21, 15:40, 15:59, 16:15. The 15:24 desk-manager
+ * HOLD row reset the heartbeat clock and the rate cap (15:24 + 15 min → 15:40); then the option printed a flat 230
+ * from 15:51 to 15:58, 0.8 % from the 15:40 baseline 231.9, under the heartbeat's 1 % material-move step, so no
+ * heartbeat until the 15:59 print at 225.4 — 19 min 12 s with a live loss growing −₹811 → −₹1,460.
+ */
+export function liveLookOwed(p: {
+  cfg: JudgeGateConfig | undefined;
+  held: boolean;
+  paper: boolean;
+  segment: Segment | undefined;
+  venueOpen: boolean;
+  lastAgentMs: number | null;
+  nowMs: number;
+}): boolean {
+  const gap = p.cfg?.enabled ? p.cfg.liveMaxGapMs : 0;
+  if (!(gap > 0) || p.held || p.paper || !p.venueOpen || p.segment === 'EQ_DELIVERY') return false;
+  return p.lastAgentMs === null || p.nowMs - p.lastAgentMs >= gap;
+}
+
+/** The live-gap look: a routine (HEARTBEAT-tier) wake carrying one `live-gap` fire that says how long it has been. */
+export function liveGapDecision(lastAgentMs: number | null, nowMs: number): TripwireResult {
+  const detail =
+    lastAgentMs === null
+      ? 'live position never looked at by the agent'
+      : `live position not looked at for ${Math.floor((nowMs - lastAgentMs) / 60_000)} min (max gap)`;
+  return { fires: [{ name: LIVE_GAP_FIRE, detail }], heartbeat: false, shouldEvaluate: true, trigger: 'HEARTBEAT' };
+}
+
+/**
+ * The verdict word an EXIT_NOW is stored as when it must never reach the executor: the executor's poll reads
+ * `verdict = 'EXIT_NOW'` only (ai-exit-execution.repository pendingVerdicts), so this row is a record, never an order.
+ * Used for a held position (AI_AUTO_EXIT_HOLD: the executor would only skip it OWNER_HOLD) and an authority drill look.
+ */
+export const ADVISORY_VERDICT = 'EXIT_ADVISORY';
+
+/** EXIT_NOW → EXIT_ADVISORY with `[advisory: why]` in front of the reason; any other verdict is returned unchanged. */
+export function advisoryVerdict(verdict: string, reason: string, why: string): { verdict: string; reason: string } {
+  if (verdict !== 'EXIT_NOW') return { verdict, reason };
+  return { verdict: ADVISORY_VERDICT, reason: `[advisory: ${why}] ${reason}` };
 }
 
 const isCashSegment = (segment: Segment | undefined): boolean => segment !== undefined && !isDerivativeSegment(segment);
@@ -334,11 +393,15 @@ export function gateJudgement(
   const sinceMs = f.last ? f.nowMs - f.last.createdAt.getTime() : Number.POSITIVE_INFINITY;
 
   if (f.held) {
-    const due = decision.heartbeat || (decision.fires.length > 0 && heartbeatDue());
-    const heartbeat = due && sinceMs >= cfg.heldHeartbeatMs;
+    // The clock alone (2026-11-28): one look per heldHeartbeatMs, whatever fired or re-fired and whatever the normal
+    // cadence says — a fire never brings it forward, and quiet prices never hold it back. The verdict is advisory
+    // (the cycle stores an EXIT_NOW as ADVISORY_VERDICT), so nothing here can reach the executor.
+    void heartbeatDue;
+    const heartbeat = sinceMs >= cfg.heldHeartbeatMs;
     const out: TripwireResult = heartbeat ? { fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'HEARTBEAT' } : NONE;
     const suppressed = decision.fires.map((x) => x.name);
     if (decision.shouldEvaluate && !heartbeat && suppressed.length === 0) suppressed.push('heartbeat');
+    // `dropped` stays 'held' whenever a fire or a heartbeat was dropped; a clock look on a quiet pass drops nothing.
     return { ...pass, decision: out, dropped: suppressed.length > 0 ? 'held' : null, suppressed };
   }
 

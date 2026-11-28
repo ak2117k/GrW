@@ -18,6 +18,8 @@ export interface RecordVerdictInput {
     | 'HOLD'
     | 'EXIT_ARMED'
     | 'EXIT_NOW'
+    // An EXIT_NOW that must never reach the executor (held position / authority drill look): judge-gate ADVISORY_VERDICT.
+    | 'EXIT_ADVISORY'
     | 'ESCALATE'
     | 'HOLD_OVERNIGHT'
     | 'EXIT_AT_OPEN'

@@ -1,4 +1,17 @@
-import { capBypass, hardRiskWindow, isAdverseMove, exitTriggerCrossed, gateJudgement, parseJudgeGateConfig, type GateFacts } from './judge-gate';
+import {
+  ADVISORY_VERDICT,
+  LIVE_GAP_FIRE,
+  advisoryVerdict,
+  capBypass,
+  hardRiskWindow,
+  isAdverseMove,
+  exitTriggerCrossed,
+  gateJudgement,
+  liveGapDecision,
+  liveLookOwed,
+  parseJudgeGateConfig,
+  type GateFacts,
+} from './judge-gate';
 import type { TripwireResult } from './tripwire.service';
 
 const cfg = parseJudgeGateConfig({});
@@ -8,6 +21,7 @@ const fire = (...names: string[]): TripwireResult => ({
   fires: names.map((name) => ({ name, detail: name })), heartbeat: false, shouldEvaluate: true, trigger: 'FIRE',
 });
 const HEARTBEAT: TripwireResult = { fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'HEARTBEAT' };
+const NOT_DUE: TripwireResult = { fires: [], heartbeat: false, shouldEvaluate: false, trigger: null };
 const facts = (over: Partial<GateFacts> = {}): GateFacts => ({
   nowMs: NOW, last: { verdict: 'HOLD', createdAt: new Date(NOW - 5 * MIN) }, held: false, hardRisk: false,
   floorBreached: false, triggerCrossed: false, adverseMove: false, carried: new Set(), ...over,
@@ -15,11 +29,12 @@ const facts = (over: Partial<GateFacts> = {}): GateFacts => ({
 const never = () => false;
 
 describe('parseJudgeGateConfig', () => {
-  it('defaults: on, 15-min cap, 30-min held heartbeat, close guard = GATE_CLOSE_MIN, delta on', () => {
+  it('defaults: on, 15-min cap, 60-min held heartbeat, 10-min live gap, close guard = GATE_CLOSE_MIN, delta on', () => {
     expect(cfg).toEqual({
-      enabled: true, minIntervalMs: 900_000, heldHeartbeatMs: 30 * MIN, hold: [], closeGuardMin: 10,
+      enabled: true, minIntervalMs: 900_000, heldHeartbeatMs: 60 * MIN, hold: [], closeGuardMin: 10,
       expiryCloseMin: 30, adverseMovePct: 0.04, adverseMoveNEq: 6, adverseMovePctEq: 0.008,
       eqSquareOffLeadMin: 15, packetDelta: true, squareOffLook: true, squareOffRelookMin: 5, greenToRed: true,
+      liveMaxGapMs: 10 * MIN,
     });
   });
   it('reads overrides, the hold list like the executor, and the rollbacks', () => {
@@ -27,7 +42,13 @@ describe('parseJudgeGateConfig', () => {
       SENTINEL_JUDGE_GATE: 'false', SENTINEL_MIN_JUDGE_INTERVAL_SEC: '600', SENTINEL_HELD_HEARTBEAT_MIN: 'x',
       AI_AUTO_EXIT_HOLD: ' reliance27oct261270ce, t9 ', GATE_CLOSE_MIN: '15', SENTINEL_PACKET_DELTA: 'FALSE',
     });
-    expect(c).toMatchObject({ enabled: false, minIntervalMs: 600_000, heldHeartbeatMs: 30 * MIN, hold: ['RELIANCE27OCT261270CE', 'T9'], closeGuardMin: 15, packetDelta: false });
+    expect(c).toMatchObject({ enabled: false, minIntervalMs: 600_000, heldHeartbeatMs: 60 * MIN, hold: ['RELIANCE27OCT261270CE', 'T9'], closeGuardMin: 15, packetDelta: false });
+  });
+  it('SENTINEL_LIVE_MAX_GAP_MIN: a number of minutes; 0 turns the live-gap look off; junk keeps 10', () => {
+    expect(parseJudgeGateConfig({ SENTINEL_LIVE_MAX_GAP_MIN: '7' }).liveMaxGapMs).toBe(7 * MIN);
+    expect(parseJudgeGateConfig({ SENTINEL_LIVE_MAX_GAP_MIN: '0' }).liveMaxGapMs).toBe(0);
+    expect(parseJudgeGateConfig({ SENTINEL_LIVE_MAX_GAP_MIN: 'x' }).liveMaxGapMs).toBe(10 * MIN);
+    expect(parseJudgeGateConfig({ SENTINEL_HELD_HEARTBEAT_MIN: '45' }).heldHeartbeatMs).toBe(45 * MIN);
   });
 });
 
@@ -70,18 +91,62 @@ describe('gateJudgement — the cap', () => {
 
 describe('gateJudgement — held', () => {
   const held = (msAgo: number) => facts({ held: true, last: { verdict: 'EXIT_NOW', createdAt: new Date(NOW - msAgo) } });
-  it('drops every fire, new-risk ones included; a due heartbeat waits for 30 min', () => {
+  it('drops every fire, new-risk ones included; the heartbeat is the clock alone, at most once per 60 min', () => {
     expect(gateJudgement(fire('news-hit', 'level-break'), held(40 * MIN), cfg, never)).toMatchObject({ dropped: 'held', suppressed: ['news-hit', 'level-break'] });
     expect(gateJudgement(fire('news-hit'), held(40 * MIN), cfg, never).decision.shouldEvaluate).toBe(false);
-    // The fire's tick skipped the heartbeat computation: heartbeatDue answers it.
-    expect(gateJudgement(fire('news-hit'), held(40 * MIN), cfg, () => true).decision).toEqual(HEARTBEAT);
-    expect(gateJudgement(HEARTBEAT, held(20 * MIN), cfg, never)).toMatchObject({ dropped: 'held', suppressed: ['heartbeat'] });
-    expect(gateJudgement(HEARTBEAT, held(30 * MIN), cfg, never).decision).toEqual(HEARTBEAT);
+    // A fire never makes it due early, whatever the normal cadence says (prod 2026-11-27 MAZDOCK: 13 Opus EXIT_NOWs).
+    expect(gateJudgement(fire('news-hit'), held(40 * MIN), cfg, () => true).decision.shouldEvaluate).toBe(false);
+    expect(gateJudgement(HEARTBEAT, held(30 * MIN), cfg, () => true)).toMatchObject({ dropped: 'held', suppressed: ['heartbeat'] });
+    expect(gateJudgement(HEARTBEAT, held(59 * MIN), cfg, never).decision.shouldEvaluate).toBe(false);
+    expect(gateJudgement(HEARTBEAT, held(60 * MIN), cfg, never).decision).toEqual(HEARTBEAT);
+    // At 60 min the look is owed even on a pass whose tripwire said nothing (no material move) or only fired.
+    expect(gateJudgement(NOT_DUE, held(60 * MIN), cfg, never).decision).toEqual(HEARTBEAT);
+    expect(gateJudgement(fire('giveback-off-peak', 'exit-confirm'), held(61 * MIN), cfg, never)).toMatchObject({
+      decision: HEARTBEAT, dropped: 'held', suppressed: ['giveback-off-peak', 'exit-confirm'],
+    });
+    // First sight of a held position: one look.
+    expect(gateJudgement(NOT_DUE, facts({ held: true, last: null }), cfg, never).decision).toEqual(HEARTBEAT);
   });
   it('is never upgraded to the strong tier and never bypasses', () => {
-    const r = gateJudgement(HEARTBEAT, held(31 * MIN), cfg, never);
+    const r = gateJudgement(HEARTBEAT, held(61 * MIN), cfg, never);
     expect(r.decision.trigger).toBe('HEARTBEAT');
     expect(r.upgraded).toBe(false);
+  });
+});
+
+describe('liveLookOwed — a live position is looked at at least every SENTINEL_LIVE_MAX_GAP_MIN', () => {
+  const base = { cfg, held: false, paper: false, segment: 'OPT' as const, venueOpen: true, nowMs: NOW };
+  it('owed at 10 min since the agent last looked, not before', () => {
+    expect(liveLookOwed({ ...base, lastAgentMs: NOW - 9 * MIN })).toBe(false);
+    expect(liveLookOwed({ ...base, lastAgentMs: NOW - 10 * MIN })).toBe(true);
+    // Prod 2026-11-27 CRUDEOIL16DEC268350CE: 15:40:32 → 15:59:45 (1152 s) with no look.
+    expect(liveLookOwed({ ...base, lastAgentMs: NOW - 1152_000 })).toBe(true);
+    expect(liveLookOwed({ ...base, lastAgentMs: null })).toBe(true);
+  });
+  it.each([
+    ['held (AI_AUTO_EXIT_HOLD)', { held: true }],
+    ['paper', { paper: true }],
+    ['the venue is closed', { venueOpen: false }],
+    ['a delivery holding', { segment: 'EQ_DELIVERY' as const }],
+    ['turned off (0)', { cfg: parseJudgeGateConfig({ SENTINEL_LIVE_MAX_GAP_MIN: '0' }) }],
+    ['the gate off', { cfg: parseJudgeGateConfig({ SENTINEL_JUDGE_GATE: 'false' }) }],
+    ['no gate config', { cfg: undefined }],
+  ])('never when %s', (_n, over) => {
+    expect(liveLookOwed({ ...base, lastAgentMs: NOW - 30 * MIN, ...(over as object) })).toBe(false);
+  });
+  it('the look is a routine (HEARTBEAT-tier) wake named live-gap', () => {
+    const d = liveGapDecision(NOW - 19 * MIN, NOW);
+    expect(d).toMatchObject({ heartbeat: false, shouldEvaluate: true, trigger: 'HEARTBEAT' });
+    expect(d.fires).toEqual([{ name: LIVE_GAP_FIRE, detail: expect.stringMatching(/19 min/) }]);
+    expect(liveGapDecision(null, NOW).fires[0].detail).toMatch(/never/);
+  });
+});
+
+describe('advisory verdicts — an EXIT_NOW that must never reach the executor', () => {
+  it('EXIT_NOW becomes EXIT_ADVISORY with the reason tagged; every other verdict is unchanged', () => {
+    expect(advisoryVerdict('EXIT_NOW', 'sell it', 'owner hold')).toEqual({ verdict: ADVISORY_VERDICT, reason: '[advisory: owner hold] sell it' });
+    expect(ADVISORY_VERDICT).not.toBe('EXIT_NOW');
+    for (const v of ['HOLD', 'EXIT_ARMED', 'ESCALATE']) expect(advisoryVerdict(v, 'r', 'owner hold')).toEqual({ verdict: v, reason: 'r' });
   });
 });
 

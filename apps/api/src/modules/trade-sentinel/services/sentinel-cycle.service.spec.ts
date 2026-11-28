@@ -2967,7 +2967,9 @@ describe('SentinelCycleService — judge gate (held heartbeat-only, 15-min cap +
       undefined,
       parseRejudgeConfig({}),
       { cfg: parseFutileRejudgeConfig(env), reader: { latestSince: jest.fn().mockResolvedValue(new Map()) } },
-      parseJudgeGateConfig(env),
+      // The 10-min live-gap look (2026-11-28) is off here: these tests isolate the cap / held / tier rules
+      // (sentinel-cycle.held-cadence.spec covers it).
+      parseJudgeGateConfig({ SENTINEL_LIVE_MAX_GAP_MIN: '0', ...env }),
     );
     t.build.mockResolvedValue([watched('t1')]);
     t.evaluate.mockReturnValue(fire('context-factor-flip'));
@@ -3089,7 +3091,7 @@ describe('SentinelCycleService — judge gate (held heartbeat-only, 15-min cap +
     });
   });
 
-  describe('held positions (AI_AUTO_EXIT_HOLD): heartbeat only, at most every 30 min, marked held', () => {
+  describe('held positions (AI_AUTO_EXIT_HOLD): heartbeat only, at most every 60 min, marked held', () => {
     it('no tripwire judgement at all, not even a news-hit (a new-risk fire the futile rule lets through)', async () => {
       const t = setup({ AI_AUTO_EXIT_HOLD: 'T1' });
       t.evaluate.mockReturnValue(fire('news-hit', 'level-break'));
@@ -3098,13 +3100,13 @@ describe('SentinelCycleService — judge gate (held heartbeat-only, 15-min cap +
       expect(t.judge).not.toHaveBeenCalled();
     });
 
-    it('a due heartbeat waits for 30 min since the last verdict, then goes out on the routine tier marked held', async () => {
+    it('a due heartbeat waits for 60 min since the last verdict (was 30), then goes out on the routine tier marked held', async () => {
       const t = setup({ AI_AUTO_EXIT_HOLD: 'T1' });
       t.evaluate.mockReturnValue(HEARTBEAT);
-      t.recentForTracker.mockResolvedValue([row(20 * MIN, { verdict: 'EXIT_NOW' })]);
+      t.recentForTracker.mockResolvedValue([row(31 * MIN, { verdict: 'EXIT_NOW' })]);
       await t.svc.runForUser(USER, NOW);
       expect(t.judge).not.toHaveBeenCalled();
-      t.recentForTracker.mockResolvedValue([row(31 * MIN, { verdict: 'EXIT_NOW' })]);
+      t.recentForTracker.mockResolvedValue([row(61 * MIN, { verdict: 'EXIT_NOW' })]);
       await t.svc.runForUser(USER, NOW);
       expect(t.judge).toHaveBeenCalledTimes(1);
       expect(t.judge.mock.calls[0][1]).toBe('HEARTBEAT'); // held: never upgraded, even after an EXIT_NOW
@@ -3205,7 +3207,8 @@ describe('SentinelCycleService — the deadline look, owner alerts and green-to-
   const names = (call: unknown[]) => (call[3] as Array<{ name: string }>).map((f) => f.name);
   const review = (call: unknown[]) => call[4] as { deadline?: { look: string; deadline: string; deadlineIst: string; minutesLeft: number } } | undefined;
 
-  function setup(env: Record<string, string> = {}, alerts?: OwnerAlertPort, gate: JudgeGateConfig | undefined = parseJudgeGateConfig(env)) {
+  // The 10-min live-gap look is off here (these tests isolate the deadline look / alerts / green-to-red).
+  function setup(env: Record<string, string> = {}, alerts?: OwnerAlertPort, gate: JudgeGateConfig | undefined = parseJudgeGateConfig({ SENTINEL_LIVE_MAX_GAP_MIN: '0', ...env })) {
     const t = makeSvc(
       undefined,
       undefined,

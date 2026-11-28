@@ -27,15 +27,19 @@ import {
 import {
   JUDGE_GATE_CONFIG,
   SQUARE_OFF_DUE,
+  advisoryVerdict,
   hardRiskWindow,
   isAdverseMove,
   exitTriggerCrossed,
   gateJudgement,
+  liveGapDecision,
+  liveLookOwed,
   minutesToDeadline,
   type CapBypass,
   type GateFacts,
   type JudgeGateConfig,
 } from './judge-gate';
+import { DRILL_ADVISORY_WHY, isDrillAlarm } from '../../exit-authority/domain/drill';
 import { squareOffLook, type SquareOffDecision, type SquareOffLook } from './square-off-look';
 import { ALARM_FIRE, alarmLookFire, lastAgentVerdictMs, leadAlarm, packetAlarm, type AlarmFire } from './alarm-look';
 import { ALARM_CHART_READER, ALARM_CHART_TIMEOUT_MS, alarmChartBlock, type AlarmChartReader, type PacketAlarmChart } from './alarm-chart';
@@ -56,7 +60,7 @@ import { MANAGER_TRACKERS, type ManagerTrackerLookup } from '../ports/manager-tr
 import type { Verdict as SentinelVerdict } from './sentinel-agent.service';
 import { ThesisService, isRetryable as isRetryableThesis, type EnsuredThesis } from './thesis.service';
 import { SentinelAgentService } from './sentinel-agent.service';
-import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
+import { SentinelVerdictRepository, type RecordVerdictInput } from '../repositories/sentinel-verdict.repository';
 import { exitTriggerRecord } from './exit-trigger-proposal';
 import { shadowSummary } from './news-events-blocks';
 import { TickSensorBook, sensorSeed } from './tick-sensor-book';
@@ -597,6 +601,8 @@ interface TrackerState {
   ownerExitAlertAt?: number;
   /** Exit authority: cycle-clock ms the last forced alarm look was dispatched (TRACKER_WAKE_MIN_GAP_MS apart). Memory only. */
   alarmLookAt?: number;
+  /** Authority drill: the id of the drill alarm the last forced look answered — that look's EXIT_NOW is advisory. Memory only. */
+  drillAlarmId?: string;
 }
 
 /** TARGET_LADDER: the per-position memory (see `TrackerState.ladder`). */
@@ -1437,20 +1443,49 @@ export class SentinelCycleService {
     // trade's lead open alarm was raised after the agent's last verdict, at most once per TRACKER_WAKE_MIN_GAP_MS
     // (and one judgement in flight per position, below). The agent backoff still applies. The owner's hold list
     // is untouched. Off / paper / no open alarm ⇒ no alarm row, and `decision` is exactly as before.
-    const alarmRow = this.authorityLive(entry) ? leadAlarm(openAlarms.get(entry.trackerId), now.getTime()) : null;
+    // Authority drill: a real alarm always speaks for the trade before a drill one (a drill look is advisory-only).
+    const tradeAlarms = openAlarms.get(entry.trackerId);
+    const alarmRow = this.authorityLive(entry)
+      ? leadAlarm(tradeAlarms?.filter((a) => !isDrillAlarm(a)), now.getTime()) ?? leadAlarm(tradeAlarms, now.getTime())
+      : null;
     const holdList = this.gateCfg?.hold ?? this.futileCfg?.hold;
+    const held = !!holdList && isHeldPosition(holdList, entry);
     const alarmFire =
-      alarmRow && !(holdList && isHeldPosition(holdList, entry))
+      alarmRow && !held
         ? alarmLookFire(alarmRow, lastAgentVerdictMs(recent), state.alarmLookAt ?? null, now.getTime())
         : null;
     if (alarmFire) {
       decision = withAlarmFire(decision, alarmFire);
+      const drill = isDrillAlarm(alarmRow);
+      state.drillAlarmId = drill ? alarmRow!.id : undefined;
       const woke = this.alarmWakes.get(entry.trackerId);
       this.alarmWakes.delete(entry.trackerId);
       this.logger.log(
-        `[exit-authority] forced look owed — ${entry.symbol} (tracker ${entry.trackerId}): ${alarmFire.rule} alarm ${alarmFire.alarmId} is unanswered` +
-          (woke ? ` (woken: ${woke})` : ''),
+        `[exit-authority] ${drill ? 'DRILL ' : ''}forced look owed — ${entry.symbol} (tracker ${entry.trackerId}): ${alarmFire.rule} alarm ${alarmFire.alarmId} is unanswered` +
+          (woke ? ` (woken: ${woke})` : '') + (drill ? ' (drill: the verdict is advisory, nothing is sold)' : ''),
       );
+    }
+
+    // LIVE MAX GAP (judge-gate liveLookOwed, supreme fixes 2026-11-28): a live, not-held position is looked at at
+    // least every SENTINEL_LIVE_MAX_GAP_MIN (10) while its venue is open — injected after every wake gate (the
+    // material-change heartbeat, the rate cap, re-judge / futile suppression), like the alarm look. Measured from the
+    // AGENT's last verdict: a desk-manager or rule row is not a look. The agent backoff and the in-flight lock below
+    // still apply. Prod 2026-11-27 CRUDEOIL16DEC268350CE (live MCX): 19 min between looks.
+    if (!decision.shouldEvaluate) {
+      const lastAgentMs = lastAgentVerdictMs(recent);
+      const owed = liveLookOwed({
+        cfg: this.gateCfg,
+        held,
+        paper: isPaperTracker(entry.trackerId),
+        segment: tick.segment,
+        venueOpen: minutesToSessionClose(now, entry.exchange).available,
+        lastAgentMs,
+        nowMs: now.getTime(),
+      });
+      if (owed) {
+        decision = liveGapDecision(lastAgentMs, now.getTime());
+        this.logger.log(`[judge-gate] live-gap look — ${entry.symbol} (tracker ${entry.trackerId}): ${decision.fires[0].detail}`);
+      }
     }
 
     if (!decision.shouldEvaluate) {
@@ -2635,7 +2670,23 @@ export class SentinelCycleService {
         verdict.exitTrigger = { ...p, price: w.price };
       }
     }
-    const exitTrigger = exitTriggerRecord(verdict, tick);
+    // ADVISORY (supreme fixes 2026-11-28): a HELD position's look (AI_AUTO_EXIT_HOLD — the executor would only skip it
+    // OWNER_HOLD) and an authority DRILL alarm's look never write an EXIT_NOW: it is stored as EXIT_ADVISORY with the
+    // reason tagged, and no exit trigger (a trigger would arm a price exit). The executor polls EXIT_NOW only.
+    const holdList = this.gateCfg?.hold ?? this.futileCfg?.hold;
+    const drillLook =
+      state.drillAlarmId !== undefined &&
+      decision.fires.some((f) => f.name === ALARM_FIRE && (f as Partial<AlarmFire>).alarmId === state.drillAlarmId);
+    const advisoryWhy = drillLook
+      ? DRILL_ADVISORY_WHY
+      : holdList && isHeldPosition(holdList, entry)
+        ? 'owner hold (AI_AUTO_EXIT_HOLD)'
+        : null;
+    const stored = advisoryWhy ? advisoryVerdict(verdict.verdict, verdict.reason, advisoryWhy) : { verdict: verdict.verdict, reason: verdict.reason };
+    if (advisoryWhy && stored.verdict !== verdict.verdict) {
+      this.logger.warn(`[sentinel] ${entry.symbol} (tracker ${entry.trackerId}): ${verdict.verdict} recorded as ${stored.verdict} — ${advisoryWhy}; nothing is sold`);
+    }
+    const exitTrigger = advisoryWhy ? null : exitTriggerRecord(verdict, tick);
     if (newsShadow) this.logger.log(`[news-shadow] ${entry.symbol} ${verdict.verdict}: ${shadowSummary(newsShadow as never)}`);
 
     progress.stage = 'verdict write';
@@ -2645,11 +2696,11 @@ export class SentinelCycleService {
       userId: entry.userId,
       trackerId: entry.trackerId,
       symbol: entry.symbol,
-      verdict: verdict.verdict,
+      verdict: stored.verdict as RecordVerdictInput['verdict'],
       confidence: verdict.confidence,
       thesisStatus: verdict.thesisStatus,
       recoveryAvailable: verdict.recoveryAvailable,
-      reason: verdict.reason,
+      reason: stored.reason,
       evidence: verdict.evidence,
       invalidationPoint: verdict.invalidationPoint,
       reviewInSec: verdict.reviewIn,

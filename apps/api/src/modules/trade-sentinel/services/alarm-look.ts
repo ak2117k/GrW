@@ -1,5 +1,6 @@
 import type { AlarmRow, AlarmRule, AlarmUrgency } from '../../exit-authority/exit-authority.tokens';
 import { isAgentVerdictStamp } from '../../exit-authority/domain/agent-verdict';
+import { isDrillAlarm } from '../../exit-authority/domain/drill';
 import { TRACKER_WAKE_MIN_GAP_MS } from '../../exit-authority/domain/timings';
 import type { TripwireFire } from '../tripwires/types';
 import type { PacketAlarmChart } from './alarm-chart';
@@ -59,9 +60,15 @@ export function alarmActive(a: Pick<AlarmRow, 'status' | 'snoozedUntil'>, nowMs:
   return until === null || until <= nowMs;
 }
 
-/** The alarm that speaks for the trade this pass: most urgent first, then the latest raised. Null when none is active. */
+/**
+ * The alarm that speaks for the trade this pass: a REAL alarm always outranks an authority drill alarm (a drill leads
+ * only when it is the sole active alarm — re-review 2026-11-28: a drill lead would hide the real alarm from the packet);
+ * then most urgent first, then the latest raised. Null when none is active.
+ */
 export function leadAlarm(rows: readonly AlarmRow[] | undefined, nowMs: number): AlarmRow | null {
-  const live = (rows ?? []).filter((a) => alarmActive(a, nowMs));
+  const active = (rows ?? []).filter((a) => alarmActive(a, nowMs));
+  const real = active.filter((a) => !isDrillAlarm(a));
+  const live = real.length > 0 ? real : active;
   if (live.length === 0) return null;
   return [...live].sort((a, b) => URGENCY_RANK[a.urgency] - URGENCY_RANK[b.urgency] || alarmRaisedMs(b) - alarmRaisedMs(a))[0];
 }

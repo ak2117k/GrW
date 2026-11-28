@@ -3,7 +3,7 @@ import { RECENT_LOOK_WINDOW, SentinelCycleService, type TickReading } from './se
 import type { RosterEntry } from './roster.service';
 import { ADVISORY_VERDICT, LIVE_GAP_FIRE, parseJudgeGateConfig, type JudgeGateConfig } from './judge-gate';
 import type { AlarmRow } from '../../exit-authority/exit-authority.tokens';
-import { ALARM_FIRE, lastAgentVerdictMs } from './alarm-look';
+import { ALARM_FIRE, lastAgentVerdictMs, leadAlarm } from './alarm-look';
 import { isAgentLookRow } from './sentinel-cycle.service';
 
 /**
@@ -245,6 +245,32 @@ describe('review round 1 (2026-11-28): drill looks only when the drill alarm is 
     expect(JSON.stringify({ fires, review })).not.toMatch(/DRILL|nothing is sold|drill/i);
     expect(review?.authority?.alarm ?? null).toBeNull();
     expect(t.record.mock.calls[0][0]).toMatchObject({ verdict: 'EXIT_NOW', reason: 'the 15m broke the low' });
+  });
+
+  it('re-review: leadAlarm never picks a drill while a real alarm is active; a drill leads only alone', () => {
+    const nowMs = ist('15:46:00').getTime();
+    const drillUrgent = drillAlarmRow({ id: 'al-d', urgency: 'urgent', lastRaisedAt: ist('15:45:50') });
+    const realNormal = drillAlarmRow({ id: 'al-real', payload: {}, urgency: 'normal', lastRaisedAt: ist('15:40:00') });
+    expect(leadAlarm([drillUrgent, realNormal], nowMs)?.id).toBe('al-real');
+    expect(leadAlarm([realNormal, drillUrgent], nowMs)?.id).toBe('al-real');
+    expect(leadAlarm([drillUrgent], nowMs)?.id).toBe('al-d');
+    // A real alarm that is not active (snoozed) does not hide the drill.
+    expect(leadAlarm([drillUrgent, { ...realNormal, status: 'SNOOZED', snoozedUntil: ist('16:00:00') }], nowMs)?.id).toBe('al-d');
+  });
+
+  it('re-review: a real fire + a drill fire inside the 1-min re-judge gap is NOT gap-exempt (the dropped drill fire exempts nothing)', async () => {
+    // Agent looked at 15:45:00; the drill alarm was raised at 15:45:20; a real level-break fires at 15:45:30 (< 60 s).
+    const gate = parseJudgeGateConfig({ SENTINEL_LIVE_MAX_GAP_MIN: '0', SENTINEL_MIN_JUDGE_INTERVAL_SEC: '0' });
+    const open = () => [drillAlarmRow({ raisedAt: ist('15:45:20'), lastRaisedAt: ist('15:45:20') })];
+    const t = makeSvc({ open: open(), recent: [agentRow('15:45:00')], verdict: EXIT, gate });
+    t.evaluate.mockReturnValue({ fires: [{ name: 'level-break', detail: 'broke 7950' }], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' });
+    await t.pass('15:45:30');
+    expect(t.judge).not.toHaveBeenCalled();
+    // A drill-ONLY pass inside the gap is still the forced (advisory) look.
+    const d = makeSvc({ open: open(), recent: [agentRow('15:45:00')], verdict: EXIT, gate });
+    await d.pass('15:45:30');
+    expect(d.judge).toHaveBeenCalledTimes(1);
+    expect(d.record.mock.calls[0][0].verdict).toBe(ADVISORY_VERDICT);
   });
 
   it('final wave item 1: a heartbeat look while the drill alarm is open (already answered) shows no drill alarm', async () => {

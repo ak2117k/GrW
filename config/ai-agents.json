@@ -15,7 +15,7 @@
   "news.impact":          { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
   "news.sentiment":       { "agent": "reading",    "concurrency": 3, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
   "sentinel.overnight":   { "agent": "background", "concurrency": 2, "timeoutMs": 300000, "model": null, "effort": null, "maxTokens": null },
-  "self-review.diagnose": { "agent": "background", "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
+  "self-review.diagnose": { "agent": "background", "concurrency": 2, "timeoutMs": 300000, "model": null, "effort": null, "maxTokens": null },
   "news.brief":           { "agent": "background", "concurrency": 1, "timeoutMs": 300000, "model": null, "effort": null, "maxTokens": null },
   "news.ideas":           { "agent": "background", "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
   "assist.advisor":       { "agent": "background", "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },

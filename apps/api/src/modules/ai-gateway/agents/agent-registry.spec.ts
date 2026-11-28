@@ -111,6 +111,8 @@ describe('agent registry', () => {
     // Desk manager (2026-11-26): one Opus call per run, 1 at once, 120 s bound, on the trading agent.
     expect(r.profile('desk.manager')).toMatchObject({ agent: 'trading', concurrency: 1, timeoutMs: 120000 });
     expect(TRADING_JOBS).toContain('desk.manager');
+    // Self-review diagnosis (2026-11-28): 16k output budget incl. thinking at ~60–100 tok/s on Vertex needs a 300 s bound.
+    expect(r.profile('self-review.diagnose')).toMatchObject({ agent: 'background', concurrency: 2, timeoutMs: 300000 });
     // AI setups (2026-11-25): one Opus call per verified claim, 2 at once, 120 s bound.
     expect(r.profile('setup.build')).toMatchObject({ agent: 'reading', concurrency: 2, timeoutMs: 120000 });
     const ownProfile = ['news.sentiment', 'news.brief', 'signal.read'];

@@ -55,6 +55,9 @@ export interface StoredSignalRef {
   channelId: string;
   underlying: string;
   strike: number | null;
+  /** CE / PE / FUT / EQ (latestInChannel: the channel-repost check, final review item 9). */
+  instrumentKind?: string;
+  side?: string;
   receivedAt: Date;
   clusterId: string | null;
 }
@@ -372,7 +375,7 @@ export class SignalIntakeRepository {
   latestInChannel(channelId: string, since: Date, take = 20): Promise<StoredSignalRef[]> {
     return this.prisma.tradeSignal.findMany({
       where: { channelId, receivedAt: { gte: since } },
-      select: { id: true, channelId: true, underlying: true, strike: true, receivedAt: true, clusterId: true },
+      select: { id: true, channelId: true, underlying: true, strike: true, instrumentKind: true, side: true, receivedAt: true, clusterId: true },
       orderBy: { receivedAt: 'desc' },
       take,
     });

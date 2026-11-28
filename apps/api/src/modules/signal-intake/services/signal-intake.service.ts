@@ -8,7 +8,9 @@ import { inferExpiry } from '../domain/expiry';
 import { classifyCommentary, hasBias, recapReason, type CommentaryClass, type InfoItem, type RefPrices } from '../domain/info';
 import { CALL_AT_TAG, clockOrNull, readImageDescription, validateInfoItems, validateLlmSignal, type InfoLlmReply, type LlmParseReply, type VisionReply } from '../domain/llm-schema';
 import { prefilter, type PrefilterResult } from '../domain/prefilter';
+import { resultPostReason } from '../domain/result-post';
 import { parseSignal } from '../domain/rule-parser';
+import { rematchStrike } from '../domain/strike-sanity';
 import {
   directionOf,
   SIGNAL_READY_EVENT,
@@ -183,28 +185,40 @@ export class SignalIntakeService {
     const pf = prefilter(text, vocab);
     const parsed = pf.pass ? parseSignal(text, vocab, pf.norm) : null;
 
+    // "gains done" / "target hit" / "x to y++ done": a completed outcome is never a new signal (audit 2026-11-27).
+    const result = resultPostReason(pf.norm);
     if (prior) {
-      await this.reclassifyEdit(evt, prior, parsed, base);
+      await this.reclassifyEdit(evt, prior, result ? null : parsed, base);
       return null;
     }
-    if (parsed) {
+    if (parsed && !result) {
       await this.createFromParsed(evt, postedAt, parsed, 'rule', base, null);
-      return 'the caption is a call; the image was not sent';
+      return this.describeImage(evt, postedAt, base);
     }
     // The channel's own results of past calls: kept to score its claims later, never a signal or an update.
-    const recap = recapReason(text, pf.norm, vocab);
+    const upd = detectUpdate(text, vocab, pf.norm);
+    const recap = recapReason(text, pf.norm, vocab) ?? (result && !upd ? result : null);
     if (recap) {
       await this.repo.saveClass({ ...base, status: 'RECAP', reason: recap });
-      return 'the caption is a recap; the image was not sent';
+      return this.describeImage(evt, postedAt, base);
     }
-    const upd = detectUpdate(text, vocab, pf.norm);
     if (upd) {
-      await this.linkUpdate(evt, postedAt, upd, base);
-      return 'the caption is an update; the image was not sent';
+      // A result that links to no earlier call of the channel is a recap, not an orphan update.
+      await this.linkUpdate(evt, postedAt, upd, base, result ? { orphanRecap: result } : {});
+      return this.describeImage(evt, postedAt, base);
+    }
+    if (result) {
+      await this.repo.saveClass({ ...base, status: 'RECAP', reason: result });
+      return this.describeImage(evt, postedAt, base);
     }
     const info = await this.commentary(text, pf, vocab, postedAt);
+    if (evt.hasMedia && !evt.media && pf.reason === 'empty') {
+      // R could not save the image (a failed / empty download; R's backfill may fetch it again): nothing to read yet.
+      await this.repo.saveClass({ ...base, status: 'NOISE', reason: 'empty caption; image not downloaded' });
+      return null;
+    }
     // An image post whose caption alone is not a call: the image may be the call (MCX / tip channels).
-    // A caption that already carries a directional view is the post's information: no image read.
+    // A caption that already carries a directional view is the post's class; the image is still read for its description.
     let imageSkipped: string | null = null;
     if (evt.media && !(info?.kind === 'INFO' && info.items.some(hasBias))) {
       const blocked = this.visionBlocked();
@@ -220,7 +234,7 @@ export class SignalIntakeService {
     }
     if (info?.kind === 'INFO') {
       await this.saveInfo(evt, postedAt, base, info);
-      return imageSkipped ?? 'the caption carries the view; the image was not sent';
+      return imageSkipped ?? this.describeImage(evt, postedAt, base);
     }
     // Only text posts reach below (an image post has started vision or returned above).
     if (info) {
@@ -237,6 +251,20 @@ export class SignalIntakeService {
   }
 
   // ─── Vision (image posts) ──────────────────────────────────────────────────
+
+  /**
+   * Every image post is read (audit 2026-11-27): when the caption already decided the class (a call, a recap, an
+   * update, a view), the image is read for its description only — the class row keeps the caption's class and gains
+   * the reading (sha256 + description in llm_result), and `signal.vision.done` carries it. Returns why the image is
+   * not read (the caller announces that), null when the read started or there is no image.
+   */
+  private async describeImage(evt: TelegramMessageEvent, postedAt: Date, base: Omit<ClassRow, 'status'>): Promise<string | null> {
+    if (!evt.media) return null;
+    const blocked = this.visionBlocked();
+    if (blocked) return `image not read: ${blocked}`;
+    await this.startVision(evt, postedAt, evt.media, base, { describeOnly: true });
+    return null;
+  }
 
   private visionBlocked(): string | null {
     if (!this.config.visionEnabled) return 'SIGNAL_VISION=off';
@@ -263,23 +291,36 @@ export class SignalIntakeService {
     return Math.max(recorded + this.visionInflight, this.visionUsed);
   }
 
-  private async startVision(evt: TelegramMessageEvent, postedAt: Date, media: TelegramMediaRef, base: Omit<ClassRow, 'status'>, opts: { backfill?: boolean } = {}): Promise<void> {
+  /**
+   * `describeOnly`: the caption already decided the class — the read only adds the image's description to that row
+   * (never LLM_PENDING / LLM_SKIPPED / LLM_FAILED over it); a skipped or failed read is only announced.
+   */
+  private async startVision(
+    evt: TelegramMessageEvent,
+    postedAt: Date,
+    media: TelegramMediaRef,
+    base: Omit<ClassRow, 'status'>,
+    opts: { backfill?: boolean; describeOnly?: boolean } = {},
+  ): Promise<void> {
+    const describeOnly = !!opts.describeOnly;
+    const skip = async (reason: string, announced = reason) => {
+      if (!describeOnly) await this.repo.saveClass({ ...base, status: 'LLM_SKIPPED', parser: 'vision', reason });
+      this.visionSkipped(evt, postedAt, announced);
+    };
     const cached = await this.repo.cachedVision(media.sha256);
-    if (cached) {
-      await this.applyVision(evt, postedAt, media, cached as VisionReply, base, 'cache');
+    if (cached && typeof (cached as { kind?: unknown }).kind === 'string') {
+      await this.applyVision(evt, postedAt, media, cached as VisionReply, base, 'cache', describeOnly);
       return;
     }
     // A backfilled image is read whatever its age (R paces it: 6 per 5 min); its reads are not the live cap's.
     if (!opts.backfill && this.now().getTime() - postedAt.getTime() > this.config.visionMaxAgeMs) {
-      await this.repo.saveClass({ ...base, status: 'LLM_SKIPPED', parser: 'vision', reason: 'image too old for the model (history)' });
-      this.visionSkipped(evt, postedAt, 'image too old for the model');
+      await skip('image too old for the model (history)', 'image too old for the model');
       return;
     }
     if (this.inflight.has(evt.messageId)) return;
     const used = opts.backfill ? 0 : await this.visionUsedToday();
     if (used >= this.config.visionDailyCap) {
-      await this.repo.saveClass({ ...base, status: 'LLM_SKIPPED', parser: 'vision', reason: `daily vision cap ${this.config.visionDailyCap} reached` });
-      this.visionSkipped(evt, postedAt, `daily vision cap ${this.config.visionDailyCap} reached`);
+      await skip(`daily vision cap ${this.config.visionDailyCap} reached`);
       return;
     }
     if (!opts.backfill) {
@@ -287,16 +328,16 @@ export class SignalIntakeService {
       this.visionInflight++;
     }
     this.inflight.add(evt.messageId);
-    await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
+    if (!describeOnly) await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
     // Outside the serial chain, like the text fallback.
     void (this.vision as SignalVision)
       .classify(String(evt.text ?? ''), media, { channelId: evt.channelId })
       .then(
-        (reply) => this.serial(() => this.applyVision(evt, postedAt, media, reply, base, 'llm')),
+        (reply) => this.serial(() => this.applyVision(evt, postedAt, media, reply, base, 'llm', describeOnly)),
         (e) =>
           this.serial(async () => {
             if (e instanceof AssistBusyError && !opts.backfill) this.visionUsed = Math.max(0, this.visionUsed - 1); // never started: no spend
-            await this.repo.saveClass({ ...base, status: 'LLM_FAILED', parser: 'vision', attempts: 1, reason: `vision: ${errText(e)}`.slice(0, 500) });
+            if (!describeOnly) await this.repo.saveClass({ ...base, status: 'LLM_FAILED', parser: 'vision', attempts: 1, reason: `vision: ${errText(e)}`.slice(0, 500) });
             this.visionSkipped(evt, postedAt, `vision failed: ${errText(e)}`.slice(0, 300));
           }),
       )
@@ -319,10 +360,11 @@ export class SignalIntakeService {
     reply: VisionReply,
     base: Omit<ClassRow, 'status'>,
     via: 'llm' | 'cache',
+    describeOnly = false,
   ): Promise<void> {
-    // The chart-setup reader (image-setup) may already have made this post a call: never overwrite that class row.
     const prior = await this.repo.classOf(evt.messageId);
-    if (prior?.status === 'SIGNAL' && prior.signalId) {
+    // The chart-setup reader (image-setup) may already have made this post a call: never overwrite that class row.
+    if (!describeOnly && prior?.status === 'SIGNAL' && prior.signalId) {
       this.visionSkipped(evt, postedAt, 'the chart-setup reader already made this post a call; the generic image read was not applied');
       return;
     }
@@ -335,6 +377,25 @@ export class SignalIntakeService {
       const payload: VisionDoneEvent = { messageId: evt.messageId, channelId: evt.channelId, postedAt, text: String(evt.text ?? ''), reading: stored };
       this.emit(SIGNAL_VISION_DONE_EVENT, payload);
     };
+    if (describeOnly) {
+      // The caption's class stands; the row gains the image reading (an edit since then owns the row: leave it).
+      if (prior && prior.textHash === base.textHash) {
+        const priorResult = prior.llmResult && typeof prior.llmResult === 'object' && !Array.isArray(prior.llmResult) ? (prior.llmResult as Record<string, unknown>) : null;
+        await this.repo.saveClass({
+          ...base,
+          status: prior.status as MessageStatus,
+          parser: prior.parser,
+          signalId: prior.signalId,
+          updateKind: prior.updateKind,
+          attempts: prior.attempts,
+          reason: prior.reason,
+          // A model reply already on the row (an LLM parse) is kept whole; the image reading rides under `image`.
+          llmResult: priorResult ? { ...priorResult, image: stored, description: stored.description ?? null, imageSha256: media.sha256 } : stored,
+        });
+      }
+      done();
+      return;
+    }
     const saveClass = (status: MessageStatus, reason: string) =>
       this.repo.saveClass({ ...base, status, parser: 'vision', llmResult: stored, reason: `vision (${via}): ${reason}`.slice(0, 500) });
     const save = async (status: MessageStatus, reason: string) => {
@@ -379,6 +440,15 @@ export class SignalIntakeService {
     const c = classifyCommentary(text, pf, vocab);
     if (c?.kind !== 'INFO' || !c.wantsRefs) return c;
     return classifyCommentary(text, pf, vocab, await this.refs(postedAt));
+  }
+
+  /** Index reference closes for the strike-sanity check; empty (no check) when they cannot be read. */
+  private async spots(at: Date): Promise<RefPrices> {
+    try {
+      return await this.refs(at);
+    } catch {
+      return new Map<string, number>();
+    }
   }
 
   private refs(at: Date): Promise<RefPrices> {
@@ -615,11 +685,18 @@ export class SignalIntakeService {
     base: Omit<ClassRow, 'status'>,
     llmResult: unknown,
   ): Promise<void> {
+    // Strike sanity (audit 2026-11-27): "SENSEX 25850 PE" — a strike > 15% from its index — goes to the one index it fits.
+    const check = rematchStrike(p, await this.spots(postedAt));
+    let reMatched: string | null = null;
+    if (check.action === 'rematch') {
+      reMatched = `reMatched: strike ${p.strike} is ${check.from} → ${check.underlying} (the only index within 15%)`;
+      p = { ...p, underlying: check.underlying, tags: [...p.tags, `REMATCHED_FROM:${check.from}`] };
+    }
     const W = this.config.clusterWindowMs;
     const key = dedupKey({ channelId: evt.channelId, underlying: p.underlying, instrumentKind: p.instrumentKind, strike: p.strike, side: p.side, entryLow: p.entryLow, entryHigh: p.entryHigh });
     const dup = await this.repo.duplicateOf(key, new Date(postedAt.getTime() - W));
     if (dup) {
-      await this.repo.saveClass({ ...base, status: 'DUPLICATE', parser, signalId: dup, llmResult, reason: 'same idea re-posted in this channel' });
+      await this.repo.saveClass({ ...base, status: 'DUPLICATE', parser, signalId: dup, llmResult, reason: reMatched ? `same idea re-posted in this channel; ${reMatched}` : 'same idea re-posted in this channel' });
       return;
     }
     const ex = await this.expiryAndContract(p, postedAt);
@@ -673,7 +750,7 @@ export class SignalIntakeService {
     }
     await this.repo.flagConflict(plan.conflictClusterIds.filter((id) => id !== clusterId));
     await this.repo.setSignalCluster(signalId, clusterId);
-    await this.repo.saveClass({ ...base, status: 'SIGNAL', parser, signalId, llmResult });
+    await this.repo.saveClass({ ...base, status: 'SIGNAL', parser, signalId, llmResult, ...(reMatched ? { reason: reMatched } : {}) });
 
     if (this.now().getTime() - postedAt.getTime() > this.config.readyMaxAgeMs) return; // history: stored, not traded
     const ready = (id: string): SignalReadyEvent => ({ signalId: id, clusterId, agreeCount: plan.cluster.agreeCount, conflict: plan.cluster.conflict });
@@ -692,12 +769,16 @@ export class SignalIntakeService {
 
   // ─── Updates ───────────────────────────────────────────────────────────────
 
-  private async linkUpdate(evt: TelegramMessageEvent, postedAt: Date, u: ParsedUpdate, base: Omit<ClassRow, 'status'>): Promise<void> {
+  private async linkUpdate(evt: TelegramMessageEvent, postedAt: Date, u: ParsedUpdate, base: Omit<ClassRow, 'status'>, opts: { orphanRecap?: string } = {}): Promise<void> {
     const recent = await this.repo.latestInChannel(evt.channelId, new Date(postedAt.getTime() - UPDATE_LOOKBACK_MS));
     const before = recent.filter((s) => s.receivedAt.getTime() <= postedAt.getTime());
     const target =
       before.find((s) => (u.underlying ? s.underlying === u.underlying : true) && (u.strike !== null ? s.strike === u.strike : true)) ??
       (u.underlying === null && u.strike === null ? before[0] : undefined);
+    if (!target && opts.orphanRecap) {
+      await this.repo.saveClass({ ...base, status: 'RECAP', updateKind: u.kind, reason: opts.orphanRecap });
+      return;
+    }
     if (!target) {
       await this.repo.saveClass({ ...base, status: 'UPDATE_ORPHAN', updateKind: u.kind, reason: `no earlier signal in this channel (${u.kinds.join(',')})` });
       return;

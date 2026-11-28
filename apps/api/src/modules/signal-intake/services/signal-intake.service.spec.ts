@@ -327,12 +327,18 @@ describe('SignalIntakeService — image posts (vision)', () => {
     expect(signalEvents(m)).toEqual([]);
   });
 
-  it('a caption that is itself a call is parsed by the rules; the image is not sent', async () => {
-    const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] });
+  it('a caption that is itself a call is parsed by the rules; the image is still read for its description (audit 2026-11-27)', async () => {
+    const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [], description: 'NIFTY option chain screenshot' });
     const m = make({ vision: v });
     await m.svc.handle(img(m, 'm1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
-    expect(classify).not.toHaveBeenCalled();
-    expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', parser: 'rule' });
+    await flush();
+    await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
+    expect(classify).toHaveBeenCalledTimes(1);
+    expect(m.mem.signals).toHaveLength(1);
+    expect(m.mem.classes.get('m1')).toMatchObject({
+      status: 'SIGNAL', parser: 'rule', signalId: 'sig1',
+      llmResult: expect.objectContaining({ imageSha256: IMG.sha256, description: 'NIFTY option chain screenshot' }),
+    });
   });
 
   it('cached by image sha256: the same image in another channel costs no second call', async () => {
@@ -520,15 +526,15 @@ describe('SignalIntakeService — image posts (vision)', () => {
   describe('signal.vision.done with no reading (the image is not / could not be read)', () => {
     const skipped = (m: ReturnType<typeof make>) => m.emitted.filter(([e]) => e === 'signal.vision.done').map(([, p]) => p);
 
-    it('a caption that is a call: the call as before, then vision.done(skipped) with the caption', async () => {
-      const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] });
+    it('a caption that is a call with vision unavailable: the call as before, then vision.done(skipped) with the caption', async () => {
+      const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] }, { unavailable: 'SENTINEL_JUDGE=bedrock cannot carry images' });
       const m = make({ vision: v });
       await m.svc.handle(img(m, 'm1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
       expect(classify).not.toHaveBeenCalled();
       expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', parser: 'rule' });
       expect(m.emitted.map(([e]) => e)).toEqual(['signal.ready', 'signal.vision.done']);
       expect(skipped(m)).toEqual([
-        { messageId: 'm1', channelId: 'A', postedAt: T0, text: 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', reading: null, skipped: expect.stringContaining('caption is a call') },
+        { messageId: 'm1', channelId: 'A', postedAt: T0, text: 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', reading: null, skipped: 'image not read: SENTINEL_JUDGE=bedrock cannot carry images' },
       ]);
     });
 
@@ -657,14 +663,18 @@ describe('SignalIntakeService — INFO / RECAP (owner 2026-10-24)', () => {
     expect(mem.signals).toHaveLength(0);
   });
 
-  it('an image whose caption carries the view is INFO from the caption; the image is not read', async () => {
-    const classify = jest.fn();
+  it('an image whose caption carries the view is INFO from the caption; the image is read for its description only', async () => {
+    const classify = jest.fn(async (): Promise<VisionReply> => ({ kind: 'SIGNAL', isSignal: true, signals: [], description: 'NIFTY put OI bars' }));
     const vision = { unavailable: () => null, usedSince: jest.fn(async () => 0), classify } as unknown as SignalVision;
     const m = make({ vision });
     const media = { kind: 'photo' as const, path: '/x.jpg', sha256: 'c'.repeat(64), mimeType: 'image/jpeg', bytes: 1000 };
     await m.svc.handle({ ...m.msg('m1', 'A', EX.caption), hasMedia: true, media });
-    expect(classify).not.toHaveBeenCalled();
-    expect(m.mem.classes.get('m1')).toMatchObject({ status: 'INFO' });
+    await flush();
+    await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
+    expect(classify).toHaveBeenCalledTimes(1);
+    expect(m.mem.classes.get('m1')).toMatchObject({ status: 'INFO', parser: 'rule', llmResult: expect.objectContaining({ description: 'NIFTY put OI bars', imageSha256: media.sha256 }) });
+    expect(m.mem.signals).toHaveLength(0);
+    expect(m.emitted.filter(([e]) => e === 'signal.vision.done').map(([, p]) => (p.reading as { description?: string }).description)).toEqual(['NIFTY put OI bars']);
     expect(m.mem.infos.get('m1')?.items).toEqual([
       { underlying: 'NIFTY', bias: 'BULL', levels: [22400], targetLevel: null, oi: { strike: 22400, side: 'PE', note: 'put OI 3x → support' }, condition: null, horizon: null, kind: 'VIEW' },
     ]);
@@ -800,5 +810,139 @@ describe('SignalIntakeService — INFO / RECAP (owner 2026-10-24)', () => {
 
     const disabled = make({ env: { SIGNAL_INFO_RECLASSIFY: 'off' } });
     expect(await disabled.svc.reclassifyStored()).toEqual({ scanned: 0, info: 0, recap: 0, noise: 0, kept: 0 });
+  });
+});
+
+describe('SignalIntakeService — supreme fixes W3 (audit 2026-11-27)', () => {
+  const IMG = { kind: 'photo' as const, path: '/data/w3.jpg', sha256: 'd'.repeat(64), mimeType: 'image/jpeg', bytes: 50_000 };
+  const silverCall = { underlying: 'SILVER', instrumentKind: 'FUT', strike: null, expiry: null, side: 'BUY', entryType: 'ABOVE', entryLow: 40, entryHigh: 40, sl: 37, targets: [44], qty: null, horizon: 'INTRADAY', confidence: 0.8 };
+  const DESC = 'Silver chart, 40 to 44 move circled, gains-done stamp';
+  const vision = (reply: Partial<VisionReply> = {}, o: { used?: number } = {}) => {
+    const classify = jest.fn(async (): Promise<VisionReply> => ({ kind: 'NOISE', isSignal: false, signals: [], description: DESC, ...reply }) as VisionReply);
+    return { v: { unavailable: () => null, usedSince: jest.fn(async () => o.used ?? 0), classify } as unknown as SignalVision, classify };
+  };
+  const img = (m: ReturnType<typeof make>, id: string, ch: string, text = '', atMin = 0) => ({ ...m.msg(id, ch, text, atMin), hasMedia: true, media: IMG });
+  const done = (m: ReturnType<typeof make>) => m.emitted.filter(([e]) => e === 'signal.vision.done').map(([, p]) => p as { reading: Record<string, unknown> | null; skipped?: string });
+  const drain = async (m: ReturnType<typeof make>) => {
+    await flush();
+    await m.svc.handle(m.msg('zz', 'Z', 'Good night', 59));
+  };
+
+  describe('every image post goes to vision', () => {
+    it('a recap caption: RECAP stands, the row gains the image description, vision.done carries it', async () => {
+      const { v, classify } = vision({ kind: 'SIGNAL', isSignal: true, signals: [silverCall] as never });
+      const m = make({ vision: v });
+      await m.svc.handle(img(m, 'm1', 'A', 'Live Analysis of 23th OCT\nBANKNIFTY 52000CE 180 TO 260'));
+      await drain(m);
+      expect(classify).toHaveBeenCalledTimes(1);
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'RECAP', llmResult: expect.objectContaining({ description: DESC, imageSha256: IMG.sha256 }) });
+      expect(m.mem.signals).toHaveLength(0);
+      expect(done(m)).toEqual([expect.objectContaining({ reading: expect.objectContaining({ description: DESC }) })]);
+    });
+
+    it('an update caption: the UPDATE link stands and gains the description', async () => {
+      const { v } = vision();
+      const m = make({ vision: v });
+      await m.svc.handle(m.msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140/160'));
+      await m.svc.handle(img(m, 'm2', 'A', 'trail SL to cost', 5));
+      await drain(m);
+      expect(m.mem.classes.get('m2')).toMatchObject({ status: 'UPDATE', updateKind: 'TRAIL_SL', signalId: 'sig1', llmResult: expect.objectContaining({ description: DESC }) });
+    });
+
+    it('a describe-only read that is capped / fails never overwrites the caption class', async () => {
+      const capped = make({ vision: vision({}, { used: 120 }).v });
+      await capped.svc.handle(img(capped, 'm1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+      expect(capped.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', parser: 'rule', signalId: 'sig1' });
+      expect(done(capped)).toEqual([expect.objectContaining({ reading: null, skipped: 'daily vision cap 120 reached' })]);
+
+      const classify = jest.fn(async () => {
+        throw new Error('claude CLI: timed out');
+      });
+      const failed = make({ vision: { unavailable: () => null, usedSince: jest.fn(async () => 0), classify } as unknown as SignalVision });
+      await failed.svc.handle(img(failed, 'm1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+      await drain(failed);
+      expect(failed.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', parser: 'rule', signalId: 'sig1' });
+      expect(done(failed)).toEqual([expect.objectContaining({ reading: null, skipped: expect.stringContaining('vision failed') })]);
+    });
+
+    it('an LLM-parse reply already on the row is kept whole; the image reading rides under `image`', async () => {
+      const m = make({ vision: vision().v });
+      const prior = { isSignal: true, signals: [] };
+      await m.mem.store.saveClass({ messageId: 'm1', channelId: 'A', postedAt: T0, textHash: 'h', status: 'SIGNAL', parser: 'llm', llmResult: prior, signalId: 'sigX' });
+      const svc = m.svc as unknown as { applyVision: (...a: unknown[]) => Promise<void> };
+      const reply: VisionReply = { kind: 'NOISE', isSignal: false, signals: [], description: DESC } as VisionReply;
+      await svc.applyVision(img(m, 'm1', 'A'), T0, IMG, reply, { messageId: 'm1', channelId: 'A', postedAt: T0, textHash: 'h' }, 'llm', true);
+      expect(m.mem.classes.get('m1')).toMatchObject({
+        status: 'SIGNAL', parser: 'llm', signalId: 'sigX',
+        llmResult: { ...prior, image: expect.objectContaining({ description: DESC }), description: DESC, imageSha256: IMG.sha256 },
+      });
+    });
+
+    it('an image post R could not download (no caption) is NOISE with the reason, not "empty"', async () => {
+      const m = make({ vision: vision().v });
+      await m.svc.handle({ ...m.msg('m1', 'A', ''), hasMedia: true });
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', reason: 'empty caption; image not downloaded' });
+    });
+  });
+
+  describe('result posts are RECAP, never a new signal', () => {
+    it('Mr. P "Silver 40 to 44++ … gains done" (text and image) → RECAP, no signal, even when vision says SIGNAL', async () => {
+      const { v } = vision({ kind: 'SIGNAL', isSignal: true, signals: [silverCall] as never });
+      const m = make({ vision: v });
+      await m.svc.handle(m.msg('m1', 'A', 'Silver 40 to 44++ … gains done'));
+      await m.svc.handle(img(m, 'm2', 'A', 'Silver buy 40 to 44++ … gains done 🔥', 1));
+      await drain(m);
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'RECAP', reason: expect.stringMatching(/^result:/) });
+      expect(m.mem.classes.get('m2')).toMatchObject({ status: 'RECAP', llmResult: expect.objectContaining({ description: DESC }) });
+      expect(m.mem.signals).toHaveLength(0);
+      expect(m.emitted.filter(([e]) => e === 'signal.ready')).toEqual([]);
+    });
+
+    it('a rule-parseable post that reports its result is not a call', async () => {
+      const m = make();
+      await m.svc.handle(m.msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140 🎯 done'));
+      expect(m.mem.signals).toHaveLength(0);
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'RECAP' });
+    });
+
+    it('"target hit" for a call of the channel stays its UPDATE; with no call to link it is RECAP (not an orphan)', async () => {
+      const m = make();
+      await m.svc.handle(m.msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140/160'));
+      await m.svc.handle(m.msg('m2', 'A', 'Target 1 hit', 10));
+      await m.svc.handle(m.msg('m3', 'C', 'Target 1 hit', 11));
+      expect(m.mem.classes.get('m2')).toMatchObject({ status: 'UPDATE', updateKind: 'TARGET_HIT', signalId: 'sig1' });
+      expect(m.mem.classes.get('m3')).toMatchObject({ status: 'RECAP', reason: expect.stringMatching(/^result:/) });
+    });
+  });
+
+  describe('strike sanity', () => {
+    const setRefs = (m: ReturnType<typeof make>, rows: Array<[string, number]>) => {
+      m.mem.refs.clear();
+      for (const [k, s] of rows) m.mem.refs.set(k, s);
+    };
+
+    it('"SENSEX 25850 PE" with NIFTY the only index within 15% → a NIFTY call, reMatched recorded', async () => {
+      const m = make();
+      setRefs(m, [['NIFTY', 26_000], ['SENSEX', 85_000], ['BANKNIFTY', 59_000]]);
+      await m.svc.handle(m.msg('m1', 'A', 'BUY SENSEX 25850 PE ABOVE 120 SL 100 TGT 140'));
+      expect(m.mem.signals[0]).toMatchObject({ underlying: 'NIFTY', strike: 25_850, tags: expect.arrayContaining(['REMATCHED_FROM:SENSEX']) });
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', reason: expect.stringContaining('reMatched') });
+    });
+
+    it('two indices fit (NIFTY and FINNIFTY) → left as named (unresolved as today)', async () => {
+      const m = make();
+      setRefs(m, [['NIFTY', 26_000], ['SENSEX', 85_000], ['FINNIFTY', 27_800]]);
+      await m.svc.handle(m.msg('m1', 'A', 'BUY SENSEX 25850 PE ABOVE 120 SL 100 TGT 140'));
+      expect(m.mem.signals[0]).toMatchObject({ underlying: 'SENSEX', strike: 25_850 });
+      expect(m.mem.signals[0].tags.some((t) => t.startsWith('REMATCHED'))).toBe(false);
+    });
+
+    it('a strike near its index is untouched; no reference close → no check', async () => {
+      const m = make();
+      await m.svc.handle(m.msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+      m.mem.refs.clear();
+      await m.svc.handle(m.msg('m2', 'B', 'BUY SENSEX 25850 PE ABOVE 120 SL 100 TGT 140', 1));
+      expect(m.mem.signals.map((s) => s.underlying)).toEqual(['NIFTY', 'SENSEX']);
+    });
   });
 });

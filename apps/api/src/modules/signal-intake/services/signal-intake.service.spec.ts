@@ -898,9 +898,25 @@ describe('SignalIntakeService — supreme fixes W3 (audit 2026-11-27)', () => {
       expect(m.emitted.filter(([e]) => e === 'signal.ready')).toEqual([]);
     });
 
-    it('a rule-parseable post that reports its result is not a call', async () => {
+    it('a result AND a new call with entry + stop (or entry + target) stays a SIGNAL for the new call (ruling 2026-11-28)', async () => {
+      // Two instruments in one post: the rule parser passes it to the LLM parse (never RECAP), which reads the new call.
+      const niftyCall = { underlying: 'NIFTY', instrumentKind: 'CE', strike: 24000, expiry: null, side: 'BUY', entryType: 'ABOVE', entryLow: 120, entryHigh: 120, sl: 100, targets: [], qty: null, horizon: 'INTRADAY', confidence: 0.8 };
+      const bnCall = { ...niftyCall, underlying: 'BANKNIFTY', instrumentKind: 'PE', strike: 52000, entryLow: 300, entryHigh: 300, sl: null, targets: [350] };
+      const llm = jest.fn(async (text: string): Promise<LlmParseReply> => ({ isSignal: true, signals: [text.includes('BANKNIFTY') ? bnCall : niftyCall] as never }));
+      const m = make({ llm: llm as jest.Mock });
+      await m.svc.handle(m.msg('m1', 'A', 'Silver 40 to 44++ gains done ✅ Now BUY NIFTY 24000 CE ABOVE 120 SL 100'));
+      await flush();
+      await m.svc.handle(m.msg('m2', 'B', 'Crude 120 to 160 done. BUY BANKNIFTY 52000 PE ABOVE 300 TGT 350', 1));
+      await flush();
+      await m.svc.handle(m.msg('z', 'Z', 'Good night', 2));
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL' });
+      expect(m.mem.classes.get('m2')).toMatchObject({ status: 'SIGNAL' });
+      expect(m.mem.signals.map((s) => [s.underlying, s.strike])).toEqual([['NIFTY', 24000], ['BANKNIFTY', 52000]]);
+    });
+
+    it('a pure result post that the rule parser could read as a bare entry is RECAP', async () => {
       const m = make();
-      await m.svc.handle(m.msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140 🎯 done'));
+      await m.svc.handle(m.msg('m1', 'A', 'Silver buy 40 to 44++ gains done'));
       expect(m.mem.signals).toHaveLength(0);
       expect(m.mem.classes.get('m1')).toMatchObject({ status: 'RECAP' });
     });
@@ -929,12 +945,24 @@ describe('SignalIntakeService — supreme fixes W3 (audit 2026-11-27)', () => {
       expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', reason: expect.stringContaining('reMatched') });
     });
 
-    it('two indices fit (NIFTY and FINNIFTY) → left as named (unresolved as today)', async () => {
+    /** ASSUMED 2026-11-27 closes (NIFTY ~25 690 per the controller; the others rounded late-Nov levels). */
+    const NOV27: Array<[string, number]> = [['NIFTY', 25_690], ['BANKNIFTY', 58_900], ['SENSEX', 84_500], ['FINNIFTY', 27_300], ['MIDCPNIFTY', 13_400], ['BANKEX', 65_800]];
+
+    it('prod 2026-11-27 SHRI RAM "SENSEX 25850 PE": NIFTY and FINNIFTY fit → NIFTY (closest); reMatched {from, to, candidates}', async () => {
       const m = make();
-      setRefs(m, [['NIFTY', 26_000], ['SENSEX', 85_000], ['FINNIFTY', 27_800]]);
+      setRefs(m, NOV27);
       await m.svc.handle(m.msg('m1', 'A', 'BUY SENSEX 25850 PE ABOVE 120 SL 100 TGT 140'));
-      expect(m.mem.signals[0]).toMatchObject({ underlying: 'SENSEX', strike: 25_850 });
-      expect(m.mem.signals[0].tags.some((t) => t.startsWith('REMATCHED'))).toBe(false);
+      expect(m.mem.signals[0]).toMatchObject({ underlying: 'NIFTY', strike: 25_850, tags: expect.arrayContaining(['REMATCHED_FROM:SENSEX']) });
+      const reason = String(m.mem.classes.get('m1')?.reason);
+      expect(JSON.parse(reason.replace(/^reMatched /, ''))).toEqual({ from: 'SENSEX', to: 'NIFTY', candidates: ['NIFTY', 'FINNIFTY'] });
+    });
+
+    it('prod 2026-11-27 Stock Gainers "SENSEX 62500 PE": BANKNIFTY and BANKEX fit → BANKEX (5.0% vs 6.1%)', async () => {
+      const m = make();
+      setRefs(m, NOV27);
+      await m.svc.handle(m.msg('m1', 'A', 'BUY SENSEX 62500 PE ABOVE 300 SL 250 TGT 400'));
+      expect(m.mem.signals[0]).toMatchObject({ underlying: 'BANKEX', strike: 62_500 });
+      expect(m.mem.classes.get('m1')?.reason).toBe('reMatched {"from":"SENSEX","to":"BANKEX","candidates":["BANKEX","BANKNIFTY"]}');
     });
 
     it('a strike near its index is untouched; no reference close → no check', async () => {

@@ -8,7 +8,7 @@ import { inferExpiry } from '../domain/expiry';
 import { classifyCommentary, hasBias, recapReason, type CommentaryClass, type InfoItem, type RefPrices } from '../domain/info';
 import { CALL_AT_TAG, clockOrNull, readImageDescription, validateInfoItems, validateLlmSignal, type InfoLlmReply, type LlmParseReply, type VisionReply } from '../domain/llm-schema';
 import { prefilter, type PrefilterResult } from '../domain/prefilter';
-import { resultPostReason } from '../domain/result-post';
+import { hasNewCall, resultPostReason } from '../domain/result-post';
 import { parseSignal } from '../domain/rule-parser';
 import { rematchStrike } from '../domain/strike-sanity';
 import {
@@ -186,7 +186,9 @@ export class SignalIntakeService {
     const parsed = pf.pass ? parseSignal(text, vocab, pf.norm) : null;
 
     // "gains done" / "target hit" / "x to y++ done": a completed outcome is never a new signal (audit 2026-11-27).
-    const result = resultPostReason(pf.norm);
+    // A result that ALSO gives a new call (entry + stop, or entry + target) is that call (ruling 2026-11-28).
+    const newCall = hasNewCall(pf.norm) || (parsed !== null && (parsed.sl !== null || parsed.targets.length > 0));
+    const result = newCall ? null : resultPostReason(pf.norm);
     if (prior) {
       await this.reclassifyEdit(evt, prior, result ? null : parsed, base);
       return null;
@@ -689,7 +691,7 @@ export class SignalIntakeService {
     const check = rematchStrike(p, await this.spots(postedAt));
     let reMatched: string | null = null;
     if (check.action === 'rematch') {
-      reMatched = `reMatched: strike ${p.strike} is ${check.from} → ${check.underlying} (the only index within 15%)`;
+      reMatched = `reMatched ${JSON.stringify({ from: check.from, to: check.underlying, candidates: check.candidates })}`;
       p = { ...p, underlying: check.underlying, tags: [...p.tags, `REMATCHED_FROM:${check.from}`] };
     }
     const W = this.config.clusterWindowMs;

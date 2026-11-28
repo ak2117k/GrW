@@ -14,6 +14,19 @@ const PATTERNS: Array<[string, RegExp]> = [
   ['move done', new RegExp(`\\b\\d+(\\.\\d+)?\\s+TO\\s+\\d+(\\.\\d+)?\\s+([A-Z]+\\s+)?${OUTCOME}\\b`)],
 ];
 
+const CALL_VERBS = /\b(BUY|SELL|LONG|SHORT|BTST|STBT|ACCUMULATE)\b/;
+/** A stop or a target WITH a price ("SL 100", "TGT 140", "TGT2 180") — "TGT DONE" / "TGT HIT" are not. */
+const RISK_LEVEL = /\b(SL|TGT\d?)\s+\d+(\.\d+)?\b/;
+
+/**
+ * The post also gives a NEW call: a call verb with a stop or a target price (ruling 2026-11-28: a result + a new
+ * call with entry and stop, or entry and target, stays a SIGNAL for the new call; only a pure result is RECAP).
+ */
+export function hasNewCall(norm: Pick<Normalised, 'text'>): boolean {
+  const text = norm.text ?? '';
+  return CALL_VERBS.test(text) && RISK_LEVEL.test(text);
+}
+
 /** `result: <what>` when the post reports a completed outcome, else null. */
 export function resultPostReason(norm: Pick<Normalised, 'text'>): string | null {
   const text = norm.text ?? '';

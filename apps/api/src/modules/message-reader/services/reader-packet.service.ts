@@ -5,12 +5,15 @@ import { SignalContextService } from '../../signal-trader/services/signal-contex
 import { SIGNAL_TRADER_CONFIG } from '../../signal-trader/services/signal-trader.service';
 import type { SignalTraderConfig } from '../../signal-trader/domain/signal-trader.config';
 import { segmentFor } from '../../signal-trader/domain/contract-resolver';
-import { istYmd } from '../../mbm/domain/chain-snapshot';
+import { atmStrike, istYmd } from '../../mbm/domain/chain-snapshot';
+import type { QuoteResponse } from '../../market-data/utils/tick-to-quote';
+import { segmentOf } from '../../signal-intake/domain/contract';
 import type { DailyBar } from '../../signal-intake/domain/info-outcome';
 import type { Vocabulary } from '../../signal-intake/domain/vocabulary';
 import { SignalVocabularyService } from '../../signal-intake/services/signal-vocabulary.service';
 import { infoRefOf, SIGNAL_INFO_BARS, SIGNAL_INFO_MASTER, type InfoBars } from '../../signal-intake/services/signal-outcome.service';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
+import { chainSliceStrikes, optionLegsOf, resolveOptionLeg, type OptionLeg, type ResolvedOptionLeg } from '../domain/option-legs';
 import { quoteIsStale, readerQuote, type Bar15m, type QuoteLtp } from '../domain/reader-quote';
 import { MESSAGE_READER_CONFIG, type MessageReaderConfig } from '../message-reader.config';
 import { READER_PACKET_SOURCES, type ReaderPacketSources } from './reader-packet.sources';
@@ -54,6 +57,14 @@ const MAX_QUOTE_FETCHES = 2;
 const QUOTE_BUDGET_PER_MIN = 6;
 const QUOTE_BUDGET_WINDOW_MS = 60_000;
 const MAX_ROWS = 10;
+/** A named option's block is shared for this long (UNAVAILABLE_CACHE_MS when unavailable). */
+const OPTION_CACHE_MS = 60_000;
+/**
+ * A broker FULL quote is stamped when it arrives; the resolver's daily-candle fallback carries the candle's
+ * day. A contract quote older than this did not come from the live quote, so the slice is not asked for
+ * (every token the live quote misses would cost one candle call on the owner's historical lane).
+ */
+const LIVE_QUOTE_MS = 2 * 60_000;
 
 /** Index quotes for the pulse (tokens as in market-context's UNDERLYING_TOKEN_MAP). */
 const PULSE_INDICES = [
@@ -71,6 +82,7 @@ const SRC = {
   channel: 'message_readings (this channel, last 30 min)',
   notes: 'message_readings (today, confirmed / contradicted market claims)',
   quote: 'market-quote-resolver + owner daily / 15m bars (index, NSE cash, MCX front future)',
+  option: 'instrument master + market-quote-resolver (the named option contract and an ATM +-3 chain slice)',
 };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -144,6 +156,7 @@ export class ReaderPacketService {
   private buildsInFlight = 0;
   private readonly buildWaiters: Array<() => void> = [];
   private readonly quoteCache = new Map<string, CacheEntry<PacketBlock>>();
+  private readonly optionCache = new Map<string, CacheEntry<PacketBlock>>();
   /** Daily bars per EXCHANGE:token for one IST session day (the previous-session stats do not move intraday). */
   private readonly dailyCache = new Map<string, { day: string; promise: Promise<DailyBar[]> }>();
   private readonly quotePermits = new DeadlinePermits(MAX_QUOTE_FETCHES);
@@ -166,9 +179,11 @@ export class ReaderPacketService {
     const started = Date.now();
     const names = [...new Set(i.underlyings.map((u) => u.trim().toUpperCase()).filter(Boolean))].slice(0, MAX_INSTRUMENTS);
     const owner = this.traderCfg.ownerUserId;
+    // The option contracts the post names, only on the instruments this packet carries.
+    const legs = this.optionLegs(i.text, names);
     const [marketPulse, instruments, channelRecent, todayNotes] = await Promise.all([
       this.marketPulse(owner),
-      Promise.all(names.map((u) => this.instrumentEntry(u, owner, i.now, started))),
+      Promise.all(names.map((u) => this.instrumentEntry(u, owner, i.now, started, legs))),
       this.block(SRC.channel, async () => (await this.sources.recentChannelPosts(i.channelId, new Date(i.now.getTime() - CHANNEL_WINDOW_MS))).slice(0, MAX_ROWS)),
       this.block(SRC.notes, async () => (await this.sources.todayMarketNotes(istYmd(i.now))).slice(0, MAX_ROWS)),
     ]);
@@ -190,9 +205,163 @@ export class ReaderPacketService {
     return { packet: { ...packet, instruments: { ...packet.instruments, ...Object.fromEntries(added) } }, ms: Date.now() - started };
   }
 
-  private async instrumentEntry(u: string, owner: string | null, now: Date, started: number): Promise<readonly [string, Record<string, unknown>]> {
-    const [ctx, quote] = await Promise.all([this.instrument(u, owner, now, started), this.quote(u, owner, now, started)]);
-    return [u, { ...ctx, quote }] as const;
+  private async instrumentEntry(
+    u: string,
+    owner: string | null,
+    now: Date,
+    started: number,
+    legs: Promise<OptionLeg[]> = Promise.resolve([]),
+  ): Promise<readonly [string, Record<string, unknown>]> {
+    const [ctx, quote, options] = await Promise.all([
+      this.instrument(u, owner, now, started),
+      this.quote(u, owner, now, started),
+      legs.then((ls) => Promise.all(ls.filter((l) => l.underlying === u).map(async (l) => [l, await this.option(l, owner, now, started)] as const))),
+    ]);
+    // The first option the post names on this underlying is `option`; any further one `option_<strike><CE|PE>`.
+    const opt = Object.fromEntries(options.map(([l, b], k) => [k === 0 ? 'option' : `option_${l.strike}${l.kind}`, b]));
+    return [u, { ...ctx, quote, ...opt }] as const;
+  }
+
+  /** The post's option legs (vocabulary match; without it a local regex over `names`); never throws. */
+  private async optionLegs(text: string, names: readonly string[]): Promise<OptionLeg[]> {
+    try {
+      const vocab = this.vocab ? await this.vocab.get().catch(() => null) : null;
+      const have = new Set(names);
+      return optionLegsOf(text, vocab, names).filter((l) => have.has(l.underlying));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * One named option: the contract (the post's expiry, else the nearest listed) with its LTP, previous
+   * close, change and OI, plus an ATM +-3 chain slice (CE / PE LTP + OI) around the underlying's spot (its
+   * own quote block, or the pulse index; the named strike when neither arrives in half the box). Cached per
+   * contract like the quote block (60 s; 10 s when unavailable). Broker cost: one probe quote for the
+   * contract, then ONE batch for the slice only when the probe came from the live broker quote; it takes a
+   * slot of the same per-minute quote budget and a permit of the same quote limit as the quote block.
+   */
+  private option(leg: OptionLeg, owner: string | null, now: Date, packetStartedAt: number): Promise<PacketBlock> {
+    const key = `${leg.underlying}|${leg.strike}|${leg.kind}|${JSON.stringify(leg.expiryHint)}`;
+    const at = Date.now();
+    const hit = this.optionCache.get(key);
+    if (hit && at - hit.at < hit.ttl) return hit.promise;
+    for (const [k, v] of this.optionCache) if (at - v.at >= v.ttl) this.optionCache.delete(k);
+    const promise = this.block(SRC.option, () => this.fetchOption(leg, owner, now, packetStartedAt), this.cfg.packetMs + SAFETY_MARGIN_MS);
+    const entry: CacheEntry<PacketBlock> = { at, ttl: OPTION_CACHE_MS, promise };
+    this.optionCache.set(key, entry);
+    void promise.then((r) => {
+      if (r.status === 'unavailable') entry.ttl = UNAVAILABLE_CACHE_MS;
+    });
+    return promise;
+  }
+
+  private async fetchOption(leg: OptionLeg, owner: string | null, now: Date, packetStartedAt: number): Promise<unknown> {
+    if (!owner) throw new Error('no owner user id (HUB_OWNER_USER_ID) to quote with');
+    const [rows, vocab] = await Promise.all([
+      this.master ? this.master.rows().catch(() => null) : Promise.resolve(null),
+      this.vocab ? this.vocab.get().catch(() => null) : Promise.resolve(null),
+    ]);
+    if (!rows?.length) throw new Error('no instrument master to resolve the option contract');
+    const cls = vocab?.classOf.get(leg.underlying);
+    const seg = cls ? segmentOf(leg.underlying, leg.kind, cls) : segmentFor({ underlying: leg.underlying, instrumentKind: 'FUT' });
+    const r = resolveOptionLeg(rows, leg, seg, now);
+    if (!r.ok) throw new Error(r.reason);
+    const spot = await this.optionSpot(leg.underlying, owner, now, packetStartedAt);
+    const deadlineAt = packetStartedAt + this.cfg.packetMs;
+    const release = await this.admitQuote(deadlineAt);
+    try {
+      return await this.readOption(leg, r, spot, owner, now, deadlineAt);
+    } finally {
+      release();
+    }
+  }
+
+  /** The underlying's spot for the ATM: the pulse for its indices, else its own quote block; null after half the box. */
+  private async optionSpot(underlying: string, owner: string, now: Date, packetStartedAt: number): Promise<{ value: number; source: string } | null> {
+    const ms = Math.max(1, packetStartedAt + Math.floor(this.cfg.packetMs / 2) - Date.now());
+    const b = await this.block(
+      'spot',
+      async () => {
+        if (PULSE_INDICES.some((ix) => ix.name === underlying)) {
+          const ix = (await this.marketPulse(owner)).indices;
+          const ltp = ix.status === 'present' ? (ix.value as Record<string, { ltp?: number }>)[underlying]?.ltp : undefined;
+          if (typeof ltp === 'number' && ltp > 0) return { value: ltp, source: 'marketPulse.indices' };
+        }
+        const q = await this.quote(underlying, owner, now, packetStartedAt);
+        const ltp = q.status === 'present' ? (q.value as { ltp?: number }).ltp : undefined;
+        if (typeof ltp === 'number' && ltp > 0) return { value: ltp, source: `instruments.${underlying}.quote` };
+        throw new Error('no spot');
+      },
+      ms,
+    );
+    return b.status === 'present' ? (b.value as { value: number; source: string }) : null;
+  }
+
+  private async readOption(
+    leg: OptionLeg,
+    r: ResolvedOptionLeg,
+    spot: { value: number; source: string } | null,
+    owner: string,
+    now: Date,
+    deadlineAt: number,
+  ): Promise<unknown> {
+    const left = () => Math.max(1, deadlineAt - Date.now());
+    const c = r.contract;
+    const probe = await this.block(
+      SRC.option,
+      async () => {
+        const q = (await this.quotes.resolveQuotes(owner, [{ token: c.token, exchange: c.exchange, symbol: c.tradingsymbol }])).get(c.token);
+        if (!q || !(q.ltp > 0)) throw new Error(`no live quote for ${c.exchange}:${c.tradingsymbol}`);
+        if (quoteIsStale(c.exchange, new Date(q.timestamp), now)) {
+          throw new Error(`stale quote: last update ${new Date(q.timestamp).toISOString()} is over 5 min old during the session (daily-candle fallback or no ticks)`);
+        }
+        return q;
+      },
+      left(),
+    );
+    if (probe.status !== 'present') throw new Error(probe.reason);
+    const q = probe.value as QuoteResponse;
+    const missing = ['oiChange: the broker quote carries open interest only (no previous-session OI)'];
+    const ladder = [...r.strikes.keys()];
+    const atm = spot ? atmStrike(ladder, spot.value) : null;
+    const slice = chainSliceStrikes(ladder, atm ?? leg.strike);
+    let chain: Array<{ strike: number; ce: { ltp: number; oi: number | null } | null; pe: { ltp: number; oi: number | null } | null }> | null = null;
+    if (Date.now() - new Date(q.timestamp).getTime() > LIVE_QUOTE_MS) {
+      missing.push('chain: not fetched - the contract quote came from the daily-candle fallback, not the live broker quote');
+    } else {
+      const refs = slice.flatMap((k) => {
+        const s = r.strikes.get(k);
+        return [s?.ce, s?.pe].filter((x): x is { token: string; tradingsymbol: string } => !!x && x.token !== c.token).map((x) => ({ token: x.token, exchange: c.exchange, symbol: x.tradingsymbol }));
+      });
+      const b = await this.block('chain slice', () => this.quotes.resolveQuotes(owner, refs), left());
+      if (b.status !== 'present') missing.push(`chain: ${b.reason}`);
+      else {
+        const got = b.value as Map<string, QuoteResponse>;
+        const side = (x: { token: string } | null | undefined) => {
+          const v = x ? (x.token === c.token ? q : got.get(x.token)) : undefined;
+          return v && v.ltp > 0 ? { ltp: v.ltp, oi: typeof v.oi === 'number' ? v.oi : null } : null;
+        };
+        chain = slice.map((k) => ({ strike: k, ce: side(r.strikes.get(k)?.ce), pe: side(r.strikes.get(k)?.pe) }));
+      }
+    }
+    const prevClose = q.close > 0 ? q.close : null;
+    return {
+      contract: { symbol: c.tradingsymbol, exchange: c.exchange, token: c.token, underlying: leg.underlying, strike: leg.strike, optionType: leg.kind, expiry: c.expiry, expirySource: c.expirySource },
+      ltp: q.ltp,
+      prevClose,
+      change: prevClose !== null ? q.change : null,
+      changePercent: prevClose !== null ? Math.round(q.changePercent * 100) / 100 : null,
+      oi: typeof q.oi === 'number' ? q.oi : null,
+      oiChange: null,
+      at: new Date(q.timestamp).toISOString(),
+      spot: spot?.value ?? null,
+      spotSource: spot?.source ?? null,
+      atmStrike: atm,
+      sliceCentre: atm !== null ? 'ATM' : 'named strike',
+      chain,
+      missing,
+    };
   }
 
   private marketPulse(owner: string | null): Promise<MarketPulse> {
@@ -277,14 +446,27 @@ export class ReaderPacketService {
     if (!owner) throw new Error('no owner user id (HUB_OWNER_USER_ID) to quote with');
     const ref = infoRefOf(underlying, null, null, now) ?? (await this.lookupRef(underlying, now));
     if (!ref) throw new Error(`no instrument for ${underlying} in the instrument master (index / NSE cash / MCX front future)`);
-    // Budget, then permit: an over-budget / over-limit underlying never reaches the broker (no quote, no lane work).
+    const deadlineAt = packetStartedAt + this.cfg.packetMs;
+    const release = await this.admitQuote(deadlineAt);
+    try {
+      return await this.readQuote(underlying, owner, ref, now, deadlineAt);
+    } finally {
+      // Released on success, failure and at the deadline (every read in readQuote is raced against it).
+      release();
+    }
+  }
+
+  /**
+   * Budget, then permit: an over-budget / over-limit fetch never reaches the broker (no quote, no lane
+   * work). Shared by the quote and option blocks. Resolves to the permit's release, or throws the reason.
+   */
+  private async admitQuote(deadlineAt: number): Promise<() => void> {
     const t = Date.now();
     this.quoteFetchTimes = this.quoteFetchTimes.filter((x) => t - x < QUOTE_BUDGET_WINDOW_MS);
     if (this.quoteFetchTimes.length >= QUOTE_BUDGET_PER_MIN) {
       throw new Error(`reader quote budget: ${QUOTE_BUDGET_PER_MIN} new underlyings already quoted in the last minute`);
     }
     this.quoteFetchTimes.push(t);
-    const deadlineAt = packetStartedAt + this.cfg.packetMs;
     const release = await this.quotePermits.acquire(deadlineAt);
     if (!release) {
       // Refund the budget slot: nothing was fetched.
@@ -292,12 +474,7 @@ export class ReaderPacketService {
       if (i >= 0) this.quoteFetchTimes.splice(i, 1);
       throw new Error(`reader quote limit: ${MAX_QUOTE_FETCHES} quote fetches still in flight at the packet deadline`);
     }
-    try {
-      return await this.readQuote(underlying, owner, ref, now, deadlineAt);
-    } finally {
-      // Released on success, failure and at the deadline (every read in readQuote is raced against it).
-      release();
-    }
+    return release;
   }
 
   /**

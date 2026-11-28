@@ -364,7 +364,7 @@ export class SignalIntakeService {
       this.inflight.add(evt.messageId);
       if (!describeOnly) await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
       void sharedRead
-        .then((fresh) => this.serial(() => this.applyVision(evt, postedAt, media, fresh ? this.redescribed(cached, fresh) : cached, base, 'cache', describeOnly)))
+        .then((fresh) => this.serial(() => this.applyVision(evt, postedAt, media, fresh ? this.redescribed(cached, fresh) : cached, base, fresh ? 're-read' : 'cache', describeOnly)))
         .catch((e) => this.logger.warn(`[signal-intake] vision read of ${evt.messageId} failed: ${errText(e)}`))
         .finally(() => this.inflight.delete(evt.messageId));
       return;
@@ -434,7 +434,7 @@ export class SignalIntakeService {
         (reply) =>
           this.serial(() =>
             cached && useCached
-              ? this.applyVision(evt, postedAt, media, this.redescribed(cached, reply), base, 'cache', describeOnly)
+              ? this.applyVision(evt, postedAt, media, this.redescribed(cached, reply), base, 're-read', describeOnly)
               : this.applyVision(evt, postedAt, media, reply, base, 'llm', describeOnly),
           ),
         (e) =>
@@ -466,7 +466,8 @@ export class SignalIntakeService {
     media: TelegramMediaRef,
     reply: VisionReply,
     base: Omit<ClassRow, 'status'>,
-    via: 'llm' | 'cache',
+    /** 're-read': a stale cached reply re-described (its class is the cached one), countable apart from cache hits. */
+    via: 'llm' | 'cache' | 're-read',
     describeOnly = false,
   ): Promise<void> {
     const prior = await this.repo.classOf(evt.messageId);
@@ -497,7 +498,10 @@ export class SignalIntakeService {
           attempts: prior.attempts,
           reason: prior.reason,
           // A model reply already on the row (an LLM parse) is kept whole; the image reading rides under `image`.
-          llmResult: priorResult ? { ...priorResult, image: stored, description: stored.description ?? null, imageSha256: media.sha256 } : stored,
+          // The top-level copy carries its source too, so a stand-in is never read there as the model's words.
+          llmResult: priorResult
+            ? { ...priorResult, image: stored, description: stored.description ?? null, ...(stored.descriptionSource ? { descriptionSource: stored.descriptionSource } : {}), imageSha256: media.sha256 }
+            : stored,
         });
       }
       done();

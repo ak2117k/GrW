@@ -531,7 +531,7 @@ describe('SignalIntakeService — image posts (vision)', () => {
         await m.svc.handle(img(m, 'm1', 'A'));
         await drain(m);
         expect(classify).toHaveBeenCalledTimes(1);
-        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', reason: 'vision (cache): image is noise', llmResult: expect.objectContaining({ description: DESC.description, descriptionSource: 'model' }) });
+        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', reason: 'vision (re-read): image is noise', llmResult: expect.objectContaining({ description: DESC.description, descriptionSource: 'model' }) });
         expect(doneOf(m)[0].reading).toMatchObject({ description: DESC.description });
         await m.svc.handle(img(m, 'm2', 'B', '', 2));
         await drain(m, 6);
@@ -641,7 +641,7 @@ describe('SignalIntakeService — image posts (vision)', () => {
         await flush();
         expect(classify).toHaveBeenCalledTimes(1);
         expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', llmResult: expect.objectContaining({ description: DESC.description }) });
-        expect(m.mem.classes.get('m2')).toMatchObject({ status: 'NOISE', llmResult: expect.objectContaining({ description: DESC.description }) });
+        expect(m.mem.classes.get('m2')).toMatchObject({ status: 'NOISE', reason: 'vision (re-read): image is noise', llmResult: expect.objectContaining({ description: DESC.description }) });
         expect(doneOf(m).map((d) => d.reading?.description)).toEqual([DESC.description, DESC.description]);
       });
 
@@ -1115,7 +1115,18 @@ describe('SignalIntakeService — supreme fixes W3 (audit 2026-11-27)', () => {
       await svc.applyVision(img(m, 'm1', 'A'), T0, IMG, reply, { messageId: 'm1', channelId: 'A', postedAt: T0, textHash: 'h' }, 'llm', true);
       expect(m.mem.classes.get('m1')).toMatchObject({
         status: 'SIGNAL', parser: 'llm', signalId: 'sigX',
-        llmResult: { ...prior, image: expect.objectContaining({ description: DESC }), description: DESC, imageSha256: IMG.sha256 },
+        llmResult: { ...prior, image: expect.objectContaining({ description: DESC }), description: DESC, descriptionSource: 'model', imageSha256: IMG.sha256 },
+      });
+    });
+
+    it('Fix 4: a stand-in copied to the top level of an LLM-parse row carries descriptionSource stand-in there too', async () => {
+      const m = make({ vision: vision().v });
+      await m.mem.store.saveClass({ messageId: 'm1', channelId: 'A', postedAt: T0, textHash: 'h', status: 'SIGNAL', parser: 'llm', llmResult: { isSignal: true, signals: [] }, signalId: 'sigX' });
+      const svc = m.svc as unknown as { applyVision: (...a: unknown[]) => Promise<void> };
+      const reply = { kind: 'NOISE', isSignal: false, signals: [], description: 'image; the model gave no description', descriptionSource: 'stand-in' } as VisionReply;
+      await svc.applyVision(img(m, 'm1', 'A'), T0, IMG, reply, { messageId: 'm1', channelId: 'A', postedAt: T0, textHash: 'h' }, 'llm', true);
+      expect(m.mem.classes.get('m1')?.llmResult).toMatchObject({
+        description: 'image; the model gave no description', descriptionSource: 'stand-in', image: expect.objectContaining({ descriptionSource: 'stand-in' }),
       });
     });
 

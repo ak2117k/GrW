@@ -67,12 +67,21 @@ export function leadAlarm(rows: readonly AlarmRow[] | undefined, nowMs: number):
 }
 
 /**
- * The newest verdict the AGENT wrote, from the cycle's recent live rows: the sentinel judge's stamp only
- * (exit-authority/domain/agent-verdict.ts). A `rule:` stamp, a desk TIGHTEN row or a signal SL row is not a look,
- * so it never suppresses the forced look.
+ * The trade agent's own look: a sentinel judge stamp (exit-authority/domain/agent-verdict.ts whitelist). A row with
+ * no stamp at all is treated as a look (sentinel_verdicts.promptVersion is NOT NULL, so prod rows always carry one;
+ * older fixtures do not). A desk-manager row (`desk-manager/1`), a code-rule row (`rule:…`) or a signal-trader row is
+ * NOT a look and never resets a clock. The ONE predicate for the cycle's `lastAgent` and {@link lastAgentVerdictMs}.
+ */
+export function isAgentLookRow(r: { promptVersion?: string | null }): boolean {
+  return r.promptVersion == null || isAgentVerdictStamp(r.promptVersion);
+}
+
+/**
+ * The newest verdict the AGENT wrote, from the cycle's recent live rows ({@link isAgentLookRow}). A `rule:` stamp,
+ * a desk TIGHTEN row or a signal SL row is not a look, so it never suppresses the forced look.
  */
 export function lastAgentVerdictMs(recent: ReadonlyArray<{ createdAt: Date; promptVersion?: string | null }>): number | null {
-  const row = recent.find((r) => isAgentVerdictStamp(r.promptVersion));
+  const row = recent.find(isAgentLookRow);
   return row ? ms(row.createdAt) : null;
 }
 

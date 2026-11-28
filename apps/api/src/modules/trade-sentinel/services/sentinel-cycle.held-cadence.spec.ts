@@ -3,7 +3,8 @@ import { RECENT_LOOK_WINDOW, SentinelCycleService, type TickReading } from './se
 import type { RosterEntry } from './roster.service';
 import { ADVISORY_VERDICT, LIVE_GAP_FIRE, parseJudgeGateConfig, type JudgeGateConfig } from './judge-gate';
 import type { AlarmRow } from '../../exit-authority/exit-authority.tokens';
-import { ALARM_FIRE } from './alarm-look';
+import { ALARM_FIRE, lastAgentVerdictMs } from './alarm-look';
+import { isAgentLookRow } from './sentinel-cycle.service';
 
 /**
  * Supreme fixes W5 (2026-11-28):
@@ -294,6 +295,41 @@ describe('review round 1 (2026-11-28): drill looks only when the drill alarm is 
     });
     await t.pass('11:16:30');
     expect(t.judge).toHaveBeenCalledTimes(1);
+  });
+
+  it('final wave item 10: the green-floor latch reads the AGENT\'s last packet, not a newer desk-manager row', async () => {
+    // A fresh process (no in-memory latch); the price is below the ₹150 arm now. The agent's 15:20 packet says armed.
+    const armed = agentRow('15:20:00', { packet: { position: { entryPrice: 239.1, ltp: 241, qty: 100 }, money: { greenFloorArmed: true } } });
+    const t = makeSvc({ recent: [desk('15:24:34'), armed] });
+    t.evaluate.mockReturnValue({ fires: [{ name: 'level-break', detail: 'x' }], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' });
+    await t.pass('15:37:00');
+    const buildPacket = (t.svc as unknown as { packets: { build: jest.Mock } }).packets.build;
+    expect(buildPacket).toHaveBeenCalledTimes(1);
+    expect(buildPacket.mock.calls[0][1].greenFloorArmedLatched).toBe(true);
+  });
+
+  it('final wave item 10: slot order (lastJudgedAt) measures from the AGENT\'s look, not a newer desk row', async () => {
+    // Two firing positions, one judgement slot. A was looked at by the agent at 15:00 but has a desk row at 15:30;
+    // B was looked at by the agent at 15:20. Oldest AGENT look first ⇒ A is judged first.
+    const a = entry({ trackerId: 't-a', symbol: 'CRUDEOIL16DEC268350CE' });
+    const b = entry({ trackerId: 't-b', symbol: 'CRUDEOIL16DEC268400CE' });
+    const t = makeSvc({ entries: [b, a], gate: parseJudgeGateConfig({ SENTINEL_LIVE_MAX_GAP_MIN: '0' }) });
+    t.recentForTracker.mockImplementation(async (id: string) => (id === 't-a' ? [desk('15:30:00'), agentRow('15:00:00')] : [agentRow('15:20:00')]));
+    t.evaluate.mockReturnValue({ fires: [{ name: 'level-break', detail: 'x' }], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' });
+    (t.svc as unknown as { judgeCap: number }).judgeCap = 1;
+    (t.svc as unknown as { ticks: { tickFor: jest.Mock } }).ticks.tickFor.mockResolvedValue(tick());
+    await t.svc.runForUser(USER, ist('15:40:00'));
+    expect(t.judge).toHaveBeenCalledTimes(1);
+    expect(t.record.mock.calls[0][0].trackerId).toBe('t-a');
+  });
+
+  it('final wave item 10: isAgentLookRow and lastAgentVerdictMs agree on an unstamped row', () => {
+    const unstamped: { createdAt: Date; promptVersion?: string | null } = { createdAt: ist('15:00:00') };
+    expect(isAgentLookRow(unstamped)).toBe(true);
+    expect(lastAgentVerdictMs([unstamped])).toBe(ist('15:00:00').getTime());
+    const desk1 = { createdAt: ist('15:10:00'), promptVersion: 'desk-manager/1' };
+    expect(isAgentLookRow(desk1)).toBe(false);
+    expect(lastAgentVerdictMs([desk1, unstamped])).toBe(ist('15:00:00').getTime());
   });
 
   it('the agent\'s row is found behind up to RECENT_LOOK_WINDOW−1 newer non-agent rows', async () => {

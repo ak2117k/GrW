@@ -40,9 +40,8 @@ import {
   type JudgeGateConfig,
 } from './judge-gate';
 import { DRILL_ADVISORY_WHY, isDrillAlarm, isDrillReason } from '../../exit-authority/domain/drill';
-import { isAgentVerdictStamp } from '../../exit-authority/domain/agent-verdict';
 import { squareOffLook, type SquareOffDecision, type SquareOffLook } from './square-off-look';
-import { ALARM_FIRE, alarmLookFire, lastAgentVerdictMs, leadAlarm, packetAlarm, type AlarmFire } from './alarm-look';
+import { ALARM_FIRE, alarmLookFire, isAgentLookRow, lastAgentVerdictMs, leadAlarm, packetAlarm, type AlarmFire } from './alarm-look';
 import { ALARM_CHART_READER, ALARM_CHART_TIMEOUT_MS, alarmChartBlock, type AlarmChartReader, type PacketAlarmChart } from './alarm-chart';
 import { cutLossK15 } from '../../exit-discipline/cut-loss-yardstick';
 import {
@@ -413,14 +412,8 @@ export function previousFactorValues(
 /** Live rows read per pass: enough that desk-manager / rule rows cannot crowd out the agent's own last look. */
 export const RECENT_LOOK_WINDOW = 10;
 
-/**
- * The trade agent's own look: a sentinel judge stamp (exit-authority/domain/agent-verdict.ts whitelist). A row with
- * no stamp at all is treated as a look (prod rows always carry one; older fixtures do not). A desk-manager row
- * (`desk-manager/1`), a code-rule row (`rule:…`) or a signal-trader row is NOT a look and never resets a clock.
- */
-export function isAgentLookRow(r: { promptVersion?: string | null }): boolean {
-  return r.promptVersion == null || isAgentVerdictStamp(r.promptVersion);
-}
+/** The trade agent's own look — one predicate, shared with the forced alarm look (alarm-look.ts). */
+export { isAgentLookRow };
 
 /**
  * What the agent actually saw the last time it judged this position, for the
@@ -1218,7 +1211,8 @@ export class SentinelCycleService {
     // The ratchet is updated BEFORE the skip decision, deliberately: a floor that
     // arms on a quiet tick and pulls back before the next evaluation has still
     // armed, and the agent must not be shown it un-arming.
-    const greenFloorArmedLatched = this.armedLatch(entry, tick, last);
+    // Final review item 10: from the AGENT's last row — a desk-manager / rule row's packet is not the agent's money block.
+    const greenFloorArmedLatched = this.armedLatch(entry, tick, lastAgent);
 
     // Exit discipline §4: the noise-aware floor, ratcheted like the latch above
     // (in-process memory + the last live packet). Null when discipline is off or
@@ -1595,7 +1589,8 @@ export class SentinelCycleService {
       wallsAt: capture.at,
       greenFloorArmedLatched,
       decision,
-      lastJudgedAt: last ? new Date(last.createdAt).getTime() : null,
+      // The AGENT's last look (final review item 10): a newer desk / rule row must not push it back in the slot queue.
+      lastJudgedAt: lastAgent ? new Date(lastAgent.createdAt).getTime() : null,
       rejudgeSnap,
       ...(gate ? { newsIds: gate.newsIds, g2r: gate.g2r } : {}),
       // The packet's held marker / delta (gate on) and the deadline framing (inside the window); with the exit

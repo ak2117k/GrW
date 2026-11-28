@@ -137,6 +137,8 @@ function setup(opts: { ownerExit?: boolean; probe?: boolean; aiDown?: boolean; c
       aiHealth,
       supreme,
       undefined,
+      // EXIT_EXECUTION_READER (final review item 5): the fake db serves the executions view too.
+      db,
     );
   return { db, alarms, telegram, ownerExit, probe, supreme, runner: make(), make };
 }
@@ -711,6 +713,28 @@ describe('EscalationRunner.pass', () => {
           await runner.pass(at(400_000));
           expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
         }
+      });
+
+      it('final review item 5: the executions view comes from EXIT_EXECUTION_READER; unbound → unreadable, never a blind owner-path sale', async () => {
+        const { db, alarms, telegram, ownerExit, probe, supreme } = setup();
+        db.alarms.push(agreed());
+        // The agent's own exit FILLED — but this runner has no reader, so it cannot see that.
+        db.executions.set('v1', { status: 'FILLED', reason: null });
+        const blind = new EscalationRunner(
+          db as unknown as TradeAlarmRepository, db as unknown as EscalationRepository, alarms,
+          { isLive: () => true } as unknown as AuthorityStateService, telegram as unknown as TelegramBotClient, new TrackerMessages(),
+          ownerExit, probe, undefined, supreme, undefined,
+        );
+        await blind.pass(at(25_000));
+        await blind.pass(at(400_000));
+        expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+        // The same alarm with the reader bound: FILLED is seen, done.
+        const { db: db2, ownerExit: ox2, runner } = setup();
+        db2.alarms.push(agreed());
+        db2.executions.set('v1', { status: 'FILLED', reason: null });
+        await runner.pass(at(25_000));
+        expect(ox2.exitAsOwner).not.toHaveBeenCalled();
+        expect(db2.alarms[0].payload).toMatchObject({ executor: 'FILLED' });
       });
 
       it.each([

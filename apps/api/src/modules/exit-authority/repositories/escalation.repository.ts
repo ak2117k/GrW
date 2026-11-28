@@ -95,11 +95,6 @@ export class EscalationRepository {
     });
   }
 
-  /** The ai_exit_executions row of one verdict (the agent's own exit), or null when none was claimed yet. */
-  async executionForVerdict(verdictId: string): Promise<{ status: string; reason: string | null } | null> {
-    return this.prisma.aiExitExecution.findUnique({ where: { verdictId }, select: { status: true, reason: true } });
-  }
-
   /** The intraday-carry engine confirmed this live position CONVERTED to carry-forward (decided at/after `since`). */
   async carryConverted(trackerId: string, since: Date): Promise<boolean> {
     const r = await this.prisma.intradayCarryDecision.findFirst({

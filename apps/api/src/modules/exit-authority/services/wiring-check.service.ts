@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger, OnApplicationBootstrap, Optional } from '@nestjs/common';
 import { AI_HEALTH } from '../../ai-gateway/audit/failover-transport';
 import { parseAuthorityMode } from '../exit-authority.config';
-import { SUPREME_CONFIRM, TRACKER_WAKE } from '../exit-authority.tokens';
+import { EXIT_EXECUTION_READER, SUPREME_CONFIRM, TRACKER_WAKE } from '../exit-authority.tokens';
 import { lateBindingOf } from '../late-ports';
 import { AUTHORITY_ENV } from './authority-state.service';
 import { HARD_LOSS_PROBE, OWNER_EXIT } from './escalation-runner.service';
@@ -21,6 +21,7 @@ export class ExitAuthorityWiringCheck implements OnApplicationBootstrap {
     @Inject(HARD_LOSS_PROBE) private readonly probe: unknown,
     @Inject(OWNER_EXIT) private readonly ownerExit: unknown,
     @Inject(AI_HEALTH) private readonly aiHealth: unknown,
+    @Inject(EXIT_EXECUTION_READER) private readonly executions: unknown,
     @Optional() @Inject(AUTHORITY_ENV) private readonly env?: Record<string, string | undefined>,
   ) {}
 
@@ -33,6 +34,7 @@ export class ExitAuthorityWiringCheck implements OnApplicationBootstrap {
       ['HARD_LOSS_PROBE', this.probe],
       ['OWNER_EXIT', this.ownerExit],
       ['AI_HEALTH', this.aiHealth],
+      ['EXIT_EXECUTION_READER', this.executions],
     ] as const) {
       const b = lateBindingOf(port);
       out[name] = b ? b.resolve() != null : port != null;

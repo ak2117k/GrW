@@ -334,6 +334,7 @@ describe('exit authority e2e — every AI route down 10 min, past the hard loss,
       aiHealthOf(llm),
       { confirm: jest.fn() },
       undefined,
+      db as never, // EXIT_EXECUTION_READER
     );
     const alertAt = ist(DAY, '11:21:15');
     clock.now = alertAt;
@@ -387,7 +388,7 @@ describe('exit authority seam — SUPREME_EXIT: the router answers, the runner r
     const runnerConfirm = { confirm: jest.fn() };
     const runner = new EscalationRunner(
       db as never, db as never, alarms, state as unknown as AuthorityStateService, telegram as never, new TrackerMessages(),
-      ownerExit, undefined, undefined, runnerConfirm, undefined,
+      ownerExit, undefined, undefined, runnerConfirm, undefined, db as never, // EXIT_EXECUTION_READER
     );
     return { db, ask: ask!, routed, routerConfirm, runner, runnerConfirm, ownerExit, telegram };
   }

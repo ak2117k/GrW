@@ -7,11 +7,13 @@ import { backstopDue, deadlinePassed, escalationDue, isSnoozed } from '../domain
 import { DRILL_TTL_MS, isDrillAlarm } from '../domain/drill';
 import { REALERT_EVERY_MS, SUPREME_EXIT_AGENT_LOOK_MS } from '../domain/timings';
 import {
+  EXIT_EXECUTION_READER,
   SUPREME_CONFIRM,
   TRADE_ALARMS,
   TRADE_BRIEFS,
   type AlarmRow,
   type ConfirmResult,
+  type ExitExecutionReaderPort,
   type SupremeConfirmPort,
   type TradeAlarmsPort,
   type TradeBriefsPort,
@@ -133,6 +135,8 @@ export class EscalationRunner {
     @Optional() @Inject(AI_HEALTH) private readonly aiHealth?: AiHealthPort,
     @Optional() @Inject(SUPREME_CONFIRM) private readonly supreme?: SupremeConfirmPort,
     @Optional() @Inject(TRADE_BRIEFS) private readonly briefs?: TradeBriefsPort,
+    // Read-only executions view (EXIT_EXECUTION_READER, bound by SentinelExecutorModule; late-bound forwarder here).
+    @Optional() @Inject(EXIT_EXECUTION_READER) private readonly executions?: ExitExecutionReaderPort,
   ) {}
 
   @Interval(ESCALATION_PASS_MS)
@@ -500,7 +504,10 @@ export class EscalationRunner {
     const verdictId = typeof p.agentVerdictId === 'string' && p.agentVerdictId ? p.agentVerdictId : null;
     let row: { status: string; reason: string | null } | null = null;
     try {
-      row = verdictId ? await this.esc.executionForVerdict(verdictId) : null;
+      // No reader ⇒ unreadable, never "no row": selling through the owner path on an execution we cannot see could
+      // sell a second time after the agent's own exit filled.
+      if (verdictId && !this.executions) throw new Error('EXIT_EXECUTION_READER not bound');
+      row = verdictId ? await this.executions!.executionForVerdict(verdictId) : null;
     } catch (err) {
       this.log.warn(`${LOG} SUPREME_EXIT ${a.symbol}: execution row of verdict ${verdictId} unreadable (retrying): ${(err as Error)?.message}`);
       return;

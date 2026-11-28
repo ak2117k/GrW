@@ -2,8 +2,8 @@ import { Module } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { AI_HEALTH } from '../ai-gateway/audit/failover-transport';
-import { AUTHORITY_STATE, OWNER_ESCALATION, SUPREME_CONFIRM, TRACKER_WAKE, TRADE_ALARMS, TRADE_BRIEFS } from './exit-authority.tokens';
-import { lateAiHealth, lateHardLossProbe, lateOwnerExit, lateSupremeConfirm, lateTrackerWake } from './late-ports';
+import { AUTHORITY_STATE, EXIT_EXECUTION_READER, OWNER_ESCALATION, SUPREME_CONFIRM, TRACKER_WAKE, TRADE_ALARMS, TRADE_BRIEFS } from './exit-authority.tokens';
+import { lateAiHealth, lateExitExecutionReader, lateHardLossProbe, lateOwnerExit, lateSupremeConfirm, lateTrackerWake } from './late-ports';
 import { EscalationRepository } from './repositories/escalation.repository';
 import { TradeAlarmRepository } from './repositories/trade-alarm.repository';
 import { TradeBriefRepository } from './repositories/trade-brief.repository';
@@ -52,6 +52,8 @@ import { TrackerMessages } from './telegram/tracker-messages';
     { provide: HARD_LOSS_PROBE, useFactory: lateHardLossProbe, inject: [ModuleRef] },
     { provide: OWNER_EXIT, useFactory: lateOwnerExit, inject: [ModuleRef] },
     { provide: AI_HEALTH, useFactory: lateAiHealth, inject: [ModuleRef] },
+    // Read-only executions view for the runner's supreme-exit follow-up: bound by SentinelExecutorModule.
+    { provide: EXIT_EXECUTION_READER, useFactory: lateExitExecutionReader, inject: [ModuleRef] },
     ExitAuthorityWiringCheck,
   ],
   // SUPREME_CONFIRM: for the executor's router (SentinelExecutorModule cannot import DeskManagerModule, which imports it).

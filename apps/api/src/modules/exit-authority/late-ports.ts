@@ -2,8 +2,10 @@ import { Logger } from '@nestjs/common';
 import type { ModuleRef } from '@nestjs/core';
 import { AI_HEALTH, type AiHealthPort } from '../ai-gateway/audit/failover-transport';
 import {
+  EXIT_EXECUTION_READER,
   SUPREME_CONFIRM,
   TRACKER_WAKE,
+  type ExitExecutionReaderPort,
   type ConfirmRequest,
   type ConfirmResult,
   type SupremeConfirmPort,
@@ -20,6 +22,7 @@ import { HARD_LOSS_PROBE, OWNER_EXIT, type HardLossProbe, type OwnerExitOptions,
  *   AI_HEALTH        ← TradeSentinelModule   (the sentinel's failover transport)
  *   OWNER_EXIT       ← SentinelExecutorModule (ManualExitService.request as the owner)
  *   SUPREME_CONFIRM  ← DeskManagerModule     `{ provide: SUPREME_CONFIRM, useExisting: SupremeConfirmService }`
+ *   EXIT_EXECUTION_READER ← SentinelExecutorModule (its execution repository; read-only)
  *
  * Importing those modules here would be a module cycle, and the providers form a real instance cycle too
  * (TradeAlarmsService → SentinelRunnerService → SentinelCycleService → TradeAlarmsService). So this module provides
@@ -125,5 +128,14 @@ export function lateAiHealth(ref: Pick<ModuleRef, 'get'>): Late<AiHealthPort> {
   return mark({ allDownSince: () => b.require().allDownSince() }, b);
 }
 
-/** The five late-bound tokens, for the boot wiring check and the module specs. */
-export const LATE_PORT_TOKENS = [TRACKER_WAKE, SUPREME_CONFIRM, HARD_LOSS_PROBE, OWNER_EXIT, AI_HEALTH] as const;
+/**
+ * EXIT_EXECUTION_READER ← SentinelExecutorModule (its execution repository, read-only). Unbound ⇒ throws, and the
+ * runner treats the row as unreadable (retries; never sells blind on an unseen execution).
+ */
+export function lateExitExecutionReader(ref: Pick<ModuleRef, 'get'>): Late<ExitExecutionReaderPort> {
+  const b = new LateBinding<ExitExecutionReaderPort>(ref, EXIT_EXECUTION_READER, 'EXIT_EXECUTION_READER');
+  return mark({ executionForVerdict: (verdictId: string) => b.require().executionForVerdict(verdictId) }, b);
+}
+
+/** The late-bound tokens, for the boot wiring check and the module specs. */
+export const LATE_PORT_TOKENS = [TRACKER_WAKE, SUPREME_CONFIRM, HARD_LOSS_PROBE, OWNER_EXIT, AI_HEALTH, EXIT_EXECUTION_READER] as const;

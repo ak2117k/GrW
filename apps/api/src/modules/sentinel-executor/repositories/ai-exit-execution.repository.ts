@@ -89,6 +89,14 @@ export class AiExitExecutionRepository {
     }
   }
 
+  /**
+   * EXIT_EXECUTION_READER (exit-authority tokens, read-only): the execution row of one verdict — status + reason only —
+   * or null when none was claimed yet. The escalation runner follows the agent's own exit for a supreme request with it.
+   */
+  async executionForVerdict(verdictId: string): Promise<{ status: string; reason: string | null } | null> {
+    return this.prisma.aiExitExecution.findUnique({ where: { verdictId }, select: { status: true, reason: true } });
+  }
+
   async update(id: string, patch: AiExitPatch): Promise<void> {
     const { gate, ...rest } = patch;
     await this.prisma.aiExitExecution.update({

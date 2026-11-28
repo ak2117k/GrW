@@ -39,6 +39,7 @@ import { CHART_CONFIRM_READER, ChartConfirmReader } from './repositories/chart-c
 import { ExitNoiseRepository } from '../exit-noise/exit-noise.repository';
 import { ExitAuthorityModule } from '../exit-authority/exit-authority.module';
 import { OWNER_EXIT } from '../exit-authority/services/escalation-runner.service';
+import { EXIT_EXECUTION_READER } from '../exit-authority/exit-authority.tokens';
 import { ManualOwnerExit } from './services/owner-exit.adapter';
 import { ExecutorAuthorityBootCheck } from './services/authority-boot-check.service';
 
@@ -56,6 +57,9 @@ import { ExecutorAuthorityBootCheck } from './services/authority-boot-check.serv
   controllers: [SentinelExecutorController],
   providers: [
     AiExitExecutionRepository,
+    // EXIT_EXECUTION_READER (read-only port): the escalation runner's view of one verdict's execution row, so no file
+    // outside this module reads the executions table. ExitAuthorityModule's late-bound forwarder finds it.
+    { provide: EXIT_EXECUTION_READER, useExisting: AiExitExecutionRepository },
     OwnerBrokerSessionProvider,
     SentinelExitExecutor,
     SentinelExitPoller,
@@ -113,6 +117,6 @@ import { ExecutorAuthorityBootCheck } from './services/authority-boot-check.serv
     },
   ],
   // The desk manager EXIT / BOOK go through the owner manual-exit path (desk-manager plan Task 7).
-  exports: [ManualExitService],
+  exports: [ManualExitService, EXIT_EXECUTION_READER],
 })
 export class SentinelExecutorModule {}

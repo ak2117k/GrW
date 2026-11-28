@@ -25,6 +25,7 @@ import { IntradayCarryModule } from '../intraday-carry/intraday-carry.module';
 import { IntradayCarryService } from '../intraday-carry/intraday-carry.service';
 import { SentinelExecutorModule } from '../sentinel-executor/sentinel-executor.module';
 import { ExitAuthorityRouter } from '../sentinel-executor/services/exit-authority-router.service';
+import { AiExitExecutionRepository } from '../sentinel-executor/repositories/ai-exit-execution.repository';
 import { ManualOwnerExit } from '../sentinel-executor/services/owner-exit.adapter';
 import { SentinelExitExecutor } from '../sentinel-executor/services/sentinel-exit-executor.service';
 import { TriggerWatchService } from '../sentinel-executor/services/trigger-watch.service';
@@ -40,6 +41,7 @@ import { TradeSentinelModule } from '../trade-sentinel/trade-sentinel.module';
 import { ExitAuthorityModule } from './exit-authority.module';
 import {
   AUTHORITY_STATE,
+  EXIT_EXECUTION_READER,
   OWNER_ESCALATION,
   SUPREME_CONFIRM,
   TRACKER_WAKE,
@@ -57,7 +59,7 @@ import { TelegramBotClient } from './telegram/telegram-bot.client';
 
 const PORT_TOKENS = new Set<unknown>([
   TRADE_ALARMS, AUTHORITY_STATE, TRADE_BRIEFS, OWNER_ESCALATION, SUPREME_CONFIRM,
-  TRACKER_WAKE, HARD_LOSS_PROBE, OWNER_EXIT, AI_HEALTH, ALARM_CHART_READER,
+  TRACKER_WAKE, HARD_LOSS_PROBE, OWNER_EXIT, AI_HEALTH, ALARM_CHART_READER, EXIT_EXECUTION_READER,
 ]);
 
 /** Optional test-override tokens (AUTHORITY_ENV, TELEGRAM_DEPS, …): left absent so the services read process.env. */
@@ -187,10 +189,14 @@ describe.each(['off', 'live'] as const)('exit-authority wiring, TRADE_AGENT_AUTH
       ['EscalationRunner.probe → HARD_LOSS_PROBE', realOf(field(runner, 'probe')), sentinel.get(HARD_LOSS_PROBE)],
       ['EscalationRunner.aiHealth → AI_HEALTH', realOf(field(runner, 'aiHealth')), sentinel.get(AI_HEALTH)],
       ['OwnerButtonsService.ownerExit → OWNER_EXIT', realOf(field(buttons, 'ownerExit')), executor.get(OWNER_EXIT)],
+      // Final review item 5: the runner reads one verdict's execution row through the executor's own repository.
+      // strict: IntradayCarryModule provides its own AiExitExecutionRepository; the port is the EXECUTOR's.
+      ['EscalationRunner.executions → AiExitExecutionRepository', realOf(field(runner, 'executions')), executor.get(AiExitExecutionRepository, { strict: true })],
+      ['EXIT_EXECUTION_READER (executor)', executor.get(EXIT_EXECUTION_READER, { strict: true }), executor.get(AiExitExecutionRepository, { strict: true })],
     ]);
     expect(executor.get(OWNER_EXIT) instanceof ManualOwnerExit).toBe(true);
     expect(mod.get(ExitAuthorityWiringCheck).check()).toEqual({
-      TRACKER_WAKE: true, SUPREME_CONFIRM: true, HARD_LOSS_PROBE: true, OWNER_EXIT: true, AI_HEALTH: true,
+      TRACKER_WAKE: true, SUPREME_CONFIRM: true, HARD_LOSS_PROBE: true, OWNER_EXIT: true, AI_HEALTH: true, EXIT_EXECUTION_READER: true,
     });
   });
 

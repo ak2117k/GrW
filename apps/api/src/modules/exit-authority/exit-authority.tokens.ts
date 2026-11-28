@@ -100,6 +100,17 @@ export interface TradeBriefsPort {
   write(trackerId: string, userId: string, text: string, by: 'OPEN' | 'MANAGER' | 'CONFIRM'): Promise<void>;
 }
 
+/**
+ * READ-ONLY view of the executor's execution row for one verdict (final review 2026-11-28, item 5). Implemented by the
+ * sentinel-executor's own repository (the only module that reads its executions table; executor structure spec) and
+ * late-bound here (late-ports.ts): the escalation runner follows the agent's own exit for a supreme request with it.
+ */
+export const EXIT_EXECUTION_READER = Symbol('EXIT_EXECUTION_READER');
+export interface ExitExecutionReaderPort {
+  /** The execution row of one verdict (status + reason), or null when none was claimed yet. */
+  executionForVerdict(verdictId: string): Promise<{ status: string; reason: string | null } | null>;
+}
+
 export const OWNER_ESCALATION = Symbol('OWNER_ESCALATION');
 export interface OwnerEscalationPort {
   blockedExit(input: { userId: string; trackerId: string; symbol: string; reason: string; detail: string }): Promise<void>;

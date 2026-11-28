@@ -4,6 +4,10 @@ import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { AI_HEALTH, type AiHealthPort } from '../../ai-gateway/audit/failover-transport';
 import { isExitAnswer } from '../domain/agent-verdict';
 import { backstopDue, deadlinePassed, escalationDue, isSnoozed } from '../domain/alarm';
+import { DRILL_TTL_MS, isDrillAlarm } from '../domain/drill';
+
+/** The sentinel's advisory word for a drill look's EXIT_NOW (trade-sentinel judge-gate ADVISORY_VERDICT). */
+const DRILL_EXIT_WORD = 'EXIT_ADVISORY';
 import { REALERT_EVERY_MS, SUPREME_EXIT_AGENT_LOOK_MS } from '../domain/timings';
 import {
   SUPREME_CONFIRM,
@@ -157,6 +161,8 @@ export class EscalationRunner {
       for (const a of all) {
         try {
           if (!open.has(a.trackerId)) await this.closeGone(a);
+          // Authority drill: observe only — never a backstop, an owner-path exit or Exit buttons (domain/drill.ts).
+          else if (isDrillAlarm(a)) await this.drillAlarm(a, now);
           else if (a.rule === 'SUPREME_EXIT') await this.supremeExit(a, now);
           else if (deadlinePassed(a, now)) await this.closePastDeadline(a);
           else if (a.status !== 'ANSWERED') await this.openAlarm(a, now, aiDown);
@@ -171,6 +177,67 @@ export class EscalationRunner {
   }
 
   // ── per-alarm steps ──────────────────────────────────────────────────────
+
+  /**
+   * AUTHORITY DRILL (domain/drill.ts): the path is exercised, nothing is ever sold. Answered from the agent's verdict
+   * (as a real alarm); when the agent wanted out (EXIT_ADVISORY, or an EXIT_NOW from a look seconds after the raise)
+   * the supreme is asked ONCE, observe-only, and its answer is only recorded (payload.drillConfirm). The owner gets
+   * one "DRILL" line per step, never buttons. Closed once answered, or DRILL_TTL_MS after the raise.
+   */
+  private async drillAlarm(a: AlarmRow, now: Date): Promise<void> {
+    let answer: { id: string; verdict: string } | null =
+      a.answeredAt != null && a.answer != null ? { id: a.answerVerdictId ?? '', verdict: a.answer } : null;
+    if (!answer) {
+      const v = await this.alarmRepo.latestAgentVerdict(a.trackerId, a.raisedAt);
+      if (v) {
+        await this.alarms.answer(a.id, v.id, v.verdict, now);
+        answer = { id: v.id, verdict: v.verdict };
+      }
+    }
+    if (answer) {
+      const wantsOut = answer.verdict === DRILL_EXIT_WORD || isExitAnswer(answer.verdict);
+      let confirmLine = '';
+      if (wantsOut && typeof a.payload?.drillConfirm !== 'string') {
+        const r = await this.drillConfirm(a, answer);
+        a.payload = { ...(a.payload ?? {}), drillConfirm: `${r.decision}: ${String(r.reason ?? '').slice(0, 300)}` };
+        confirmLine = `\nSupreme (asked observe-only): ${r.decision} — ${String(r.reason ?? '').slice(0, 200)}`;
+      }
+      await this.alarmRepo.update(a.id, { status: 'CLOSED', payload: a.payload });
+      this.log.warn(`${LOG} DRILL ${a.symbol} ${a.rule} (alarm ${a.id}): agent answered ${answer.verdict} (verdict ${answer.id})${confirmLine ? `; ${String(a.payload?.drillConfirm)}` : ''} — closed, nothing sold`);
+      await this.send(`DRILL ${a.symbol}: the agent answered ${answer.verdict} (verdict ${answer.id}).${confirmLine}\nAlarm ${a.rule} closed. Nothing was sold.`);
+      return;
+    }
+    if (now.getTime() - a.raisedAt.getTime() >= DRILL_TTL_MS) {
+      await this.alarmRepo.update(a.id, { status: 'CLOSED' });
+      this.log.error(`${LOG} DRILL ${a.symbol} ${a.rule} (alarm ${a.id}): no agent look in ${Math.round(DRILL_TTL_MS / 60_000)} min — closed`);
+      await this.send(`DRILL ${a.symbol}: no agent look in ${Math.round(DRILL_TTL_MS / 60_000)} min after the drill alarm. Closed. Nothing was sold. Check the sentinel.`);
+      return;
+    }
+    if (a.alertedAt == null && escalationDue(a, now) === 'ALERT') {
+      a.alertedAt = now;
+      await this.alarmRepo.update(a.id, { alertedAt: now, alertCount: 1 });
+      await this.send(`DRILL ${a.symbol}: ALARM UNANSWERED ${Math.floor((now.getTime() - a.raisedAt.getTime()) / 1000)} s (a real alarm would alert you now). No action needed, nothing is sold.\nAlarm ${a.rule}: ${a.reason}`);
+    }
+  }
+
+  /** The drill's one observe-only supreme confirm. Never throws; the answer is only recorded. */
+  private async drillConfirm(a: AlarmRow, answer: { id: string; verdict: string }): Promise<ConfirmResult> {
+    if (!this.supreme) return { decision: 'ERROR', reason: 'SUPREME_CONFIRM not bound', latencyMs: 0 };
+    try {
+      return await this.supreme.confirm({
+        userId: a.userId,
+        trackerId: a.trackerId,
+        symbol: a.symbol,
+        agentDecision: 'EXIT',
+        agentReason: `DRILL: the trade agent answered ${answer.verdict} (verdict ${answer.id}) to a drill ${a.rule} alarm`,
+        alarm: a,
+        brief: null,
+        packetSummary: `DRILL (observe only, nothing will be sold): ${a.symbol} ${a.rule} drill alarm; the agent answered ${answer.verdict}. Answer as you would for a real exit.`,
+      });
+    } catch (err) {
+      return { decision: 'ERROR', reason: (err as Error)?.message ?? 'confirm threw', latencyMs: 0 };
+    }
+  }
 
   private async closeGone(a: AlarmRow): Promise<void> {
     // Read the live id BEFORE this row leaves the tracked statuses.

@@ -793,3 +793,119 @@ describe('EscalationRunner.pass', () => {
     });
   });
 });
+
+/**
+ * AUTHORITY DRILL (supreme fixes W5, 2026-11-28): a drill alarm (`payload.drill === true`) is observe-only in the runner —
+ * never a backstop, never an owner-path exit, never Exit buttons. It is answered from the agent's verdict, the supreme is
+ * asked once observe-only when the agent wanted out, the owner is told "DRILL", and the alarm is closed.
+ */
+describe('EscalationRunner.pass — authority drill (observe only, never sells)', () => {
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+  const drill = (over: Partial<AlarmRow> = {}) => alarm({ payload: { drill: true, raisedBy: 'authority-drill' }, ...over });
+  const sentTexts = (telegram: { sendMessage: jest.Mock }) => telegram.sendMessage.mock.calls.map((c) => String(c[0]));
+
+  it('HARD_LOSS drill, AI down, owner silent 11 min, still past the limit: NO backstop, NO exit', async () => {
+    const { db, ownerExit, probe, runner } = setup({ aiDown: true });
+    db.alarms.push(drill({ rule: 'HARD_LOSS', urgency: 'urgent', alertedAt: at(0), alertCount: 1 }));
+    await runner.pass(at(BACKSTOP_OWNER_SILENT_MS + 60_000));
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+    expect(probe.stillPastLimit).not.toHaveBeenCalled();
+    expect(db.alarms[0].status).not.toBe('BACKSTOPPED');
+  });
+
+  it('a deadline drill at deadline − 2 min: NO deadline backstop', async () => {
+    const { db, ownerExit, runner } = setup();
+    db.alarms.push(drill({ urgency: 'deadline', deadline: at(DEADLINE_EXIT_LEAD_MS + 30_000) }));
+    await runner.pass(at(60_000));
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+    const answered = drill({ id: 'a2', urgency: 'deadline', deadline: at(DEADLINE_EXIT_LEAD_MS + 30_000), status: 'ANSWERED', answeredAt: at(10_000), answer: 'HOLD' });
+    db.alarms.push(answered);
+    await runner.pass(at(60_000));
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+  });
+
+  it('a SUPREME_EXIT row flagged drill (never raised by the script) still never exits through the owner path', async () => {
+    const { db, ownerExit, supreme, runner } = setup();
+    db.alarms.push(drill({ rule: 'SUPREME_EXIT', urgency: 'urgent' }));
+    await runner.pass(at(SUPREME_EXIT_AGENT_LOOK_MS + 60_000));
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+    expect(supreme.confirm).not.toHaveBeenCalled();
+  });
+
+  it('unanswered past ESCALATE_AFTER: one DRILL message to the owner, with NO buttons; never repeated', async () => {
+    const { db, telegram, runner } = setup();
+    db.alarms.push(drill());
+    await runner.pass(at(ESCALATE_AFTER_MS + 1));
+    expect(telegram.sendMessage).toHaveBeenCalledTimes(1);
+    expect(telegram.sendMessage.mock.calls[0][0]).toMatch(/^DRILL/);
+    expect(telegram.sendMessage.mock.calls[0][1]).toBeUndefined();
+    expect(db.alarms[0].alertedAt).toEqual(at(ESCALATE_AFTER_MS + 1));
+    await runner.pass(at(ESCALATE_AFTER_MS + REALERT_EVERY_MS + 1));
+    expect(telegram.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('the agent answered EXIT_ADVISORY: answered, the supreme asked ONCE observe-only, owner told DRILL, alarm CLOSED, nothing sold', async () => {
+    const { db, alarms, telegram, ownerExit, supreme, runner } = setup({ confirm: 'CONFIRM' });
+    db.alarms.push(drill());
+    db.verdicts.push({ id: 'v-d', verdict: 'EXIT_ADVISORY', createdAt: at(20_000), trackerId: 'trk1' });
+    await runner.pass(at(30_000));
+    expect(alarms.answer).toHaveBeenCalledWith('a1', 'v-d', 'EXIT_ADVISORY', at(30_000));
+    expect(supreme.confirm).toHaveBeenCalledTimes(1);
+    expect(supreme.confirm.mock.calls[0][0]).toMatchObject({ trackerId: 'trk1', agentDecision: 'EXIT' });
+    expect(supreme.confirm.mock.calls[0][0].packetSummary).toMatch(/DRILL/);
+    expect(db.alarms[0].status).toBe('CLOSED');
+    expect(db.alarms[0].payload).toMatchObject({ drill: true, drillConfirm: 'CONFIRM: supreme says go' });
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+    const text = sentTexts(telegram).join('\n');
+    expect(text).toMatch(/^DRILL/);
+    expect(text).toMatch(/EXIT_ADVISORY/);
+    expect(text).toMatch(/nothing (was )?sold/i);
+    expect(telegram.sendMessage.mock.calls.every((c) => c[1] === undefined)).toBe(true);
+    await runner.pass(at(60_000));
+    expect(supreme.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('the agent answered HOLD: answered, no supreme call, CLOSED, owner told DRILL', async () => {
+    const { db, telegram, supreme, ownerExit, runner } = setup();
+    db.alarms.push(drill());
+    db.verdicts.push({ id: 'v-h', verdict: 'HOLD', createdAt: at(20_000), trackerId: 'trk1' });
+    await runner.pass(at(30_000));
+    expect(supreme.confirm).not.toHaveBeenCalled();
+    expect(db.alarms[0].status).toBe('CLOSED');
+    expect(sentTexts(telegram)[0]).toMatch(/^DRILL.*HOLD/s);
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+  });
+
+  it('an EXIT_NOW answer (a real look seconds after the raise) is reported, never followed', async () => {
+    const { db, supreme, ownerExit, runner } = setup({ confirm: 'OVERRIDE_HOLD' });
+    db.alarms.push(drill());
+    db.verdicts.push({ id: 'v-x', verdict: 'EXIT_NOW', createdAt: at(20_000), trackerId: 'trk1' });
+    await runner.pass(at(30_000));
+    expect(supreme.confirm).toHaveBeenCalledTimes(1);
+    expect(db.alarms[0].payload).toMatchObject({ drillConfirm: 'OVERRIDE_HOLD: supreme says go' });
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+  });
+
+  it('unanswered for 10 min: CLOSED and the owner told the agent never looked', async () => {
+    const { db, telegram, ownerExit, runner } = setup();
+    db.alarms.push(drill({ alertedAt: at(ESCALATE_AFTER_MS + 1), alertCount: 1 }));
+    await runner.pass(at(10 * 60_000));
+    expect(db.alarms[0].status).toBe('CLOSED');
+    expect(sentTexts(telegram)[0]).toMatch(/^DRILL.*no agent look/s);
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+  });
+
+  it('a real alarm beside it is handled exactly as before', async () => {
+    const { db, alarms, runner } = setup();
+    db.alarms.push(alarm({ id: 'real' }), drill({ id: 'd1' }));
+    db.verdicts.push({ id: 'v1', verdict: 'HOLD', createdAt: at(20_000), trackerId: 'trk1' });
+    await runner.pass(at(30_000));
+    expect(alarms.answer).toHaveBeenCalledWith('real', 'v1', 'HOLD', at(30_000));
+    expect(db.alarms.find((a) => a.id === 'real')!.status).toBe('ANSWERED');
+  });
+});

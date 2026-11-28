@@ -241,3 +241,48 @@ describe('ExitAuthorityRouter', () => {
     });
   });
 });
+
+/** AUTHORITY DRILL (supreme fixes W5): a drill-tagged verdict is never executed; a drill alarm never steers a real exit. */
+describe('ExitAuthorityRouter — authority drill', () => {
+  beforeEach(() => {
+    ops = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+  const drillAlarm = alarmRow({ id: 'al-drill', payload: { drill: true } });
+
+  it('an EXIT_NOW whose reason carries the drill tag: SKIPPED DRILL, no supreme call, never EXECUTE, DRILL ops line', async () => {
+    const { router, repo, supreme, alarms } = make({ open: [drillAlarm] });
+    const out = await router.route(verdict({ reason: '[advisory: authority drill] the 15m broke the low' }), { mode: 'live', hold: [] });
+    expect(out).toEqual({ kind: 'DRILL' });
+    expect(repo.claim).toHaveBeenCalledTimes(1);
+    expect(repo.update).toHaveBeenCalledWith('row1', { status: 'SKIPPED', reason: 'DRILL' });
+    expect(supreme.confirm).not.toHaveBeenCalled();
+    expect(alarms.answer).not.toHaveBeenCalled();
+    expect(ops.mock.calls.some((c) => /DRILL/.test(String(c[1])))).toBe(true);
+  });
+
+  it('a drill-tagged rule verdict too (never an alarm raise, never a sale)', async () => {
+    const { router, alarms, repo } = make();
+    const out = await router.route(verdict({ reason: '[advisory: authority drill] x', promptVersion: FLOOR_HARD_EXIT_STAMP }), { mode: 'live', hold: [] });
+    expect(out).toEqual({ kind: 'DRILL' });
+    expect(alarms.raise).not.toHaveBeenCalled();
+    expect(repo.update).toHaveBeenCalledWith('row1', { status: 'SKIPPED', reason: 'DRILL' });
+  });
+
+  it('a REAL agent EXIT_NOW while only a drill alarm is open: confirmed as usual with no alarm context; the drill alarm is not answered by it', async () => {
+    const { router, supreme, alarms } = make({ open: [drillAlarm] });
+    const out = await router.route(verdict(), { mode: 'live', hold: [] });
+    expect(out).toEqual({ kind: 'EXECUTE' });
+    expect(supreme.confirm).toHaveBeenCalledTimes(1);
+    expect(supreme.confirm).toHaveBeenCalledWith(expect.objectContaining({ alarm: null }));
+    expect(alarms.answer).not.toHaveBeenCalled();
+  });
+
+  it('a drill flag on a SUPREME_EXIT alarm never counts as the supreme asking', async () => {
+    const { router, supreme } = make({ open: [alarmRow({ id: 'se', rule: 'SUPREME_EXIT', payload: { drill: true } })] });
+    await router.route(verdict(), { mode: 'live', hold: [] });
+    expect(supreme.confirm).toHaveBeenCalledTimes(1);
+  });
+});

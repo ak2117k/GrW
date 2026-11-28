@@ -129,6 +129,15 @@ describe('OwnerButtonsService', () => {
     expect(String(telegram.editMessage.mock.calls[0][1])).toContain('Exit sent');
   });
 
+  it('authority drill: x:<id> on a drill alarm is refused — nothing sold, the alarm closed', async () => {
+    const { rows, svc, telegram, ownerExit } = setup();
+    rows.push(alarm({ payload: { drill: true } }));
+    await svc.handleCallback(tap('x:a1'), NOW);
+    expect(ownerExit.exitAsOwner).not.toHaveBeenCalled();
+    expect(rows[0].status).toBe('CLOSED');
+    expect(telegram.answerCallback).toHaveBeenCalledWith('cq1', expect.stringMatching(/DRILL/));
+  });
+
   it('h:<id> → SNOOZED until now + OWNER_HOLD_SNOOZE_MS, and the owner-silence clock restarts', async () => {
     const { rows, svc, telegram, ownerExit } = setup();
     rows.push(alarm({ alertedAt: new Date(NOW.getTime() - 9 * 60_000), alertCount: 2 }));

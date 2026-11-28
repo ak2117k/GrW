@@ -75,10 +75,15 @@ export interface DrillObservation {
   executions: Array<{ verdictId: string; status: string; reason: string | null }>;
 }
 
+/** The agent's look that answered the drill: its first verdict after the raise woken by the alarm, else its first. */
+export function drillLook(o: Pick<DrillObservation, 'verdicts'>): DrillObservation['verdicts'][number] | null {
+  return o.verdicts.find((v) => v.triggeredBy.includes('alarm')) ?? o.verdicts[0] ?? null;
+}
+
 /** The path the drill took, as far as it has got (pure, from the rows the script read). */
 export function drillPath(o: DrillObservation): DrillStep[] {
   const steps: DrillStep[] = [{ step: 'alarm', at: o.alarm.raisedAt, detail: `${o.alarm.rule} drill alarm ${o.alarm.id} raised (status ${o.alarm.status})` }];
-  const look = o.verdicts.find((v) => v.triggeredBy.includes('alarm')) ?? o.verdicts[0];
+  const look = drillLook(o);
   if (look) {
     steps.push({ step: 'look', at: look.createdAt, detail: `agent looked (triggeredBy ${look.triggeredBy.join(', ') || 'none'})` });
     steps.push({ step: 'verdict', at: look.createdAt, detail: `${look.verdict}: ${look.reason.slice(0, 200)}` });
@@ -94,7 +99,14 @@ export function drillPath(o: DrillObservation): DrillStep[] {
   return steps;
 }
 
-/** The drill failed safety if any verdict since the raise reached the executor as a sale. */
-export function drillSold(o: Pick<DrillObservation, 'executions'>): boolean {
-  return o.executions.some((e) => e.status === 'PLACED' || e.status === 'FILLED' || e.status === 'CLAIMED');
+const SALE_STATUSES = new Set(['CLAIMED', 'PLACED', 'FILLED', 'DRY_RUN']);
+
+/**
+ * The drill failed safety when its own look (or any drill-tagged verdict) reached the executor: an execution row
+ * that was claimed for a sale (CLAIMED / PLACED / FILLED, or a DRY_RUN rehearsal of one). SKIPPED DRILL is the pass.
+ */
+export function drillSold(o: Pick<DrillObservation, 'verdicts' | 'executions'>): boolean {
+  const look = drillLook(o);
+  const drillIds = new Set(o.verdicts.filter((v) => isDrillReason(v.reason) || v.id === look?.id).map((v) => v.id));
+  return o.executions.some((e) => drillIds.has(e.verdictId) && SALE_STATUSES.has(e.status));
 }

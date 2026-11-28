@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy, Optional } from '@nestjs/common';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { DEADLINE_EXIT_LEAD_MS, OWNER_HOLD_SNOOZE_MS } from '../domain/timings';
+import { isDrillAlarm } from '../domain/drill';
 import type { AlarmRow, OwnerEscalationPort } from '../exit-authority.tokens';
 import { EscalationRepository } from '../repositories/escalation.repository';
 import { TradeAlarmRepository } from '../repositories/trade-alarm.repository';
@@ -222,6 +223,12 @@ export class OwnerButtonsService implements OwnerEscalationPort, OnApplicationBo
       return;
     }
 
+    // Authority drill (domain/drill.ts): a drill never sells, not even on a tap (its messages carry no buttons).
+    if (isDrillAlarm(a)) {
+      await this.alarmRepo.update(a.id, { status: 'CLOSED' });
+      this.log.warn(`${LOG} owner tapped Exit on DRILL alarm ${a.id} (${a.symbol}): refused, nothing sold, alarm closed`);
+      return this.answer(cq, 'DRILL alarm: nothing sold (use the app to exit for real)');
+    }
     if (!this.ownerExit) {
       this.log.error(`${LOG} owner tapped Exit on ${a.symbol} (alarm ${a.id}) but OWNER_EXIT is not bound: cannot exit`);
       await this.answer(cq, 'Exit path not available: use the app');

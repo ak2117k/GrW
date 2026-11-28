@@ -10,6 +10,7 @@ import {
 } from '../domain/exit-authority';
 import { CONFIRM_TIMEOUT_MS } from '../../exit-authority/domain/timings';
 import { exitAnswer } from '../../exit-authority/domain/agent-verdict';
+import { DRILL_SKIP_REASON, isDrillAlarm, isDrillReason } from '../../exit-authority/domain/drill';
 import {
   AUTHORITY_STATE,
   OWNER_ESCALATION,
@@ -34,7 +35,9 @@ import { sendOpsAlert } from '../../../common/utils/ops-alert';
 export type RouteOutcome =
   | { kind: 'EXECUTE' }
   | { kind: 'ALARM'; alarmId: string | null }
-  | { kind: 'HELD_BY_SUPREME'; reason: string };
+  | { kind: 'HELD_BY_SUPREME'; reason: string }
+  /** An authority-drill verdict (exit-authority/domain/drill.ts): claimed SKIPPED DRILL, never executed. */
+  | { kind: 'DRILL' };
 
 /**
  * The code-rule verdict stamps (promptVersion of an EXIT_NOW no prompt wrote). CARRY is imported; the two
@@ -100,9 +103,12 @@ export class ExitAuthorityRouter {
   async route(v: PendingVerdict & { promptVersion?: string | null }, cfg?: Pick<AutoExitConfig, 'mode' | 'hold'>): Promise<RouteOutcome> {
     if (!this.active()) return EXECUTE;
     if (isPaperTrackerId(v.trackerId)) return EXECUTE;
+    const mode: AutoExitMode = cfg?.mode ?? 'live';
+    // Authority drill, belt and braces: the sentinel stores a drill look's EXIT_NOW as EXIT_ADVISORY (never polled);
+    // a verdict that still carries the drill tag is claimed SKIPPED DRILL here and never reaches the executor.
+    if (isDrillReason(v.reason)) return this.drillVerdict(v, mode);
     // The owner hold list is untouched, as today: the executor skips it OWNER_HOLD.
     if (cfg && isHeld(cfg.hold, { id: v.trackerId, symbol: v.symbol })) return EXECUTE;
-    const mode: AutoExitMode = cfg?.mode ?? 'live';
     if (isRuleStamp(v.promptVersion)) return this.ruleAlarm(v, String(v.promptVersion), mode);
     return this.agentExit(v, mode);
   }
@@ -169,8 +175,17 @@ export class ExitAuthorityRouter {
       .catch((err) => this.logger.warn(`[exit-authority] owner escalation for ${v.symbol} failed: ${errText(err)}`));
   }
 
+  private async drillVerdict(v: PendingVerdict, mode: AutoExitMode): Promise<RouteOutcome> {
+    await this.skipRow(v, mode, DRILL_SKIP_REASON);
+    this.logger.warn(`[exit-authority] DRILL verdict ${v.id} on ${v.symbol} — observe only, NOT executed`);
+    void sendOpsAlert(`authority-drill:${v.id}`, `GrW DRILL: ${v.symbol} drill verdict ${v.id} reached the exit router and was NOT executed (observe only).`).catch(() => undefined);
+    return { kind: 'DRILL' };
+  }
+
   private async agentExit(v: PendingVerdict, mode: AutoExitMode): Promise<RouteOutcome> {
-    const open = await this.openAlarms(v.trackerId);
+    // A drill alarm (domain/drill.ts) never steers a real exit: not the supreme's request, not the confirm's context,
+    // never answered here (the escalation runner answers it from the agent's verdict, observe-only).
+    const open = (await this.openAlarms(v.trackerId)).filter((a) => !isDrillAlarm(a));
     const asked = open.find((a) => a.rule === 'SUPREME_EXIT');
     if (asked) {
       this.logger.warn(`[exit-authority] agent EXIT on the supreme's own request (alarm ${asked.id}) — executing, no confirm — ${v.symbol} verdict ${v.id}`);

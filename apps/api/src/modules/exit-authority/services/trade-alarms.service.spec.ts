@@ -275,3 +275,50 @@ describe('TradeAlarmsService', () => {
     expect(await svc.openForTrackers([])).toEqual([]);
   });
 });
+
+/** AUTHORITY DRILL (supreme fixes W5): a drill never touches a real alarm, and a real raise never waits on a drill. */
+describe('TradeAlarmsService — authority drill', () => {
+  beforeEach(() => jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined));
+  afterEach(() => jest.restoreAllMocks());
+  const drill = (over: Partial<RaiseAlarm> = {}) => floor({ payload: { drill: true }, reason: 'DRILL FLOOR', severityN: null, ...over });
+
+  it('a drill with nothing live is created (payload.drill kept) and wakes the agent', async () => {
+    const { repo, wake, svc } = setup();
+    const row = await svc.raise(drill(), T0);
+    expect(row).toMatchObject({ status: 'OPEN', payload: { drill: true } });
+    expect(repo.creates).toBe(1);
+    expect(wake.wakeTracker).toHaveBeenCalledTimes(1);
+  });
+
+  it('a drill when a REAL alarm of that rule is live: refused (null) — the real alarm is never refreshed or flagged drill', async () => {
+    for (const status of ['OPEN', 'SNOOZED', 'ANSWERED'] as const) {
+      const { repo, wake, svc } = setup();
+      const real = await svc.raise(floor(), T0);
+      repo.rows[0].status = status;
+      wake.wakeTracker.mockClear();
+      expect(await svc.raise(drill(), at(REALARM_EVERY_MS + 1))).toBeNull();
+      expect(repo.rows).toHaveLength(1);
+      expect(repo.rows[0]).toMatchObject({ id: real!.id, payload: { netPnl: -350 }, reason: 'green-to-red floor broken' });
+      expect(wake.wakeTracker).not.toHaveBeenCalled();
+    }
+  });
+
+  it('a REAL raise while a drill alarm of that rule is live (even inside the re-raise window): the drill is CLOSED and a fresh real alarm created', async () => {
+    const { repo, wake, svc } = setup();
+    const d = await svc.raise(drill(), T0);
+    wake.wakeTracker.mockClear();
+    const real = await svc.raise(floor(), at(1_000));
+    expect(real).not.toBeNull();
+    expect(real!.id).not.toBe(d!.id);
+    expect(real!.payload).toEqual({ netPnl: -350 });
+    expect(repo.rows.find((r) => r.id === d!.id)!.status).toBe('CLOSED');
+    expect(wake.wakeTracker).toHaveBeenCalledTimes(1);
+  });
+
+  it('a second drill while the first is live is deduped like any raise', async () => {
+    const { repo, svc } = setup();
+    await svc.raise(drill(), T0);
+    expect(await svc.raise(drill(), at(1_000))).toBeNull();
+    expect(repo.rows).toHaveLength(1);
+  });
+});

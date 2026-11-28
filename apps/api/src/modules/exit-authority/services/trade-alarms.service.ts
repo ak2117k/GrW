@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { isPaperTracker } from '../../trade-sentinel/paper/paper-tracker';
 import { shouldReRaise } from '../domain/alarm';
+import { isDrillAlarm } from '../domain/drill';
 import {
   AUTHORITY_STATE,
   TRACKER_WAKE,
@@ -56,7 +57,19 @@ export class TradeAlarmsService implements TradeAlarmsPort {
 
   private async raiseSerial(a: RaiseAlarm, now: Date): Promise<AlarmRow | null> {
     const reason = (a.reason ?? '').slice(0, ALARM_REASON_CAP);
-    const latest = await this.repo.findLatestLive(a.trackerId, a.rule);
+    let latest = await this.repo.findLatestLive(a.trackerId, a.rule);
+
+    // Authority drill (domain/drill.ts): a drill never refreshes or flags a REAL live alarm (that would make the real
+    // alarm observe-only), and a real raise never waits on a drill: the drill row is closed and a fresh real alarm made.
+    if (isDrillAlarm(a) && latest && !isDrillAlarm(latest)) {
+      this.log.log(`[exit-authority] DRILL ${a.rule} on ${a.trackerId} refused: a real ${a.rule} alarm (${latest.id}) is live`);
+      return null;
+    }
+    if (!isDrillAlarm(a) && latest && isDrillAlarm(latest)) {
+      await this.repo.update(latest.id, { status: 'CLOSED' });
+      this.log.log(`[exit-authority] drill alarm ${latest.id} closed: a real ${a.rule} alarm supersedes it on ${a.trackerId}`);
+      latest = null;
+    }
 
     // A deadline is never lost: a raise without one (e.g. the router's CARRY alarm from a rule EXIT_NOW) keeps the
     // deadline (and the `deadline` urgency, which arms the broker-deadline backstop) of the alarm it refreshes/follows.

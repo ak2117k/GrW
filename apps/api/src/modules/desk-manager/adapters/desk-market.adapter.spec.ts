@@ -177,3 +177,179 @@ describe('DeskMarketAdapter prefers the live feed over the historical API', () =
     expect(market.bars15m).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---- W4 (2026-11-28): shared bar cache, pre-warm, level books for every underlying, VWAP from the future ----
+
+const IST = (s: string) => Date.parse(`${s}+05:30`);
+/** NSE session 15m bars (09:15–15:15 starts) for each IST day, with a per-bar volume. */
+function sessionBars(days: string[], until: number, vol = (_ts: number) => 0, px = (i: number) => 100 + i) {
+  const out: Array<Bar15m & { volume: number }> = [];
+  for (const d of days) {
+    for (let ts = IST(`${d}T09:15:00`); ts < IST(`${d}T15:30:00`) && ts < until; ts += 15 * MIN) {
+      const c = px(out.length);
+      out.push({ ts, open: c, high: c + 2, low: c - 2, close: c, volume: vol(ts) });
+    }
+  }
+  return out;
+}
+
+const NIFTY_FUT = { exchange: 'NFO', token: '35001', symbol: 'NIFTY30DEC26FUT' };
+const MASTER = [
+  { token: '35001', symbol: 'NIFTY30DEC26FUT', name: 'NIFTY', expiry: '30DEC2026', strike: '-1', instrumenttype: 'FUTIDX', exch_seg: 'NFO' },
+  { token: '35002', symbol: 'NIFTY26JAN27FUT', name: 'NIFTY', expiry: '26JAN2027', strike: '-1', instrumenttype: 'FUTIDX', exch_seg: 'NFO' },
+];
+
+function makeW4(opts: {
+  refs?: Record<string, typeof ref>;
+  bars?: (r: { exchange: string; token: string }) => Array<Bar15m & { volume?: number }>;
+  daily?: (r: { exchange: string; token: string }) => Array<{ day: string; high: number; low: number; close: number }>;
+  book?: unknown;
+  open?: boolean;
+  mode?: 'off' | 'shadow' | 'live';
+}) {
+  const refs = opts.refs ?? { NIFTY: ref };
+  const market = {
+    underlyingRef: jest.fn(async (u: string) => refs[u] ?? null),
+    ltps: jest.fn(async () => new Map<string, number>()),
+    bars15m: jest.fn(async () => [] as Bar15m[]),
+    master: jest.fn(async () => MASTER),
+    isOpen: jest.fn(() => opts.open ?? true),
+    minutesToClose: jest.fn(() => 60),
+  };
+  const info = {
+    daily: jest.fn(async (exchange: string, token: string) => (opts.daily ? opts.daily({ exchange, token }) : [])),
+    intraday15m: jest.fn(async (exchange: string, token: string) => (opts.bars ? opts.bars({ exchange, token }) : [])),
+  };
+  const moduleRef = { get: jest.fn(() => info) };
+  const levelBooks = { getLevels: jest.fn(() => opts.book ?? null) };
+  const cfg = { mode: opts.mode ?? 'shadow' };
+  const a = new DeskMarketAdapter(market as never, levelBooks as never, {} as never, cfg as never, moduleRef as never);
+  let now = T0;
+  a.clock = () => now;
+  return { a, market, info, setNow: (t: number) => (now = t) };
+}
+
+describe('W4 shared 15m bar cache (one fetch per (exchange, token) per closed bar)', () => {
+  it('two underlyings on the same line share one fetch; bars15mOf serves any other caller from the same cache', async () => {
+    const { a, info } = makeW4({ refs: { NIFTY: ref, 'NIFTY 50': ref }, bars: () => sessionBars(['2026-11-26', '2026-11-27'], T0) });
+    await a.trend15m('NIFTY', new Date(T0));
+    await a.day('NIFTY 50', new Date(T0));
+    const shared = await a.bars15mOf(ref);
+    expect(shared.length).toBeGreaterThan(20);
+    expect(info.intraday15m).toHaveBeenCalledTimes(1);
+  });
+
+  it('a historical answer missing the last closed bar (Angel publish lag) is retried after a minute', async () => {
+    // At 11:10 IST the last closed bar is 10:45–11:00; the answer stops at 10:30–10:45.
+    const { a, info, setNow } = makeW4({ bars: () => sessionBars(['2026-11-26', '2026-11-27'], IST('2026-11-27T10:45:00')) });
+    await a.trend15m('NIFTY', new Date(T0));
+    setNow(T0 + 61_000);
+    await a.trend15m('NIFTY', new Date(T0 + 61_000));
+    await new Promise((r) => setImmediate(r));
+    expect(info.intraday15m).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('W4 pre-warm (boot, venue open, every closed bar)', () => {
+  it('pre-warms the configured list and the last packet underlyings, so a run never waits on a cold fetch', async () => {
+    const refs = { NIFTY: ref, RELIANCE: { exchange: 'NSE', token: '2885', symbol: 'RELIANCE' } };
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { a, info } = makeW4({ refs, bars: () => sessionBars(['2026-11-26', '2026-11-27'], T0) });
+    info.intraday15m.mockImplementation(async () => {
+      await gate;
+      return sessionBars(['2026-11-26', '2026-11-27'], T0);
+    });
+    // RELIANCE was in the last packet (read once); NIFTY is in the configured list.
+    const first = a.trend15m('RELIANCE', new Date(T0));
+    release();
+    await first;
+    info.intraday15m.mockClear();
+    const warmed = await a.prewarm(['NIFTY']);
+    expect(warmed).toEqual(expect.arrayContaining(['NIFTY', 'RELIANCE']));
+    // NIFTY's line + its near-month future (VWAP volume) + RELIANCE.
+    const tokens = info.intraday15m.mock.calls.map((c) => c[1]);
+    expect(tokens).toEqual(expect.arrayContaining([ref.token, NIFTY_FUT.token, '2885']));
+    // A read right after the pre-warm is served from memory: no new fetch.
+    info.intraday15m.mockClear();
+    expect(await a.trend15m('NIFTY', new Date(T0))).toMatch(/15m close/);
+    expect(info.intraday15m).not.toHaveBeenCalled();
+  });
+
+  it('a warm underlying whose venue is closed is not re-fetched by the pre-warm', async () => {
+    const { a, info } = makeW4({ bars: () => sessionBars(['2026-11-26', '2026-11-27'], T0), open: false });
+    await a.prewarm(['NIFTY']);
+    const n = info.intraday15m.mock.calls.length;
+    await a.prewarm(['NIFTY']);
+    expect(info.intraday15m.mock.calls.length).toBe(n);
+  });
+
+  it('DESK_MANAGER=off starts no pre-warm timer', () => {
+    const { a, info } = makeW4({ mode: 'off' });
+    a.onApplicationBootstrap();
+    a.onModuleDestroy();
+    expect(info.intraday15m).not.toHaveBeenCalled();
+  });
+});
+
+describe('W4 level book for every packet underlying', () => {
+  const daily = () => [
+    { day: '2026-11-24', high: 120, low: 90, close: 100 },
+    { day: '2026-11-25', high: 130, low: 95, close: 110 },
+    { day: '2026-11-26', high: 140, low: 96, close: 125 },
+    { day: '2026-11-27', high: 999, low: 1, close: 500 }, // today's forming daily: never a "previous day"
+  ];
+
+  it('no in-memory book → built on demand from daily + 15m bars (PDH/PDL/prev close, OR from the first 15m bar)', async () => {
+    const bars = () => sessionBars(['2026-11-26', '2026-11-27'], T0);
+    const { a, info } = makeW4({ bars, daily });
+    const lv = await a.levels('NIFTY', new Date(T0));
+    const all = bars();
+    const firstToday = all.find((b) => b.ts === IST('2026-11-27T09:15:00'))!;
+    const firstPrev = all[0];
+    expect(lv).toEqual(expect.arrayContaining([140, 96, 125, firstToday.high, firstToday.low, firstPrev.high, firstPrev.low]));
+    expect(lv).not.toContain(999);
+    // Daily statics are fetched once per session.
+    await a.levels('NIFTY', new Date(T0 + MIN));
+    expect(info.daily).toHaveBeenCalledTimes(1);
+  });
+
+  it('no daily answer → the previous session is taken from the 15m bars', async () => {
+    const bars = () => sessionBars(['2026-11-26', '2026-11-27'], T0);
+    const { a } = makeW4({ bars });
+    const lv = await a.levels('NIFTY', new Date(T0));
+    const prev = bars().filter((b) => b.ts < IST('2026-11-27T00:00:00'));
+    expect(lv).toEqual(expect.arrayContaining([Math.max(...prev.map((b) => b.high)), Math.min(...prev.map((b) => b.low)), prev[prev.length - 1].close]));
+  });
+
+  it('an existing in-memory book is still used first', async () => {
+    const book = { pdh: 555, pdl: 444, prevClose: 500, orh: null, orl: null, prevOrh: null, prevOrl: null, vwap: 0, spot: 0, roundNumbers: [], todayHigh: 0, todayLow: 0 };
+    const { a, info } = makeW4({ bars: () => sessionBars(['2026-11-26', '2026-11-27'], T0), daily, book });
+    expect(await a.levels('NIFTY', new Date(T0))).toEqual(expect.arrayContaining([555, 444, 500]));
+    expect(info.daily).not.toHaveBeenCalled();
+  });
+});
+
+describe('W4 VWAP when the spot line has no volume', () => {
+  it('an index takes its session VWAP weights from the near-month future, prices from the index bars', async () => {
+    const vol = (ts: number) => (ts === IST('2026-11-27T09:15:00') ? 300 : ts === IST('2026-11-27T09:30:00') ? 100 : 0);
+    const spot = sessionBars(['2026-11-26', '2026-11-27'], T0); // index: no volume
+    const fut = sessionBars(['2026-11-26', '2026-11-27'], T0, vol, (i) => 200 + i); // future: volume, premium price
+    const { a } = makeW4({ bars: (r) => (r.token === NIFTY_FUT.token ? fut : spot) });
+    const day = await a.day('NIFTY', new Date(T0));
+    const b1 = spot.find((b) => b.ts === IST('2026-11-27T09:15:00'))!;
+    const b2 = spot.find((b) => b.ts === IST('2026-11-27T09:30:00'))!;
+    const tp = (b: Bar15m) => (b.high + b.low + b.close) / 3;
+    expect(day?.vwap).toBeCloseTo((tp(b1) * 300 + tp(b2) * 100) / 400, 6);
+  });
+
+  it('a line with its own volume uses it; no volume anywhere → vwap null', async () => {
+    const own = sessionBars(['2026-11-26', '2026-11-27'], T0, () => 10);
+    const r1 = makeW4({ refs: { RELIANCE: { exchange: 'NSE', token: '2885', symbol: 'RELIANCE' } }, bars: () => own });
+    const today = own.filter((b) => b.ts >= IST('2026-11-27T00:00:00') && b.ts + 15 * MIN <= T0); // closed bars only
+    const exp = today.reduce((s, b) => s + ((b.high + b.low + b.close) / 3) * 10, 0) / (10 * today.length);
+    expect((await r1.a.day('RELIANCE', new Date(T0)))?.vwap).toBeCloseTo(exp, 6);
+    const r2 = makeW4({ refs: { RELIANCE: { exchange: 'NSE', token: '2885', symbol: 'RELIANCE' } }, bars: () => sessionBars(['2026-11-26', '2026-11-27'], T0) });
+    expect((await r2.a.day('RELIANCE', new Date(T0)))?.vwap).toBeNull();
+  });
+});

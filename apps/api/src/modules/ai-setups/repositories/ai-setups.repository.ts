@@ -366,7 +366,8 @@ export class AiSetupsRepository implements SetupPacketSources {
 
   /** The channel's rolling call / claim record from the newest DONE self-review run (its byChannel entry). */
   async channelRecord(channelId: string): Promise<unknown | null> {
-    const run = await this.prisma.selfReviewRun.findFirst({ where: { status: 'DONE' }, orderBy: { startedAt: 'desc' }, select: { summary: true, startedAt: true } });
+    // PARTIAL = scored, AI diagnosis failed (self-review SELF_REVIEW_SCORED_STATUSES): its summary is complete.
+    const run = await this.prisma.selfReviewRun.findFirst({ where: { status: { in: ['DONE', 'PARTIAL'] } }, orderBy: { startedAt: 'desc' }, select: { summary: true, startedAt: true } });
     const v = findByChannel(run?.summary ?? null)?.[channelId];
     return v && typeof v === 'object' ? { asOf: run?.startedAt?.toISOString() ?? null, ...(v as Record<string, unknown>) } : null;
   }

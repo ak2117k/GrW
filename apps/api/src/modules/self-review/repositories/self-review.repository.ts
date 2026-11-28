@@ -6,6 +6,14 @@ import type { ProposalDraft, RunSummary, VerificationDraft } from '../self-revie
 const json = (v: unknown): Prisma.InputJsonValue => v as Prisma.InputJsonValue;
 const UPSERT_BATCH = 50;
 
+/**
+ * Run statuses whose SCORING finished. PARTIAL (2026-11-28) = scored, but the AI diagnosis failed (cut off at
+ * max_tokens, refused, transport error), so the run has no diagnosis, lessons or fix tickets. Readers of the
+ * latest scored summary take both; readers that want a diagnosis check `diagnosis` too.
+ */
+export const SELF_REVIEW_SCORED_STATUSES = ['DONE', 'PARTIAL'] as const;
+export type SelfReviewFinishStatus = 'DONE' | 'PARTIAL' | 'FAILED';
+
 /** self_review_runs / verification_results / tuning_proposals / tuning_overrides (+ agent_lessons reads). */
 @Injectable()
 export class SelfReviewRepository {
@@ -17,7 +25,7 @@ export class SelfReviewRepository {
     return this.prisma.selfReviewRun.create({ data: { sessionDate, status: 'RUNNING' } });
   }
 
-  finishRun(id: string, data: { status: 'DONE' | 'FAILED'; summary?: RunSummary | null; error?: string | null }) {
+  finishRun(id: string, data: { status: SelfReviewFinishStatus; summary?: RunSummary | null; error?: string | null }) {
     return this.prisma.selfReviewRun.update({
       where: { id },
       data: {
@@ -38,7 +46,7 @@ export class SelfReviewRepository {
   }
 
   latestDoneRun() {
-    return this.prisma.selfReviewRun.findFirst({ where: { status: 'DONE' }, orderBy: { startedAt: 'desc' } });
+    return this.prisma.selfReviewRun.findFirst({ where: { status: { in: [...SELF_REVIEW_SCORED_STATUSES] } }, orderBy: { startedAt: 'desc' } });
   }
 
   runs(limit: number) {
@@ -50,10 +58,10 @@ export class SelfReviewRepository {
     return this.prisma.selfReviewRun.findMany({ where: { sessionDate, status: 'DONE' }, orderBy: { startedAt: 'desc' }, take: 10 });
   }
 
-  /** The newest DONE run of the latest session before `sessionDate` (the previous night's run). */
+  /** The newest DONE / PARTIAL run of the latest session before `sessionDate` (the previous night's run). */
   previousDoneRun(sessionDate: string) {
     return this.prisma.selfReviewRun.findFirst({
-      where: { status: 'DONE', sessionDate: { lt: sessionDate } },
+      where: { status: { in: [...SELF_REVIEW_SCORED_STATUSES] }, sessionDate: { lt: sessionDate } },
       orderBy: [{ sessionDate: 'desc' }, { startedAt: 'desc' }],
     });
   }

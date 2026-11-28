@@ -322,7 +322,7 @@ describe('SelfReviewRunService', () => {
     expect(stored.length).toBe(n);
   });
 
-  it('hands S’s misses (capped, factor/MBM excluded) to the diagnosis when bound; its failure does not fail the run', async () => {
+  it('hands S’s misses (capped, factor/MBM excluded) to the diagnosis when bound; its failure does not fail the run (PARTIAL)', async () => {
     const diagnose = jest.fn(async () => {
       throw new Error('llm down');
     });
@@ -333,8 +333,26 @@ describe('SelfReviewRunService', () => {
     expect(misses.every((m) => m.kind !== 'SCORECARD_FACTOR' && m.kind !== 'MBM_PREDICTION')).toBe(true);
     expect(misses.length).toBeGreaterThan(0);
     const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { status: string; error: string }];
-    expect(finish[1].status).toBe('DONE');
+    expect(finish[1].status).toBe('PARTIAL');
     expect(finish[1].error).toMatch(/diagnosis/);
+  });
+
+  // 2026-11-28 (Fix 6): 14 runs in a row finished DONE with "reply stopped: max_tokens" and no diagnosis.
+  it('a truncated diagnosis marks the run PARTIAL (never DONE), alerts, and raises no proposals or tickets', async () => {
+    const diagnose = jest.fn(async () => {
+      throw new Error('reply stopped: max_tokens (output budget 16000 tokens used up)');
+    });
+    const grading = { gradeSession: jest.fn(async () => ({ graded: 3, wrong: 1, unscorable: 0, byType: {} })) };
+    const tickets = { raise: jest.fn(), upsert: jest.fn(), upsertFromDiagnosis: jest.fn() };
+    const alert = jest.fn(async () => true);
+    const { svc, repo } = make({ diagnosis: { diagnose }, loop: { grading, grades: { wrongSince: async () => [] }, tickets, alert } });
+    await svc.run(NOW);
+    const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { status: string; error: string }];
+    expect(finish[1].status).toBe('PARTIAL');
+    expect(finish[1].error).toContain('reply stopped: max_tokens');
+    expect(alert).toHaveBeenCalledWith('SELF_REVIEW_DIAGNOSIS_FAILED', expect.stringMatching(/PARTIAL.*max_tokens/s));
+    for (const fn of Object.values(tickets)) expect(fn).not.toHaveBeenCalled();
+    expect(repo.setDiagnosisIfEmpty).not.toHaveBeenCalled();
   });
 
   it('a stopped-out trade setup is diagnosed, with the news idea it came from (owner 2026-10-28)', async () => {
@@ -515,7 +533,7 @@ describe('SelfReviewRunService — wrong-decision loop (2026-11-04)', () => {
     await svc.run(NOW);
     expect(alert).toHaveBeenCalledWith('SELF_REVIEW_DIAGNOSIS_FAILED', expect.stringContaining('usage limit reached'));
     const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { status: string; error: string }];
-    expect(finish[1].status).toBe('DONE');
+    expect(finish[1].status).toBe('PARTIAL');
     expect(finish[1].error).toContain('usage limit reached');
   });
 

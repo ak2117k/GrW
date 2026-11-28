@@ -273,13 +273,15 @@ export class SelfReviewRunService {
       });
 
       const loop = decisionLoopOn() ? await this.gradeDecisions(S, sessions, now, errors) : null;
-      const { out: diagnosis, sent } = await this.diagnose(run.id, S, sessionRows, summary, errors, loop?.rows ?? []);
+      const { out: diagnosis, sent, failed: diagnosisFailed } = await this.diagnose(run.id, S, sessionRows, summary, errors, loop?.rows ?? []);
       if (loop) summary.decisions = await this.finishDecisionLoop(S, loop, diagnosis, sent, now, errors);
       const mbmSkill = await this.mbmSkillRuns(S, summary, errors);
       const { raised: proposals, considered } = await this.propose(run.id, history, suggestionsOf(diagnosis), now, errors, mbmSkill);
       summary.proposalsConsidered = considered;
 
-      await this.repo.finishRun(run.id, { status: 'DONE', summary, error: errors.length ? errors.join('; ').slice(0, 2000) : null });
+      // PARTIAL, never DONE, when the AI diagnosis was attempted and failed (2026-11-28: 14 runs in a row were DONE
+      // with "reply stopped: max_tokens" and no diagnosis, lessons or tickets). The scoring summary is complete.
+      await this.repo.finishRun(run.id, { status: diagnosisFailed ? 'PARTIAL' : 'DONE', summary, error: errors.length ? errors.join('; ').slice(0, 2000) : null });
       this.logger.log(
         `[self-review] ${trigger} run ${run.id} for ${S}: ${drafts.length} results upserted, ${proposals} proposals` +
           (errors.length ? `, ${errors.length} soft errors` : ''),
@@ -593,7 +595,7 @@ export class SelfReviewRunService {
     summary: RunSummary,
     errors: string[],
     decisionRows: readonly DecisionGradeRowLike[] = [],
-  ): Promise<{ out: DiagnosisOutput | null; sent: DiagnosisMiss[] }> {
+  ): Promise<{ out: DiagnosisOutput | null; sent: DiagnosisMiss[]; failed?: true }> {
     // The decision ledger's WRONG / DETECTOR rows (last 10 sessions) share the 15-miss cap with the older kinds.
     // Missed moves are scored in ATRs, so they go first or the bp- and rupee-scored misses would always outrank them.
     const missed = topMisses(rows.filter((r) => r.kind === 'MISSED_MOVE'), MISSED_MOVE_DIAGNOSIS_SLOTS);
@@ -624,11 +626,11 @@ export class SelfReviewRunService {
       this.logger.warn(`[self-review] diagnosis failed (run continues): ${errText(e)}`);
       const send = this.alert ?? ((key: string, text: string) => sendOpsAlert(key, text));
       try {
-        await send('SELF_REVIEW_DIAGNOSIS_FAILED', `Self-review ${S}: the AI analysis failed, so this session has no diagnosis, lessons or fix tickets. The scoring still ran. Reason: ${errText(e).slice(0, 500)}`);
+        await send('SELF_REVIEW_DIAGNOSIS_FAILED', `Self-review ${S}: run PARTIAL. The AI analysis failed, so this session has no diagnosis, lessons or fix tickets. The scoring still ran. Reason: ${errText(e).slice(0, 500)}`);
       } catch {
         // An injected double might throw; the run carries on either way.
       }
-      return { out: null, sent: misses };
+      return { out: null, sent: misses, failed: true };
     }
   }
 

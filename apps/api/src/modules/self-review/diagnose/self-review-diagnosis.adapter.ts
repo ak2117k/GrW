@@ -24,13 +24,14 @@ export class SelfReviewDiagnosisAdapter implements DiagnosisPort {
   async diagnose(runId: string, misses: DiagnosisMiss[], context?: { signalPaper?: unknown; noiseReads?: unknown; engine?: unknown }): Promise<DiagnosisOutput | null> {
     // The stored diagnosis is the gated one too, so the page never shows a lesson that was not written.
     const result = lessonGated(await this.diagnosis.diagnose(runId, misses, context), misses);
+    // A FAILED diagnosis (cut off, refused, unparseable) never touches the lessons store — not even as an empty delta.
+    if (result.status === 'FAILED') throw new Error(result.reason ?? 'the diagnosis failed');
     const cases = new Map(misses.map((m) => [m.refId, { kind: m.kind as string, session: m.sessionDate, symbol: m.symbol }]));
     try {
       await this.lessons.upsertFromDiagnosis(runId, result, (refId) => cases.get(refId));
     } catch (e) {
       this.logger.warn(`[self-review] run ${runId}: lesson upsert failed: ${e instanceof Error ? e.message : String(e)}`);
     }
-    if (result.status === 'FAILED') throw new Error(result.reason ?? 'the diagnosis failed');
     return diagnosisForRun(result);
   }
 }

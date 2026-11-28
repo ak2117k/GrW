@@ -16,8 +16,15 @@ export const DIAGNOSIS_PROMPT_VERSION = 'd9';
 
 /** At most this many misses go into one call (contract). */
 export const MAX_MISSES = 15;
-/** Output budget (contract: ≤ ~3k). */
-export const DIAGNOSIS_MAX_TOKENS = 3000;
+/**
+ * Output budget, THINKING INCLUDED. The contract's "≤ ~3k" was the reply alone; on Claude Opus 5.x
+ * (Vertex since 2026-11-22) thinking is always on at effort high and is billed against max_tokens. At
+ * 3000 every run from 11-23 to 11-27 spent all 3000 on thinking, returned an empty text block and
+ * stopped at max_tokens. The CLI runs before it (which ignored max_tokens) used 2.3k–9.0k output
+ * tokens for the same prompt. 16000 is ~1.8× the largest seen and the gateway's non-streaming
+ * profile ceiling (agents/agent-registry MAX_PROFILE_TOKENS; the SDK refuses non-streaming above ~21k).
+ */
+export const DIAGNOSIS_MAX_TOKENS = 16_000;
 /**
  * Input budget: ~30k tokens. At ~4 chars a token, the user message is held under 100k
  * chars, leaving room for the system prompt.

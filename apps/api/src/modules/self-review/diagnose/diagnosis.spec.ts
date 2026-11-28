@@ -8,6 +8,7 @@ import {
   validateDiagnosis,
 } from './diagnosis-prompt';
 import { DiagnosisService } from './diagnosis.service';
+import { MAX_PROFILE_TOKENS } from '../../ai-gateway/agents/agent-registry';
 import { diagnosisForRun, type MissInput } from './types';
 import type { LessonRecord } from '../lessons/types';
 
@@ -244,6 +245,32 @@ describe('DiagnosisService', () => {
     expect(res.misses).toEqual([]);
     expect(res.reason).toBeTruthy();
     expect(diagnosisForRun(res)).toBeNull();
+  });
+
+  // 2026-11-28 (Fix 6): on Vertex Opus 5.5 thinking is always on and counts against max_tokens. At 3000 every
+  // night's reply was all thinking (text '') and stopped at max_tokens; the CLI runs before it used 2.3k–9k.
+  it('the output budget fits thinking + the reply: >= 16000 and within the non-streaming profile ceiling', () => {
+    expect(DIAGNOSIS_MAX_TOKENS).toBeGreaterThanOrEqual(16_000);
+    expect(DIAGNOSIS_MAX_TOKENS).toBeLessThanOrEqual(MAX_PROFILE_TOKENS);
+  });
+
+  it('a max_tokens stop names the budget it used up', async () => {
+    const create = jest.fn().mockResolvedValue({ content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: '' }], stop_reason: 'max_tokens' });
+    const res = await make(create).svc.diagnose('r', [miss('r1')]);
+    expect(res.status).toBe('FAILED');
+    expect(res.reason).toBe(`reply stopped: max_tokens (output budget ${DIAGNOSIS_MAX_TOKENS} tokens used up)`);
+  });
+
+  it('a reply that did not end its turn is never applied, even when its JSON parses', async () => {
+    const create = jest.fn().mockResolvedValue(reply('{"misses":[{"refIds":["r1"],"cause":"gap","category":"THESIS_WRONG","lessonKey":"old-key"}]}', 'pause_turn'));
+    const res = await make(create).svc.diagnose('r', [miss('r1')]);
+    expect(res).toMatchObject({ status: 'FAILED', misses: [], reason: 'reply stopped: pause_turn' });
+  });
+
+  it('thinking blocks beside the text are ignored; the text JSON is read', async () => {
+    const create = jest.fn().mockResolvedValue({ content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: '{"misses":[{"refIds":["r1"],"cause":"gap","category":"THESIS_WRONG"}]}' }], stop_reason: 'end_turn' });
+    const res = await make(create).svc.diagnose('r', [miss('r1')]);
+    expect(res).toMatchObject({ status: 'OK', misses: [{ refIds: ['r1'], cause: 'gap', category: 'THESIS_WRONG' }] });
   });
 
   it('the signal paper splits go in (even with no misses) and the assessment comes back; the prompt asks for "insufficient sample"', async () => {

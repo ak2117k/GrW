@@ -57,7 +57,8 @@ export class SelfReviewService {
 
   async latest(): Promise<SelfReviewLatestView> {
     const [newest, proposalsPending] = await Promise.all([this.repo.latestDoneRun().then((r) => r ?? this.repo.latestRun()), this.repo.countPending()]);
-    const run = newest && newest.status === 'DONE' ? shownRun(newest, await this.repo.doneRunsFor(newest.sessionDate)) : newest;
+    // A PARTIAL run (scored, diagnosis failed) borrows an earlier same-session diagnosis exactly like an undiagnosed DONE one.
+    const run = newest && (newest.status === 'DONE' || newest.status === 'PARTIAL') ? shownRun(newest, await this.repo.doneRunsFor(newest.sessionDate)) : newest;
     if (!run) return { run: null, summary: null, misses: [], lessonsAdded: [], proposalsPending };
     const [results, lessons] = await Promise.all([this.repo.results({ sessionDate: run.sessionDate }), this.repo.lessonsFromRun(run.id)]);
     const bySubject = new Map(results.map((r) => [r.refId, r]));

@@ -50,4 +50,11 @@ describe('SelfReviewDiagnosisAdapter (stream A DiagnosisPort)', () => {
     await expect(new SelfReviewDiagnosisAdapter(failed as never, broken as never).diagnose('r', [miss('a', 'NEWS_IDEA')])).rejects.toThrow('LLM call failed: x');
     expect(await new SelfReviewDiagnosisAdapter(ok as never, broken as never).diagnose('r', [miss('a', 'NEWS_IDEA')])).toEqual({ misses: [], promptVersion: 'd1', model: undefined });
   });
+
+  it('a FAILED (e.g. truncated) diagnosis never reaches the lessons store', async () => {
+    const failed = { diagnose: jest.fn().mockResolvedValue({ status: 'FAILED', misses: [], reason: 'reply stopped: max_tokens', sent: 1, dropped: 0, promptVersion: 'd9' }) };
+    const lessons = { upsertFromDiagnosis: jest.fn() };
+    await expect(new SelfReviewDiagnosisAdapter(failed as never, lessons as never).diagnose('r', [miss('a', 'NEWS_IDEA')])).rejects.toThrow('reply stopped: max_tokens');
+    expect(lessons.upsertFromDiagnosis).not.toHaveBeenCalled();
+  });
 });

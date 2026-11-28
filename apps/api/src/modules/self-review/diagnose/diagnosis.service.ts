@@ -24,6 +24,9 @@ export const SELF_REVIEW_LLM = 'SELF_REVIEW_LLM';
 /** The `ai_calls.job` label of the diagnosis call (direct, gateway-off path). */
 export const SELF_REVIEW_DIAGNOSE_JOB = 'self-review.diagnose';
 
+/** The stop reasons of a reply that finished; anything else is treated as incomplete. */
+const COMPLETE_STOPS: ReadonlySet<string> = new Set(['end_turn', 'stop_sequence']);
+
 type Effort = 'low' | 'medium' | 'high';
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high'];
 
@@ -81,8 +84,12 @@ export class DiagnosisService {
     } catch (e) {
       return this.failed(runId, `LLM call failed: ${msg(e)}`, sent.length, dropped, tier.model);
     }
-    if (reply.stop_reason === 'refusal' || reply.stop_reason === 'max_tokens' || reply.stop_reason === 'model_context_window_exceeded') {
-      return this.failed(runId, `reply stopped: ${reply.stop_reason}`, sent.length, dropped, tier.model);
+    // Only a reply that ENDED its turn is read: a cut-off one (max_tokens, context window), a refusal, a
+    // pause_turn or any other stop is never parsed, so no part of it reaches the lessons, tickets or proposals.
+    // (null = a transport that does not report one, e.g. an older CLI envelope.)
+    if (reply.stop_reason != null && !COMPLETE_STOPS.has(reply.stop_reason)) {
+      const budget = reply.stop_reason === 'max_tokens' ? ` (output budget ${DIAGNOSIS_MAX_TOKENS} tokens used up)` : '';
+      return this.failed(runId, `reply stopped: ${reply.stop_reason}${budget}`, sent.length, dropped, tier.model);
     }
     try {
       const text = (reply.content ?? []).filter((b) => b.type === 'text').map((b) => b.text ?? '').join('');

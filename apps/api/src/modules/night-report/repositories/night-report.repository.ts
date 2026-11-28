@@ -209,7 +209,8 @@ export class NightReportRepository implements NightReportStore {
     const ids = [...new Set(rows.map((x) => x.channelId))];
     const channels = ids.length ? await this.prisma.telegramChannel.findMany({ where: { id: { in: ids } }, select: { id: true, title: true } }) : [];
     const title = new Map(channels.map((c) => [c.id, c.title]));
-    const run = await this.prisma.selfReviewRun.findFirst({ where: { status: 'DONE' }, orderBy: { startedAt: 'desc' }, select: { summary: true } });
+    // PARTIAL = scored, AI diagnosis failed (self-review SELF_REVIEW_SCORED_STATUSES): its summary is complete.
+    const run = await this.prisma.selfReviewRun.findFirst({ where: { status: { in: ['DONE', 'PARTIAL'] } }, orderBy: { startedAt: 'desc' }, select: { summary: true } });
     const byChannel = (run?.summary as { byChannel?: unknown } | null)?.byChannel;
     return {
       rows: rows.map((x) => ({ ...x, channelTitle: title.get(x.channelId) ?? null })),

@@ -242,7 +242,8 @@ export class SignalTraderRepository {
 
   async allChannelStats(): Promise<Record<string, unknown> | null> {
     const run = await this.prisma.selfReviewRun
-      .findFirst({ where: { status: 'DONE' }, orderBy: { startedAt: 'desc' }, select: { summary: true } })
+      // PARTIAL = scored, AI diagnosis failed (self-review SELF_REVIEW_SCORED_STATUSES): its summary is complete.
+      .findFirst({ where: { status: { in: ['DONE', 'PARTIAL'] } }, orderBy: { startedAt: 'desc' }, select: { summary: true } })
       .catch(() => null);
     return findByChannel(run?.summary ?? null);
   }

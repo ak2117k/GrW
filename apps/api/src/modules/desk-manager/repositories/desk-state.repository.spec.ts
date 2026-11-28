@@ -116,4 +116,30 @@ describe('DeskStateRepository', () => {
     expect(out[0].text.length).toBe(300);
     expect(out[1]).toMatchObject({ ref: 'signal:sd1', kind: 'signal_decision', text: 'no room', detail: { decision: 'SKIP', skipReason: 'late' } });
   });
+
+  it('proposals read enough rows per source for the quotas (engine many, for the merge)', async () => {
+    const p = prismaMock();
+    await new DeskStateRepository(p as never).proposalsSince('owner', new Date(NOW.getTime() - 7200_000));
+    const take = (m: { findMany: jest.Mock }) => (m.findMany.mock.calls[0] as unknown as [{ take: number }])[0].take;
+    expect(take(p.messageReading)).toBeGreaterThanOrEqual(16);
+    expect(take(p.signalDecision)).toBeGreaterThanOrEqual(8);
+    expect(take(p.aiSetup)).toBeGreaterThanOrEqual(6);
+    expect(take(p.entryEngineDecision)).toBeGreaterThanOrEqual(200);
+  });
+
+  it('channel views: INFO readings of the last 3 h, max 10, newest first, with the channel name and the first claim', async () => {
+    const p = { ...prismaMock(), telegramChannel: { findMany: jest.fn(async () => [{ id: 'c1', title: 'Mr P', username: 'mrp' }]) } };
+    p.messageReading.findMany.mockResolvedValueOnce([
+      { messageId: 'm1', channelId: 'c1', postedAt: new Date(NOW.getTime() - 60_000), summary: 'Nifty weak below 26200', claims: [{ subject: 'NIFTY', bias: 'BEAR', text: 'weak' }] },
+      { messageId: 'm2', channelId: 'c9', postedAt: new Date(NOW.getTime() - 120_000), summary: 's'.repeat(600), claims: [] },
+    ]);
+    const out = await new DeskStateRepository(p as never).channelViewsSince(new Date(NOW.getTime() - 3 * 3600_000));
+    const arg = (p.messageReading.findMany.mock.calls[0] as unknown as [{ where: Record<string, unknown>; take: number; orderBy: unknown }])[0];
+    expect(arg.where).toMatchObject({ kind: 'INFO', postedAt: { gte: new Date(NOW.getTime() - 3 * 3600_000) } });
+    expect(arg.take).toBe(10);
+    expect(arg.orderBy).toEqual({ postedAt: 'desc' });
+    expect(out[0]).toEqual({ channel: 'Mr P', at: new Date(NOW.getTime() - 60_000).toISOString(), summary: 'Nifty weak below 26200', subject: 'NIFTY', bias: 'BEAR' });
+    expect(out[1]).toMatchObject({ channel: 'c9', subject: null, bias: null });
+    expect(out[1].summary.length).toBe(300);
+  });
 });

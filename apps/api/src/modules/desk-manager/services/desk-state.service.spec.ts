@@ -47,6 +47,7 @@ function repoMock(over: Record<string, unknown> = {}) {
     latestSentinel: jest.fn(async () => new Map()),
     managerLevelRows: jest.fn(async () => []),
     proposalsSince: jest.fn(async () => [] as Proposal[]),
+    channelViewsSince: jest.fn(async () => [] as unknown[]),
     claimsOfDay: jest.fn(async () => []),
     decisionsToday: jest.fn(async () => []),
     scorecard: jest.fn(async () => null),
@@ -65,8 +66,30 @@ const market = (over: Partial<DeskMarketPort> = {}): DeskMarketPort => ({
   ...over,
 });
 
+/** CRUDEOIL + CRUDEOILM 5200 / 5300 CE + PE on 16DEC2026 (Angel master rows); premiums CE 385 (full), 385 (mini). */
+const crudeRow = (name: string, strike: number, kind: 'CE' | 'PE', lot: string) => ({
+  token: `${name}-${strike}${kind}`,
+  symbol: `${name}16DEC26${strike}${kind}`,
+  name,
+  expiry: '16DEC2026',
+  strike: String(strike * 100),
+  lotsize: lot,
+  instrumenttype: 'OPTFUT',
+  exch_seg: 'MCX',
+  tick_size: '10',
+});
+const CRUDE_MASTER = ['CRUDEOIL', 'CRUDEOILM'].flatMap((n) => [5200, 5300].flatMap((s) => (['CE', 'PE'] as const).map((k) => crudeRow(n, s, k, n === 'CRUDEOIL' ? '100' : '10'))));
+const lotMarket = (over: Record<string, unknown> = {}) => ({
+  underlyingRef: jest.fn(async (u: string) => ({ exchange: 'MCX', token: `${u}-FUT`, symbol: `${u}FUT` })),
+  ltps: jest.fn(async (refs: ReadonlyArray<{ exchange: string; token: string }>) => new Map(refs.map((r) => [`${r.exchange}:${r.token}`, r.token.endsWith('FUT') ? 5210 : r.token.endsWith('CE') ? 385 : 360] as const))),
+  master: jest.fn(async () => CRUDE_MASTER as unknown[]),
+  isOpen: () => true,
+  minutesToClose: () => 300,
+  ...over,
+});
+
 const make = (repo: ReturnType<typeof repoMock>, m: DeskMarketPort | undefined = market(), guard = { state: jest.fn(async () => guardState) }) =>
-  new DeskStateService(repo as never, guard, m, undefined);
+  new DeskStateService(repo as never, guard, m, undefined, undefined, undefined, { available: async () => 50_000 });
 
 describe('DeskStateService.build', () => {
   const env = process.env.AI_AUTO_EXIT_HOLD;
@@ -98,13 +121,84 @@ describe('DeskStateService.build', () => {
     expect(p.pnl.status).toBe('unavailable');
   });
 
-  it('proposals capped at 40 newest first', async () => {
+  it('proposals: per-source quotas (readings 16), newest first', async () => {
     const list = Array.from({ length: 60 }, (_, i) => proposal(59 - i)); // oldest first
     const p = await make(repoMock({ proposalsSince: jest.fn(async () => list) })).build('owner', NOW, cfg);
-    expect(p.proposals.value).toHaveLength(40);
+    expect(p.proposals.value).toHaveLength(16);
     expect(p.proposals.value?.[0].ref).toBe('reading:0');
-    expect(p.proposals.value?.[39].ref).toBe('reading:39');
+    expect(p.proposals.value?.[15].ref).toBe('reading:15');
   });
+
+  it('proposals: 40 engine items never crowd out readings / signals; engine merged per (underlying, side) with a count', async () => {
+    const engine = Array.from({ length: 40 }, (_, i): Proposal => ({ ref: `engine:${i}`, kind: 'engine', at: new Date(NOW.getTime() - i * 60_000).toISOString(), underlying: i % 2 ? 'NIFTY' : 'CRUDEOIL', text: '', detail: { action: 'ENTER_CE' } }));
+    const sig: Proposal = { ref: 'signal:s1', kind: 'signal_decision', at: new Date(NOW.getTime() - 90 * 60_000).toISOString(), underlying: 'SENSEX', text: '', detail: {} };
+    const p = await make(repoMock({ proposalsSince: jest.fn(async () => [...engine, proposal(100), sig]) })).build('owner', NOW, cfg);
+    const refs = p.proposals.value?.map((x) => x.ref) ?? [];
+    expect(refs).toEqual(expect.arrayContaining(['engine:0', 'engine:1', 'reading:100', 'signal:s1']));
+    expect(refs).toHaveLength(4);
+    expect(p.proposals.value?.find((x) => x.ref === 'engine:0')?.detail.count).toBe(20);
+  });
+
+  it('channelViews block: INFO market views of the last 3 h', async () => {
+    const views = [{ channel: 'Mr P', at: NOW.toISOString(), summary: 'Nifty weak below 26200', subject: 'NIFTY', bias: 'BEAR' }];
+    const repo = repoMock({ channelViewsSince: jest.fn(async () => views) });
+    const p = await make(repo).build('owner', NOW, cfg);
+    expect(p.channelViews).toEqual({ status: 'present', value: views, source: expect.any(String) });
+    expect(repo.channelViewsSince).toHaveBeenCalledWith(new Date(NOW.getTime() - 3 * 3600_000));
+    // a channel view's subject gets an instrument slot
+    expect(Object.keys(p.instruments.value ?? {})).toEqual(['NIFTY']);
+  });
+
+  it('instrument slots: F&O/MCX positions, proposals + channel views, exits, equity holdings last; keys normalised', async () => {
+    const eq = (i: number, u: string) => pos(i, { underlying: u, symbol: `${u}-EQ`, exchange: 'NSE' });
+    const repo = repoMock({
+      openPositions: jest.fn(async () => [...['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].map((u, i) => eq(i, u)), pos(20, { underlying: 'GOLDM', symbol: 'GOLDM26DEC26130000CE', exchange: 'MCX' })]),
+      proposalsSince: jest.fn(async () => [{ ...proposal(1), underlying: 'NIFTY' }, { ...proposal(2), underlying: 'MARKET' }, { ...proposal(3), underlying: 'BHARATFORGE' }]),
+      channelViewsSince: jest.fn(async () => [{ channel: 'c', at: NOW.toISOString(), summary: 's', subject: 'SENSEX', bias: 'BULL' }]),
+      closedSince: jest.fn(async () => [{ trackerId: 'x', symbol: 'BSE29DEC264250CE', underlying: 'BSE', exitAt: new Date(NOW.getTime() - 60_000), pnl: 1, paper: false }]),
+    });
+    const lot = lotMarket({ master: async () => [{ name: 'BHARATFORG', exch_seg: 'NSE', symbol: 'BHARATFORG-EQ' }, { name: 'NIFTY' }, { name: 'GOLD' }, { name: 'SENSEX' }, { name: 'BSE' }] });
+    const p = await new DeskStateService(repo as never, { state: async () => guardState }, market(), undefined, undefined, undefined, undefined, lot).build('owner', NOW, cfg);
+    expect(Object.keys(p.instruments.value ?? {})).toEqual(['GOLD', 'NIFTY', 'BHARATFORG', 'SENSEX', 'BSE', 'A', 'B', 'C']);
+  });
+
+  it('funds block: available margin from the order path read + the 1-lot ATM option and mini costs', async () => {
+    const repo = repoMock({ openPositions: jest.fn(async () => [pos(1, { underlying: 'CRUDEOIL', symbol: 'CRUDEOIL16DEC265200CE', exchange: 'MCX' })]) });
+    const funds = { available: jest.fn(async () => 30_000) };
+    const lot = lotMarket();
+    const p = await new DeskStateService(repo as never, { state: async () => guardState }, market({ ltp: async () => 5210 }), undefined, undefined, undefined, funds, lot).build('owner', NOW, cfg);
+    expect(funds.available).toHaveBeenCalledWith('owner');
+    expect(p.funds?.status).toBe('present');
+    const f = p.funds?.value;
+    expect(f?.available).toBe(30_000);
+    const c = f?.lots.CRUDEOIL;
+    expect(c?.atmCe).toEqual({ contract: 'CRUDEOIL16DEC265200CE', premium: 385, lotSize: 100, valueFactor: 1, cost: 38_500, fits: false });
+    expect(c?.atmPe?.contract).toBe('CRUDEOIL16DEC265200PE');
+    expect(c?.mini?.underlying).toBe('CRUDEOILM');
+    expect(c?.mini?.atmCe).toMatchObject({ contract: 'CRUDEOILM16DEC265200CE', lotSize: 10, cost: 3_850, fits: true });
+  });
+
+  it('funds block: unknown funds keep the costs with fits null; no funds read wired = unavailable', async () => {
+    const repo = repoMock({ openPositions: jest.fn(async () => [pos(1, { underlying: 'CRUDEOIL', symbol: 'CRUDEOIL16DEC265200CE', exchange: 'MCX' })]) });
+    const unknown = await new DeskStateService(repo as never, { state: async () => guardState }, market({ ltp: async () => 5210 }), undefined, undefined, undefined, { available: async () => null }, lotMarket()).build('owner', NOW, cfg);
+    expect(unknown.funds?.value?.available).toBeNull();
+    expect(unknown.funds?.value?.lots.CRUDEOIL.atmCe?.fits).toBeNull();
+    const none = await new DeskStateService(repo as never, { state: async () => guardState }, market(), undefined).build('owner', NOW, cfg);
+    expect(none.funds).toMatchObject({ status: 'unavailable', reason: expect.stringMatching(/funds read not wired/) });
+  });
+
+  it('health: the status port reports the feed and the agents', async () => {
+    const status = { feed: async () => 'hub socket up, last tick 2 s ago', agents: async () => ({ trading: 'up' }) };
+    const p = await new DeskStateService(repoMock() as never, { state: async () => guardState }, market(), status).build('owner', NOW, cfg);
+    expect(p.health.value).toMatchObject({ feed: 'hub socket up, last tick 2 s ago', agents: { trading: 'up' } });
+  });
+
+  it('instruments get a 6 s box (a 3.5 s read still lands)', async () => {
+    const repo = repoMock({ openPositions: jest.fn(async () => [pos(1)]) });
+    const slow = market({ ltp: () => new Promise((r) => setTimeout(() => r(111), 3_500)) });
+    const p = await make(repo, slow).build('owner', NOW, cfg);
+    expect(p.instruments.value?.U1.ltp).toBe(111);
+  }, 15_000);
 
   it('instruments capped at 8 with missing listed', async () => {
     const repo = repoMock({ openPositions: jest.fn(async () => Array.from({ length: 10 }, (_, i) => pos(i))) });
@@ -200,7 +294,7 @@ describe('DeskStateService.build', () => {
       decisionsToday: jest.fn(async () => Array.from({ length: 30 }, () => ({ createdAt: NOW, action: 'NO_ACTION', underlying: 'NIFTY', status: 'DONE', result: { status: 'DONE', detail: 'd'.repeat(300) } }))),
     });
     const p = await make(repo).build('owner', NOW, cfg);
-    expect(p.proposals.value).toHaveLength(40);
+    expect(p.proposals.value).toHaveLength(16);
     expect(JSON.stringify(p).length).toBeLessThan(PACKET_MAX_CHARS);
   });
 

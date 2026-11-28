@@ -2,10 +2,13 @@
  * Pure helpers for the desk packet (plan Task 3). Every block is time-boxed and never throws: a slow or failing
  * source becomes `unavailable` with its reason, so the manager always sees what it could not see.
  */
-import type { Block, Proposal } from './desk.types';
+import { buildVocabulary } from '../../signal-intake/domain/vocabulary';
+import type { Block, LotCost, Proposal } from './desk.types';
 
 /** Each packet block's time box. */
 export const DESK_BLOCK_MS = 3000;
+/** The slower blocks (instruments, recentExits, funds: several market reads each) get this box. */
+export const DESK_SLOW_BLOCK_MS = 6000;
 /** Proposals the manager sees: newest first, last 2 h, at most this many. */
 export const PROPOSAL_CAP = 40;
 export const PROPOSAL_WINDOW_MS = 2 * 60 * 60_000;
@@ -66,12 +69,141 @@ export function capProposals(list: readonly Proposal[], cap = PROPOSAL_CAP): Pro
   return [...list].sort((a, b) => t(b) - t(a)).slice(0, cap);
 }
 
-/** Ordered, de-duplicated, upper-cased underlyings (positions first, then exits, then proposals), at most `cap`. */
-export function pickUnderlyings(groups: ReadonlyArray<ReadonlyArray<string | null | undefined>>, cap = INSTRUMENT_CAP): string[] {
+/**
+ * Per-source lead quotas (audit 2026-11-27: the single cap 40 was hit in 149/165 runs, 81% entry-engine items).
+ * Newest first within each source; a source's unused quota is NOT given to another (never to the engine).
+ */
+export const PROPOSAL_QUOTAS: Readonly<Record<Proposal['kind'], number>> = Object.freeze({ reading: 16, signal_decision: 8, setup: 6, engine: 10 });
+
+const atMs = (p: Pick<Proposal, 'at'>) => {
+  const v = Date.parse(p.at);
+  return Number.isFinite(v) ? v : -Infinity;
+};
+const newestFirst = (a: Proposal, b: Proposal) => atMs(b) - atMs(a);
+
+/** An UPDATE reading that names no instrument and no level (a bare "120++"): nothing to act on. */
+export function isBareUpdate(p: Proposal): boolean {
+  if (p.kind !== 'reading' || p.detail?.kind !== 'UPDATE') return false;
+  if (String(p.underlying ?? '').trim()) return false;
+  const c = (p.detail.call ?? null) as Record<string, unknown> | null;
+  if (!c) return true;
+  if (String(c.underlying ?? '').trim()) return false;
+  const n = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
+  const levels = [c.strike, c.entryLow, c.entryHigh, c.stopLoss].some(n) || (Array.isArray(c.targets) && c.targets.some(n));
+  return !levels;
+}
+
+/** Entry-engine items merged to one per (underlying, side): the latest wins and carries `count` (how many were merged). */
+export function mergeEngine(list: readonly Proposal[]): Proposal[] {
+  const groups = new Map<string, { latest: Proposal; count: number }>();
+  for (const p of list) {
+    const key = `${String(p.underlying ?? '').toUpperCase()}|${String(p.detail?.action ?? '')}`;
+    const g = groups.get(key);
+    if (!g) groups.set(key, { latest: p, count: 1 });
+    else {
+      g.count += 1;
+      if (atMs(p) > atMs(g.latest)) g.latest = p;
+    }
+  }
+  return [...groups.values()].map((g) => ({ ...g.latest, detail: { ...g.latest.detail, count: g.count } })).sort(newestFirst);
+}
+
+/** The proposals block: bare UPDATEs dropped, engine merged, then each source cut to its quota; newest first overall. */
+export function quotaProposals(list: readonly Proposal[], quotas: Readonly<Record<Proposal['kind'], number>> = PROPOSAL_QUOTAS): Proposal[] {
+  const kept = list.filter((p) => !isBareUpdate(p));
+  const out: Proposal[] = [];
+  for (const kind of Object.keys(quotas) as Array<Proposal['kind']>) {
+    const own = kept.filter((p) => p.kind === kind);
+    const ready = kind === 'engine' ? mergeEngine(own) : [...own].sort(newestFirst);
+    out.push(...ready.slice(0, Math.max(0, quotas[kind])));
+  }
+  return out.sort(newestFirst);
+}
+
+/** Channel market views: INFO readings from the last 3 h, at most 10, newest first. */
+export const CHANNEL_VIEW_WINDOW_MS = 3 * 60 * 60_000;
+export const CHANNEL_VIEW_CAP = 10;
+
+/** Keys that are not an instrument (a market-wide claim, a sector index). */
+const NOT_INSTRUMENT: ReadonlySet<string> = new Set(['MARKET', 'SECTOR', 'SECTORINDEX', 'INDEX', 'NONE', 'NULL', 'UNKNOWN', 'N/A']);
+/** MCX minis read as their parent for data (bars, levels, chain). */
+const MINI_PARENT: Readonly<Record<string, string>> = { GOLDM: 'GOLD', GOLDPETAL: 'GOLD', SILVERM: 'SILVER', SILVERMIC: 'SILVER', CRUDEOILM: 'CRUDEOIL', NATGASMINI: 'NATURALGAS' };
+/** The mini contract that exists for a full MCX underlying (1/10 lot). */
+const MINI_OF_PARENT: Readonly<Record<string, string>> = { CRUDEOIL: 'CRUDEOILM', GOLD: 'GOLDM', SILVER: 'SILVERM', NATURALGAS: 'NATGASMINI' };
+
+export function miniUnderlyingOf(underlying: string): string | null {
+  return MINI_OF_PARENT[String(underlying ?? '').trim().toUpperCase()] ?? null;
+}
+
+let staticNames: ReadonlyMap<string, string> | null = null;
+/** The intake vocabulary's fixed aliases (indices, commodities, common stock nicknames). */
+function aliasNames(): ReadonlyMap<string, string> {
+  staticNames ??= buildVocabulary([]).names;
+  return staticNames;
+}
+
+/** At most one edit (substitution / insertion / deletion) between a and b. */
+function withinOneEdit(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    if (++edits > 1) return false;
+    if (a.length > b.length) i++;
+    else if (b.length > a.length) j++;
+    else {
+      i++;
+      j++;
+    }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+}
+
+/**
+ * One packet underlying key: upper-cased, `-EQ` cut, a non-instrument (MARKET, sector) dropped (null), minis and
+ * aliases mapped to the data name (GOLDM → GOLD, BANK NIFTY → BANKNIFTY). With the instrument master's names: a
+ * name the master does not list is matched to the master's 10-letter cut (BHARATFORGE → BHARATFORG) or a unique
+ * one-letter-off name; else kept as given.
+ */
+export function normaliseUnderlyingKey(raw: string | null | undefined, masterNames?: ReadonlySet<string> | null): string | null {
+  let k = String(raw ?? '').trim().toUpperCase().replace(/\s+/g, ' ').replace(/-(EQ|BE)$/, '');
+  if (!k || NOT_INSTRUMENT.has(k)) return null;
+  k = MINI_PARENT[k] ?? aliasNames().get(k) ?? k;
+  k = MINI_PARENT[k] ?? k;
+  if (!masterNames || masterNames.size === 0 || masterNames.has(k)) return k;
+  const cut10 = k.slice(0, 10);
+  if (cut10 !== k && masterNames.has(cut10)) return cut10;
+  if (k.length >= 6 && /^[A-Z&-]+$/.test(k)) {
+    const near: string[] = [];
+    for (const n of masterNames) if (n[0] === k[0] && withinOneEdit(n, k)) near.push(n);
+    if (near.length === 1) return near[0];
+  }
+  return k;
+}
+
+/** The 1-lot cost of a contract (premium x lot size x value factor), and whether it fits the funds (null = unknown). */
+export function lotCost(c: { contract: string; premium: number; lotSize: number; valueFactor: number }, available: number | null): LotCost {
+  const vf = c.valueFactor > 0 ? c.valueFactor : 1;
+  const cost = Math.round(c.premium * c.lotSize * vf * 100) / 100;
+  return { contract: c.contract, premium: c.premium, lotSize: c.lotSize, valueFactor: vf, cost, fits: available == null || !Number.isFinite(available) ? null : cost <= available };
+}
+
+/**
+ * Ordered, de-duplicated, normalised underlyings (see normaliseUnderlyingKey), at most `cap`. The caller orders the
+ * groups by what the manager can act on (F&O / MCX positions, proposals and channel views, recent exits, holdings).
+ */
+export function pickUnderlyings(groups: ReadonlyArray<ReadonlyArray<string | null | undefined>>, cap = INSTRUMENT_CAP, masterNames?: ReadonlySet<string> | null): string[] {
   const out: string[] = [];
   for (const g of groups) {
     for (const u of g) {
-      const k = String(u ?? '').trim().toUpperCase();
+      const k = normaliseUnderlyingKey(u, masterNames);
       if (!k || out.includes(k)) continue;
       out.push(k);
       if (out.length >= cap) return out;

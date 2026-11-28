@@ -3,9 +3,16 @@ import {
   capProposals,
   countNotCheckable,
   firstNumber,
+  isBareUpdate,
+  lotCost,
   managerLevelsFrom,
+  mergeEngine,
+  miniUnderlyingOf,
   nearestLevels,
+  normaliseUnderlyingKey,
   pickUnderlyings,
+  PROPOSAL_QUOTAS,
+  quotaProposals,
   timedBlock,
   underlyingFromSymbol,
 } from './packet-blocks';
@@ -39,8 +46,93 @@ describe('packet blocks', () => {
     expect(out[39].ref).toBe('reading:15');
   });
 
-  it('underlyings de-duplicated in order and capped at 8', () => {
-    expect(pickUnderlyings([['nifty', 'BSE'], ['NIFTY', null, 'GOLDM'], ['A', 'B', 'C', 'D', 'E', 'F']])).toEqual(['NIFTY', 'BSE', 'GOLDM', 'A', 'B', 'C', 'D', 'E']);
+  it('underlyings de-duplicated in order and capped at 8 (minis read as their parent)', () => {
+    expect(pickUnderlyings([['nifty', 'BSE'], ['NIFTY', null, 'GOLDM'], ['A', 'B', 'C', 'D', 'E', 'F']])).toEqual(['NIFTY', 'BSE', 'GOLD', 'A', 'B', 'C', 'D', 'E']);
+  });
+
+  it('underlying keys: MARKET dropped, aliases and minis mapped, a long stock name matched to the master', () => {
+    const names = new Set(['BHARATFORG', 'NIFTY', 'GOLD', 'RELIANCE', 'MAZDOCK']);
+    expect(normaliseUnderlyingKey('MARKET')).toBeNull();
+    expect(normaliseUnderlyingKey(' ')).toBeNull();
+    expect(normaliseUnderlyingKey('goldm')).toBe('GOLD');
+    expect(normaliseUnderlyingKey('CRUDEOILM')).toBe('CRUDEOIL');
+    expect(normaliseUnderlyingKey('NATGASMINI')).toBe('NATURALGAS');
+    expect(normaliseUnderlyingKey('SILVERM')).toBe('SILVER');
+    expect(normaliseUnderlyingKey('BANK NIFTY')).toBe('BANKNIFTY');
+    expect(normaliseUnderlyingKey('RELIANCE-EQ', names)).toBe('RELIANCE');
+    expect(normaliseUnderlyingKey('BHARATFORGE', names)).toBe('BHARATFORG');
+    expect(normaliseUnderlyingKey('MAZDOK', names)).toBe('MAZDOCK');
+    expect(normaliseUnderlyingKey('UNKNOWNCO', names)).toBe('UNKNOWNCO');
+    expect(pickUnderlyings([['MARKET', 'BHARATFORGE', 'BHARATFORG']], 8, names)).toEqual(['BHARATFORG']);
+  });
+
+  it('proposal quotas per source, newest first; unused quota never goes to the engine', () => {
+    const mk = (kind: Proposal['kind'], i: number, over: Partial<Proposal> = {}): Proposal => ({
+      ref: `${kind}:${i}`,
+      kind,
+      at: new Date(Date.UTC(2026, 10, 26, 4, 0) + i * 60_000).toISOString(),
+      underlying: `U${i}`,
+      text: '',
+      detail: kind === 'reading' ? { kind: 'CALL', call: { underlying: `U${i}` } } : kind === 'engine' ? { action: 'ENTER_CE' } : {},
+      ...over,
+    });
+    const list = [
+      ...Array.from({ length: 30 }, (_, i) => mk('reading', i)),
+      ...Array.from({ length: 3 }, (_, i) => mk('signal_decision', i)),
+      ...Array.from({ length: 10 }, (_, i) => mk('setup', i)),
+      ...Array.from({ length: 40 }, (_, i) => mk('engine', i)),
+    ];
+    const out = quotaProposals(list);
+    const by = (k: Proposal['kind']) => out.filter((p) => p.kind === k);
+    expect(by('reading')).toHaveLength(16);
+    expect(by('reading')[0].ref).toBe('reading:29');
+    expect(by('signal_decision')).toHaveLength(3);
+    expect(by('setup')).toHaveLength(6);
+    expect(by('engine')).toHaveLength(10);
+    expect(by('engine')[0].ref).toBe('engine:39');
+    expect(PROPOSAL_QUOTAS).toEqual({ reading: 16, signal_decision: 8, setup: 6, engine: 10 });
+    // newest first overall
+    const t = out.map((p) => Date.parse(p.at));
+    expect([...t].sort((a, b) => b - a)).toEqual(t);
+  });
+
+  it('engine items merge to one per (underlying, side), latest wins, with a count', () => {
+    const e = (id: string, min: number, underlying: string, action: string): Proposal => ({
+      ref: `engine:${id}`,
+      kind: 'engine',
+      at: new Date(Date.UTC(2026, 10, 26, 4, min)).toISOString(),
+      underlying,
+      text: id,
+      detail: { action, mode: 'paper', tradeId: null },
+    });
+    const out = mergeEngine([e('a', 1, 'NIFTY', 'ENTER_CE'), e('b', 5, 'NIFTY', 'ENTER_CE'), e('c', 3, 'NIFTY', 'ENTER_PE'), e('d', 2, 'NIFTY', 'ENTER_CE')]);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toMatchObject({ ref: 'engine:b', detail: { action: 'ENTER_CE', count: 3 } });
+    expect(out[1]).toMatchObject({ ref: 'engine:c', detail: { action: 'ENTER_PE', count: 1 } });
+  });
+
+  it('bare-number UPDATE readings (no instrument, no level) are dropped', () => {
+    const r = (id: string, kind: string, call: unknown, underlying: string | null): Proposal => ({ ref: `reading:${id}`, kind: 'reading', at: new Date().toISOString(), underlying, text: '', detail: { kind, call } });
+    expect(isBareUpdate(r('1', 'UPDATE', null, null))).toBe(true);
+    expect(isBareUpdate(r('2', 'UPDATE', { underlying: '', strike: null, entryLow: null, entryHigh: null, stopLoss: null, targets: [] }, null))).toBe(true);
+    expect(isBareUpdate(r('3', 'UPDATE', { underlying: '', strike: null, entryLow: null, entryHigh: null, stopLoss: 120, targets: [] }, null))).toBe(false);
+    expect(isBareUpdate(r('4', 'UPDATE', { underlying: 'NIFTY' }, 'NIFTY'))).toBe(false);
+    expect(isBareUpdate(r('5', 'CALL', null, null))).toBe(false);
+    expect(quotaProposals([r('1', 'UPDATE', null, null), r('4', 'UPDATE', { underlying: 'NIFTY' }, 'NIFTY')]).map((p) => p.ref)).toEqual(['reading:4']);
+  });
+
+  it('mini contract name per underlying (CRUDEOILM, GOLDM, SILVERM, NATGASMINI)', () => {
+    expect(miniUnderlyingOf('CRUDEOIL')).toBe('CRUDEOILM');
+    expect(miniUnderlyingOf('GOLD')).toBe('GOLDM');
+    expect(miniUnderlyingOf('SILVER')).toBe('SILVERM');
+    expect(miniUnderlyingOf('NATURALGAS')).toBe('NATGASMINI');
+    expect(miniUnderlyingOf('NIFTY')).toBeNull();
+  });
+
+  it('1-lot cost = premium x lot size x value factor; fits only when within the funds', () => {
+    expect(lotCost({ contract: 'CRUDEOIL16DEC265200CE', premium: 154, lotSize: 100, valueFactor: 1 }, 30_000)).toEqual({ contract: 'CRUDEOIL16DEC265200CE', premium: 154, lotSize: 100, valueFactor: 1, cost: 15_400, fits: true });
+    expect(lotCost({ contract: 'X', premium: 385, lotSize: 100, valueFactor: 1 }, 30_000).fits).toBe(false);
+    expect(lotCost({ contract: 'X', premium: 10, lotSize: 1, valueFactor: 100 }, null)).toMatchObject({ cost: 1000, fits: null });
   });
 
   it('underlying from a contract symbol', () => {

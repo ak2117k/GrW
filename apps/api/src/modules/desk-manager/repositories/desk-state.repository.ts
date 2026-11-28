@@ -4,16 +4,21 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { paperTrackerId, PAPER_TRACKER_PREFIX } from '../../trade-sentinel/paper/paper-tracker';
 import {
   BUSY_PROPOSAL_MS,
+  CHANNEL_VIEW_CAP,
   cut,
   firstNumber,
   istMidnight,
   istYmdOf,
   MEMORY_DECISIONS_CAP,
-  PROPOSAL_CAP,
+  PROPOSAL_QUOTAS,
   TEXT_CAP,
   underlyingFromSymbol,
 } from '../domain/packet-blocks';
-import { DESK_MANAGER_SOURCE, DESK_MANAGER_TAG, type Proposal, type Scorecard, type TradeOrigin } from '../domain/desk.types';
+import { positionOpenPnl } from '../domain/pnl-path';
+import { DESK_MANAGER_SOURCE, DESK_MANAGER_TAG, type ChannelView, type Proposal, type Scorecard, type TradeOrigin } from '../domain/desk.types';
+
+/** Engine rows read per packet before the (underlying, side) merge: 2 h of a ~1-min engine over a few underlyings. */
+const ENGINE_ROWS_READ = 400;
 
 /** One open position as the packet needs it, before the HOLD list, sentinel and manager levels are joined. */
 export interface OpenPositionRow {
@@ -129,7 +134,8 @@ export class DeskStateRepository {
         qty: t.qty,
         entry: t.entryPrice,
         ltp: num(t.lastLtp),
-        pnl: num(t.pnl),
+        // The one open-P&L reading the guard uses too (pnl-path positionOpenPnl); a missing value stays null here ("no data").
+        pnl: num(t.pnl) === null ? null : positionOpenPnl(t.pnl),
         entryAt: t.entryTime,
         origin,
         paper: false,
@@ -229,32 +235,36 @@ export class DeskStateRepository {
     });
   }
 
-  /** Readings, AI setups, the owner's signal decisions and entry-engine decisions at or after `since`, each capped. */
-  async proposalsSince(userId: string, since: Date, cap = PROPOSAL_CAP): Promise<Proposal[]> {
+  /**
+   * Readings, AI setups, the owner's signal decisions and entry-engine decisions at or after `since`. Each source
+   * reads more rows than its packet quota (PROPOSAL_QUOTAS): bare UPDATE readings are dropped and engine rows are
+   * merged per (underlying, side) afterwards (quotaProposals), so the quota is filled from what is left.
+   */
+  async proposalsSince(userId: string, since: Date): Promise<Proposal[]> {
     const [readings, setups, decisions, engine] = await Promise.all([
       this.prisma.messageReading.findMany({
         where: { postedAt: { gte: since }, kind: { in: ['CALL', 'UPDATE'] } },
         select: { messageId: true, postedAt: true, kind: true, summary: true, call: true, claims: true, missedByRules: true },
         orderBy: { postedAt: 'desc' },
-        take: cap,
+        take: PROPOSAL_QUOTAS.reading * 4,
       }),
       this.prisma.aiSetup.findMany({
         where: { createdAt: { gte: since } },
         select: { id: true, createdAt: true, underlying: true, decision: true, reason: true, status: true, setup: true },
         orderBy: { createdAt: 'desc' },
-        take: cap,
+        take: PROPOSAL_QUOTAS.setup,
       }),
       this.prisma.signalDecision.findMany({
         where: { userId, decidedAt: { gte: since } },
         select: { id: true, decidedAt: true, underlying: true, decision: true, skipReason: true, mode: true, status: true, judge: true, plan: true },
         orderBy: { decidedAt: 'desc' },
-        take: cap,
+        take: PROPOSAL_QUOTAS.signal_decision,
       }),
       this.prisma.entryEngineDecision.findMany({
         where: { at: { gte: since } },
         select: { id: true, at: true, underlying: true, action: true, reasons: true, mode: true, tradeId: true },
         orderBy: { at: 'desc' },
-        take: cap,
+        take: ENGINE_ROWS_READ,
       }),
     ]);
     const out: Proposal[] = [];
@@ -308,6 +318,25 @@ export class DeskStateRepository {
       });
     }
     return out;
+  }
+
+  /** Channel market views: INFO readings posted at or after `since`, newest first, at most CHANNEL_VIEW_CAP. */
+  async channelViewsSince(since: Date): Promise<ChannelView[]> {
+    const rows = await this.prisma.messageReading.findMany({
+      where: { postedAt: { gte: since }, kind: 'INFO' },
+      select: { messageId: true, channelId: true, postedAt: true, summary: true, claims: true },
+      orderBy: { postedAt: 'desc' },
+      take: CHANNEL_VIEW_CAP,
+    });
+    if (rows.length === 0) return [];
+    const ids = [...new Set(rows.map((r) => r.channelId))];
+    const channels = await this.prisma.telegramChannel.findMany({ where: { id: { in: ids } }, select: { id: true, title: true, username: true } });
+    const name = new Map(channels.map((c) => [c.id, c.title || c.username || c.id] as const));
+    return rows.map((r) => {
+      const first = (Array.isArray(r.claims) ? (r.claims as Array<Record<string, unknown>>) : []).find((c) => c && typeof c === 'object') ?? null;
+      const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+      return { channel: name.get(r.channelId) ?? r.channelId, at: r.postedAt.toISOString(), summary: cut(r.summary), subject: str(first?.subject), bias: str(first?.bias) };
+    });
   }
 
   /** Claims of every reading of the IST session day (the health block counts NOT_CHECKABLE ones). */

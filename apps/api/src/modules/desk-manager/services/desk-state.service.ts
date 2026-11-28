@@ -1,4 +1,8 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
+import { contractValueFactor } from '@td/shared';
+import { engineContract } from '../../entry-engine/domain/engine-contract';
+import type { ResolvedContract } from '../../signal-trader/domain/contract-resolver';
+import { SIGNAL_FUNDS, type FundsLike } from '../../signal-trader/services/signal-trader.service';
 import { isHeld } from '../../sentinel-executor/domain/guards';
 import { parseAutoExitConfig } from '../../sentinel-executor/domain/auto-exit.config';
 import { AUTHORITY_STATE, TRADE_BRIEFS, type AuthorityStatePort, type TradeBriefsPort } from '../../exit-authority/exit-authority.tokens';
@@ -12,34 +16,44 @@ import { BRIEF_MAX_CHARS } from '../domain/desk.types';
 const PACKET_BRIEF_CHARS = Math.min(800, BRIEF_MAX_CHARS);
 import type {
   Block,
+  ChannelView,
   DayPnlPath,
   DeskPacket,
+  FundsView,
   GuardState,
   HealthView,
   InstrumentView,
+  LotCost,
   MemoryView,
   PositionView,
   Proposal,
   RecentExit,
+  UnderlyingLotCosts,
 } from '../domain/desk.types';
 import {
-  capProposals,
+  CHANNEL_VIEW_WINDOW_MS,
   countNotCheckable,
   cut,
-  DESK_BLOCK_MS,
+  DESK_SLOW_BLOCK_MS,
   failedBlocks,
   istClock,
+  lotCost,
   managerLevelsFrom,
+  miniUnderlyingOf,
   nearestLevels,
+  normaliseUnderlyingKey,
   PACKET_MAX_CHARS,
   pickUnderlyings,
   PROPOSAL_WINDOW_MS,
+  quotaProposals,
   RECENT_EXIT_WINDOW_MS,
   resultText,
   timedBlock,
   timedValue,
 } from '../domain/packet-blocks';
+import { pickContractSpec } from '../domain/premium-risk';
 import { DeskStateRepository } from '../repositories/desk-state.repository';
+import { DESK_MARKET as DESK_LOT_MARKET, type DeskMarket, type DeskRef } from './desk-actions.ports';
 
 /**
  * The guard read the packet needs (Task 1's DeskGuardService.state). Task 8 binds it with
@@ -82,13 +96,41 @@ const SRC = {
   instruments: 'market-hub+level-book+oi_snapshots',
   health: 'message_readings.claims+feed+agents',
   memory: 'desk_manager_decisions+agent_lessons',
+  channelViews: 'message_readings(kind INFO, 3h)+telegram_channels',
+  funds: 'broker RMS net (signal-trader funds read)+instrument master+ATM premiums',
 } as const;
 
-/** Sub-reads inside the instruments block share the 3 s box; the block itself gets a small margin over it. */
-const INSTRUMENTS_BLOCK_MS = DESK_BLOCK_MS + 500;
+/**
+ * The instruments and recentExits blocks: their sub-reads get the slow box (6 s; audit 2026-11-27: recentExits
+ * timed out at 3 s in 30 runs), the block itself a small margin over it.
+ */
+const SLOW_BLOCK_MS = DESK_SLOW_BLOCK_MS + 500;
+const INSTRUMENTS_BLOCK_MS = SLOW_BLOCK_MS;
 
 function minutesSince(from: Date, now: Date): number {
   return Math.max(0, Math.round((now.getTime() - from.getTime()) / 60_000));
+}
+
+const refKey = (r: { exchange: string; token: string }) => `${r.exchange.toUpperCase()}:${r.token}`;
+
+/** A cash-equity line (NSE / BSE): a holding or delivery, not an F&O / MCX position. */
+function isEquityLine(exchange: string | null | undefined): boolean {
+  const e = String(exchange ?? '').trim().toUpperCase();
+  return e === 'NSE' || e === 'BSE';
+}
+
+/** The instrument master's underlying names (cached per master array: it is the same in-memory list run to run). */
+const NAMES_CACHE = new WeakMap<object, ReadonlySet<string>>();
+function masterNames(master: readonly unknown[]): ReadonlySet<string> {
+  const hit = NAMES_CACHE.get(master);
+  if (hit) return hit;
+  const out = new Set<string>();
+  for (const r of master as Array<{ name?: unknown }>) {
+    const n = r && typeof r.name === 'string' ? r.name.trim().toUpperCase() : '';
+    if (n) out.add(n);
+  }
+  NAMES_CACHE.set(master, out);
+  return out;
 }
 
 /**
@@ -105,6 +147,10 @@ export class DeskStateService {
     // Trade agent exit authority: live adds each live position's brief / hasBrief. Absent ⇒ off (packet unchanged).
     @Optional() @Inject(TRADE_BRIEFS) private readonly briefs?: TradeBriefsPort | null,
     @Optional() @Inject(AUTHORITY_STATE) private readonly authority?: AuthorityStatePort | null,
+    // The funds block: the order path's own RMS read (signal-trader SIGNAL_FUNDS: usable `net` margin), and the
+    // quotes / instrument master the manager's OPEN prices with (desk-actions DESK_MARKET). Absent = said so.
+    @Optional() @Inject(SIGNAL_FUNDS) private readonly funds?: Pick<FundsLike, 'available'> | null,
+    @Optional() @Inject(DESK_LOT_MARKET) private readonly lotMarket?: DeskMarket | null,
   ) {}
 
   async build(userId: string, now: Date, cfg: DeskManagerConfig): Promise<DeskPacket> {
@@ -114,36 +160,132 @@ export class DeskStateService {
     // One guard read feeds both the pnl and guard blocks.
     const guardRead = this.guard ? this.guard.state(userId, now) : Promise.reject(new Error('desk guard not wired'));
     guardRead.catch(() => undefined);
+    // The funds read (the order path's RMS read) starts now; the lot costs need the instruments' prices.
+    const fundsRead = this.funds ? this.funds.available(userId).catch(() => null) : Promise.reject(new Error('funds read not wired (SIGNAL_FUNDS)'));
+    fundsRead.catch(() => undefined);
 
-    const [day, guard, positions, recentExits, proposals, memory] = await Promise.all([
+    const [day, guard, positions, recentExits, proposals, memory, channelViews, master] = await Promise.all([
       timedBlock(SRC.day, async () => ({ ist: istClock(now), nseMinToClose: minutesToClose('NSE', now), mcxMinToClose: minutesToClose('MCX', now), liveFromIst })),
       timedBlock<GuardState>(SRC.guard, () => guardRead),
       timedBlock<PositionView[]>(SRC.positions, () => this.positions(userId, now, hold)),
-      timedBlock<RecentExit[]>(SRC.recentExits, () => this.recentExits(userId, now)),
-      timedBlock<Proposal[]>(SRC.proposals, async () => capProposals(await this.repo.proposalsSince(userId, new Date(now.getTime() - PROPOSAL_WINDOW_MS)))),
+      timedBlock<RecentExit[]>(SRC.recentExits, () => this.recentExits(userId, now), SLOW_BLOCK_MS),
+      timedBlock<Proposal[]>(SRC.proposals, async () => quotaProposals(await this.repo.proposalsSince(userId, new Date(now.getTime() - PROPOSAL_WINDOW_MS)))),
       timedBlock<MemoryView>(SRC.memory, () => this.memory(userId, now)),
+      timedBlock<ChannelView[]>(SRC.channelViews, () => this.repo.channelViewsSince(new Date(now.getTime() - CHANNEL_VIEW_WINDOW_MS))),
+      this.lotMarket ? timedValue(() => (this.lotMarket as DeskMarket).master()) : Promise.resolve({ ok: false as const, reason: 'lot market not wired' }),
     ]);
     const pnl: Block<DayPnlPath> =
       guard.status === 'present' && guard.value
         ? { status: 'present', value: guard.value.path, source: SRC.pnl }
         : { status: 'unavailable', reason: guard.reason ?? 'guard unavailable', source: SRC.pnl };
 
-    // Slots by what the manager can act on: open positions (exits), proposals (entries), then recent exits.
-    const underlyings = pickUnderlyings([
-      (positions.value ?? []).map((p) => p.underlying),
-      (proposals.value ?? []).map((p) => p.underlying),
-      (recentExits.value ?? []).map((e) => e.underlying),
-    ]);
+    // Slots by what the manager can act on: F&O / MCX positions (exits), proposals and channel views (entries),
+    // recent exits, and only then equity / delivery lines (2026-11-27: 8 equity holdings took every slot and NIFTY,
+    // with a live proposal, had no data in 79/154 runs). Keys normalised against the instrument master.
+    const rows = master.ok && Array.isArray(master.value) ? master.value : null;
+    const names = rows ? masterNames(rows) : null;
+    const pos = positions.value ?? [];
+    const underlyings = pickUnderlyings(
+      [
+        pos.filter((p) => !isEquityLine(p.exchange)).map((p) => p.underlying),
+        [...(proposals.value ?? []).map((p) => p.underlying), ...(channelViews.value ?? []).map((v) => v.subject)],
+        (recentExits.value ?? []).map((e) => e.underlying),
+        pos.filter((p) => isEquityLine(p.exchange)).map((p) => p.underlying),
+      ],
+      undefined,
+      names,
+    );
     const instruments = await timedBlock<Record<string, InstrumentView>>(SRC.instruments, () => this.instruments(underlyings, now), INSTRUMENTS_BLOCK_MS);
     if (recentExits.status === 'present' && instruments.status === 'present') {
-      for (const e of recentExits.value ?? []) if (e.underlying && e.underlyingNow == null) e.underlyingNow = instruments.value?.[e.underlying]?.ltp ?? null;
+      for (const e of recentExits.value ?? []) {
+        const k = e.underlying ? normaliseUnderlyingKey(e.underlying, names) : null;
+        if (k && e.underlyingNow == null) e.underlyingNow = instruments.value?.[k]?.ltp ?? null;
+      }
     }
+    const funds = await timedBlock<FundsView>(SRC.funds, () => this.fundsView(fundsRead, underlyings, instruments.value ?? {}, rows, now));
 
-    const failed = failedBlocks({ day, pnl, guard, positions, recentExits, proposals, instruments, memory });
+    const failed = failedBlocks({ day, pnl, guard, positions, recentExits, proposals, instruments, memory, channelViews, funds });
     const health = await timedBlock<HealthView>(SRC.health, () => this.health(now, failed));
 
-    const packet: DeskPacket = { at: now.toISOString(), mode: cfg.mode, day, pnl, guard, positions, recentExits, proposals, instruments, health, memory };
+    const packet: DeskPacket = { at: now.toISOString(), mode: cfg.mode, day, pnl, guard, positions, recentExits, proposals, instruments, health, memory, funds, channelViews };
     return fitPacket(packet);
+  }
+
+  /**
+   * The funds block: the owner's usable margin (the order path's RMS read — the "funds: INSUFFICIENT" check) and, for
+   * each packet underlying, what 1 lot of the ATM CE / PE (nearest expiry) costs, plus the mini's where one exists.
+   */
+  private async fundsView(fundsRead: Promise<number | null>, underlyings: string[], instruments: Record<string, InstrumentView>, master: readonly unknown[] | null, now: Date): Promise<FundsView> {
+    const raw = await fundsRead;
+    const available = typeof raw === 'number' && Number.isFinite(raw) ? Math.round(raw * 100) / 100 : null;
+    const lots: Record<string, UnderlyingLotCosts> = {};
+    const m = this.lotMarket;
+    if (!m || !master || master.length === 0) {
+      for (const u of underlyings) lots[u] = { atmCe: null, atmPe: null, missing: [m ? 'instrument master unavailable' : 'lot market not wired'] };
+      return { available, lots };
+    }
+    // One pass over the master: only the packet's names (and their minis) are searched per contract.
+    const wanted = new Set(underlyings.flatMap((u) => [u, miniUnderlyingOf(u)].filter((x): x is string => !!x)));
+    const rows = (master as Array<{ name?: unknown }>).filter((r) => r && wanted.has(String(r.name ?? '').trim().toUpperCase()));
+    await Promise.all(
+      underlyings.map(async (u) => {
+        const view: UnderlyingLotCosts = { atmCe: null, atmPe: null, missing: [] };
+        lots[u] = view;
+        let spot = instruments[u]?.ltp ?? null;
+        if (spot == null) {
+          const ref = await m.underlyingRef(u, now).catch(() => null);
+          spot = ref ? ((await m.ltps([ref], now).catch(() => new Map<string, number>())).get(refKey(ref)) ?? null) : null;
+        }
+        if (spot == null || !(spot > 0)) {
+          view.missing.push(`no price for ${u}: no ATM strike`);
+          return;
+        }
+        const full = await this.atmCosts(rows, u, spot, available, now);
+        view.atmCe = full.ce;
+        view.atmPe = full.pe;
+        view.missing.push(...full.missing);
+        const mini = miniUnderlyingOf(u);
+        if (mini) {
+          const mc = await this.atmCosts(rows, mini, spot, available, now);
+          view.mini = { underlying: mini, atmCe: mc.ce, atmPe: mc.pe };
+          view.missing.push(...mc.missing);
+        }
+      }),
+    );
+    return { available, lots };
+  }
+
+  /** The ATM CE and PE of `underlying` (nearest expiry) priced at the live premium: 1-lot cost each. */
+  private async atmCosts(rows: readonly unknown[], underlying: string, spot: number, available: number | null, now: Date): Promise<{ ce: LotCost | null; pe: LotCost | null; missing: string[] }> {
+    const m = this.lotMarket as DeskMarket;
+    const missing: string[] = [];
+    const contracts: Array<{ kind: 'CE' | 'PE'; c: ResolvedContract }> = [];
+    for (const kind of ['CE', 'PE'] as const) {
+      const spec = pickContractSpec(rows, { underlying, side: kind === 'CE' ? 'BUY_CE' : 'BUY_PE', strikePolicy: 'ATM', expiryPolicy: 'NEAREST', spot }, now);
+      if (!spec.ok) {
+        missing.push(`${underlying} ATM ${kind}: ${spec.reason}`);
+        continue;
+      }
+      const r = engineContract(rows, { underlying, instrumentKind: kind, strike: spec.strike, expiry: spec.expiry }, now);
+      if (!r.ok) missing.push(`${underlying} ATM ${kind}: ${r.reason}`);
+      else if (!(r.contract.lotSize > 0)) missing.push(`${underlying} ATM ${kind}: no lot size in the master`);
+      else contracts.push({ kind, c: r.contract });
+    }
+    const out: { ce: LotCost | null; pe: LotCost | null; missing: string[] } = { ce: null, pe: null, missing };
+    if (contracts.length === 0) return out;
+    const refs: DeskRef[] = contracts.map(({ c }) => ({ exchange: c.exchange, token: c.token, symbol: c.tradingsymbol }));
+    const prices = await m.ltps(refs, now).catch(() => new Map<string, number>());
+    for (const { kind, c } of contracts) {
+      const premium = prices.get(refKey(c)) ?? null;
+      if (premium == null || !(premium > 0)) {
+        missing.push(`${c.tradingsymbol}: no fresh premium`);
+        continue;
+      }
+      const cost = lotCost({ contract: c.tradingsymbol, premium, lotSize: c.lotSize, valueFactor: contractValueFactor(c.exchange, c.tradingsymbol) }, available);
+      if (kind === 'CE') out.ce = cost;
+      else out.pe = cost;
+    }
+    return out;
   }
 
   /** Task 4's cadence: busy while a position is open or a proposal is < 30 min old. */
@@ -213,7 +355,7 @@ export class DeskStateService {
           const s = sentinel.get(r.trackerId);
           let underlyingAtExit: number | null = null;
           if (priceAt && r.underlying) {
-            const v = await timedValue(() => priceAt(r.underlying as string, r.exitAt));
+            const v = await timedValue(() => priceAt(r.underlying as string, r.exitAt), DESK_SLOW_BLOCK_MS);
             underlyingAtExit = v.ok ? v.value : null;
           }
           return {
@@ -242,11 +384,11 @@ export class DeskStateService {
           return;
         }
         const [ltp, day, trend, levels, walls] = await Promise.all([
-          timedValue(() => m.ltp(u, now)),
-          timedValue(() => m.day(u, now)),
-          timedValue(() => m.trend15m(u, now)),
-          timedValue(() => m.levels(u, now)),
-          timedValue(() => m.chainWalls(u, now)),
+          timedValue(() => m.ltp(u, now), DESK_SLOW_BLOCK_MS),
+          timedValue(() => m.day(u, now), DESK_SLOW_BLOCK_MS),
+          timedValue(() => m.trend15m(u, now), DESK_SLOW_BLOCK_MS),
+          timedValue(() => m.levels(u, now), DESK_SLOW_BLOCK_MS),
+          timedValue(() => m.chainWalls(u, now), DESK_SLOW_BLOCK_MS),
         ]);
         const miss = (name: string, r: { ok: boolean; reason?: string }) => view.missing.push(r.ok ? `${name}: none` : `${name}: ${r.reason}`);
         if (ltp.ok && ltp.value != null) view.ltp = ltp.value;

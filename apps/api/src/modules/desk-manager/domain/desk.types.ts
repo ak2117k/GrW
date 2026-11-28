@@ -33,6 +33,8 @@ export interface DayPnlPath {
   drawdownFromPeak: number;
   lossStreak: number;
   closed: ClosedTrade[];
+  /** The owner's own / held trades the guard does not count (W1): shown for context, never blocks the guard. */
+  ownerPnl?: { realised: number; open: number };
 }
 
 export interface GuardState {
@@ -99,6 +101,43 @@ export interface InstrumentView {
   missing: string[];
 }
 
+/** One contract's 1-lot cost: premium x lot size x value factor (MCX rupee factor; 1 elsewhere). */
+export interface LotCost {
+  contract: string;
+  premium: number;
+  lotSize: number;
+  valueFactor: number;
+  cost: number;
+  /** cost <= the available funds; null when the funds are unknown. */
+  fits: boolean | null;
+}
+
+/** The 1-lot costs of one packet underlying: the ATM CE / PE (nearest expiry) and the mini's, where one exists. */
+export interface UnderlyingLotCosts {
+  atmCe: LotCost | null;
+  atmPe: LotCost | null;
+  /** The mini contract (CRUDEOILM, GOLDM, SILVERM, NATGASMINI); absent when the underlying has none. */
+  mini?: { underlying: string; atmCe: LotCost | null; atmPe: LotCost | null };
+  missing: string[];
+}
+
+/** The funds block: the owner's usable margin (Angel RMS `net`, the order path's read) and what 1 lot costs. */
+export interface FundsView {
+  /** ₹ available now; null = the broker RMS could not be read. */
+  available: number | null;
+  /** Keyed by the instruments block's underlying keys. */
+  lots: Record<string, UnderlyingLotCosts>;
+}
+
+/** A market view posted by a channel (message_readings kind INFO). */
+export interface ChannelView {
+  channel: string;
+  at: string;
+  summary: string;
+  subject: string | null;
+  bias: string | null;
+}
+
 export interface HealthView {
   notCheckableToday: number;
   notCheckableReasons: Record<string, number>;
@@ -134,6 +173,10 @@ export interface DeskPacket {
   instruments: Block<Record<string, InstrumentView>>;
   health: Block<HealthView>;
   memory: Block<MemoryView>;
+  /** Available funds and the 1-lot costs (absent only on packets built outside DeskStateService, e.g. the pending-entry watch). */
+  funds?: Block<FundsView>;
+  /** Channel market views (INFO readings, last 3 h). Absent as for funds. */
+  channelViews?: Block<ChannelView[]>;
 }
 
 type Why = { reason: string; evidence: string[] };

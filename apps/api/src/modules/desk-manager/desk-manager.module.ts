@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { AiGatewayModule } from '../ai-gateway/ai-gateway.module';
 import { AiSetupsModule } from '../ai-setups/ai-setups.module';
@@ -23,7 +24,8 @@ import { DeskActionsService } from './services/desk-actions.service';
 import { DeskExitActions } from './services/desk-exit-actions.service';
 import { DESK_GRADE_MARKET, DeskGradeCron } from './services/desk-grade.cron';
 import { DeskGuardService } from './services/desk-guard.service';
-import { DESK_MARKET as DESK_STATE_MARKET, DESK_STATE_GUARD, DeskStateService } from './services/desk-state.service';
+import { DESK_MARKET as DESK_STATE_MARKET, DESK_STATE_GUARD, DESK_STATUS, DeskStateService } from './services/desk-state.service';
+import { DeskStatusAdapter } from './adapters/desk-status.adapter';
 import { DeskWakeListener } from './services/desk-wake.listener';
 import { ManagerLlmService } from './services/manager-llm.service';
 import { DESK_PACKET_BUILDER, ManagerRunnerService, type DeskPacketBuilder } from './services/manager-runner.service';
@@ -61,6 +63,8 @@ import { DESK_WAKE as TARGET_WATCH_WAKE, TargetWatchService } from './services/t
     DeskMarketAdapter,
     { provide: DESK_STATE_MARKET, useExisting: DeskMarketAdapter },
     { provide: DESK_STATE_GUARD, useExisting: DeskGuardService },
+    // The health block's feed + agent status (audit 2026-11-27: was "unknown (status port not wired)" / {}).
+    { provide: DESK_STATUS, useFactory: (ref: ModuleRef) => DeskStatusAdapter.fromModuleRef(ref), inject: [ModuleRef] },
     // The manager (Task 4).
     DeskManagerRepository,
     ManagerLlmService,

@@ -18,6 +18,12 @@ import type { ExpiryHint, InstrumentKind } from './types';
 export interface InferredExpiry {
   expiry: string | null;
   source: 'message' | 'master' | 'rule' | 'none';
+  /**
+   * Set when the post NAMES an expiry the master does not list as live (audit 2026-11-28). `expiry` is then the
+   * named date itself (or the named month's calendar monthly) — never another listed contract — so no contract
+   * matches and the call stays unresolved instead of trading a different expiry.
+   */
+  mismatch?: string;
 }
 
 const IST_OFFSET_MS = 330 * 60_000;
@@ -52,18 +58,32 @@ export function inferExpiry(
   const from = earliestUsable(postedAt);
   const list = (listed ?? []).filter((e) => /^\d{4}-\d{2}-\d{2}$/.test(e)).sort();
 
-  if (hint) {
+  const live = list.filter((e) => e >= from);
+  const shown = () => (live.length ? live.slice(0, 6).join(', ') : 'none');
+
+  if (hint && hint.month >= 1 && hint.month <= 12) {
     const year = hint.year ?? yearFor(hint.month, from);
     if (hint.day !== null) {
+      // The named day exactly: a day the master does not list is a mismatch, never the next listed one. A listed
+      // day is kept even after the 15:15 cutoff on that day (the post names it; the market clock decides).
       const want = ymdOf(year, hint.month, hint.day);
       if (list.length === 0) return { expiry: want, source: 'message' };
-      return { expiry: list.find((e) => e >= want) ?? want, source: 'message' };
+      if (list.includes(want)) return { expiry: want, source: 'message' };
+      const why = want < from ? 'has already expired' : 'is not listed';
+      return { expiry: want, source: 'message', mismatch: `named expiry ${want} ${why} for ${underlying} ${kind} (live: ${shown()})` };
     }
-    const inMonth = list.filter((e) => e.startsWith(`${year}-${pad(hint.month)}`));
+    const month = `${year}-${pad(hint.month)}`;
+    const inMonth = live.filter((e) => e.startsWith(month));
     if (inMonth.length) return { expiry: inMonth[inMonth.length - 1], source: 'message' };
     const rule = monthlyRule(underlying, year, hint.month);
-    return { expiry: rule, source: rule ? 'rule' : 'none' };
+    if (list.length === 0) return { expiry: rule, source: rule ? 'rule' : 'none' };
+    // Listed, but nothing live in the named month: name that month's calendar monthly (or its last day) so no
+    // listed contract of another month is picked.
+    const want = rule ?? ymdOf(year, hint.month, new Date(Date.UTC(year, hint.month, 0)).getUTCDate());
+    return { expiry: want, source: 'message', mismatch: `named expiry month ${month} has no live ${underlying} ${kind} expiry (live: ${shown()})` };
   }
+
+  if (hint?.relative) return relativeExpiry(underlying, kind, hint.relative, from, live);
 
   if (list.length) {
     // Futures: nearest month; options: nearest listed (weekly where one exists).
@@ -72,6 +92,50 @@ export function inferExpiry(
   }
   const rule = ruleExpiry(underlying, kind, from);
   return { expiry: rule, source: rule ? 'rule' : 'none' };
+}
+
+/**
+ * "weekly" / "this expiry" → the nearest live; "next (week) expiry" → the one after it; "monthly" → the last live
+ * expiry in the nearest live expiry's month. Without the master: the calendar rule, source 'rule'.
+ */
+function relativeExpiry(
+  underlying: string,
+  kind: InstrumentKind,
+  r: NonNullable<ExpiryHint['relative']>,
+  from: string,
+  live: readonly string[],
+): InferredExpiry {
+  if (live.length) {
+    if (r === 'NEXT') {
+      if (live[1]) return { expiry: live[1], source: 'message' };
+      // Only one live: name the calendar's next one (never the nearest), so nothing listed matches.
+      const next = ruleExpiry(underlying, kind, dayAfter(live[0])) ?? dayAfter(live[0]);
+      return { expiry: next, source: 'message', mismatch: `"next expiry" named but only ${live[0]} is live for ${underlying} ${kind}` };
+    }
+    if (r === 'MONTHLY') {
+      const month = live[0].slice(0, 7);
+      const inMonth = live.filter((e) => e.startsWith(month));
+      return { expiry: inMonth[inMonth.length - 1], source: 'message' };
+    }
+    return { expiry: live[0], source: 'message' };
+  }
+  const near = ruleExpiry(underlying, kind, from);
+  if (!near) return { expiry: null, source: 'none' };
+  if (r === 'NEXT') {
+    const next = ruleExpiry(underlying, kind, dayAfter(near));
+    return { expiry: next, source: next ? 'rule' : 'none' };
+  }
+  if (r === 'MONTHLY') {
+    const m = monthlyRule(underlying, Number(near.slice(0, 4)), Number(near.slice(5, 7)));
+    return { expiry: m, source: m ? 'rule' : 'none' };
+  }
+  return { expiry: near, source: 'rule' };
+}
+
+function dayAfter(ymd: string): string {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
 }
 
 function yearFor(month: number, from: string): number {

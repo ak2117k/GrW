@@ -7,12 +7,22 @@ export type Horizon = 'INTRADAY' | 'BTST' | 'POSITIONAL';
 /** Market view of a signal: buying a call / future / stock or selling a put is BULL. */
 export type Direction = 'BULL' | 'BEAR';
 
-/** An expiry written in the message: a full date, or a month only (that month's last expiry). */
+/**
+ * A relative expiry written in the message: "monthly expiry" (the nearest month's last), "weekly" / "this expiry"
+ * (the nearest), "next expiry" / "next week expiry" (the one after the nearest).
+ */
+export type RelativeExpiry = 'MONTHLY' | 'WEEKLY' | 'CURRENT' | 'NEXT';
+
+/**
+ * An expiry written in the message: a full date, a month only (that month's last expiry), or a relative one
+ * (`month` 0 and `relative` set).
+ */
 export interface ExpiryHint {
   day: number | null;
-  /** 1–12 */
+  /** 1–12; 0 only with `relative` (no month named). */
   month: number;
   year: number | null;
+  relative?: RelativeExpiry;
 }
 
 export interface ParsedSignal {

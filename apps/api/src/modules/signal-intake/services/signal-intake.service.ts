@@ -10,7 +10,7 @@ import { cachedVisionReply, CALL_AT_TAG, clockOrNull, hasImageDescription, readI
 import { prefilter, type PrefilterResult } from '../domain/prefilter';
 import { hasNewCall, resultPostReason } from '../domain/result-post';
 import { parseSignal } from '../domain/rule-parser';
-import { normalise } from '../domain/text';
+import { expiryHintOfText, normalise } from '../domain/text';
 import { rematchStrike } from '../domain/strike-sanity';
 import {
   directionOf,
@@ -694,7 +694,7 @@ export class SignalIntakeService {
       // The stored call may have been re-matched (SENSEX 25850 PE → NIFTY): the edit resolves the same way.
       const sane = await this.strikeSane(parsed, base.postedAt);
       const p = sane.p;
-      const ex = await this.expiryAndContract(p, base.postedAt);
+      const ex = await this.expiryAndContract(p, base.postedAt, evt.text);
       await this.repo.updateSignal(prior.signalId, {
         entryLow: p.entryLow, entryHigh: p.entryHigh, entryType: p.entryType, sl: p.sl, targets: p.targets,
         qty: p.qty, strike: p.strike, expiry: ex.expiry, expirySource: ex.source, exchange: ex.contract?.exchange ?? null,
@@ -716,7 +716,14 @@ export class SignalIntakeService {
 
   // ─── Signals ───────────────────────────────────────────────────────────────
 
-  private async expiryAndContract(p: ParsedSignal, postedAt: Date) {
+  /**
+   * The expiry is the one the post names: the parser's own, else (an LLM / image parse that returned none) the one
+   * written in the text (audit 2026-11-28: Mr P "December 29" was traded on the 01-Dec weekly). A named expiry the
+   * master does not list comes back with `mismatch` and no contract — never another listed expiry.
+   */
+  private async expiryAndContract(p: ParsedSignal, postedAt: Date, text?: string | null) {
+    const hint = p.expiryHint ?? (p.instrumentKind === 'EQ' ? null : expiryHintOfText(text));
+    if (hint !== p.expiryHint) p = { ...p, expiryHint: hint };
     const vocab = await this.vocab.get();
     const seg = segmentOf(p.underlying, p.instrumentKind, vocab.classOf.get(p.underlying));
     let rows: readonly unknown[] | null = null;
@@ -728,6 +735,7 @@ export class SignalIntakeService {
     const listed = rows ? listedExpiries(rows, p.underlying, p.instrumentKind, seg) : null;
     const ex = inferExpiry(p.underlying, p.instrumentKind, p.expiryHint, postedAt, listed && listed.length ? listed : null);
     const contract = rows ? findContract(rows, { underlying: p.underlying, instrumentKind: p.instrumentKind, strike: p.strike, expiry: ex.expiry }, seg) : null;
+    if (ex.mismatch) this.logger.warn(`[signal-intake] ${p.underlying} ${p.strike ?? ''} ${p.instrumentKind}: ${ex.mismatch} — left unresolved`);
     return { ...ex, contract };
   }
 
@@ -793,7 +801,7 @@ export class SignalIntakeService {
       await this.repo.saveClass({ ...base, status: 'RECAP', parser, llmResult, reason: why.slice(0, 500) });
       return;
     }
-    const ex = await this.expiryAndContract(p, postedAt);
+    const ex = await this.expiryAndContract(p, postedAt, evt.text);
     const direction = directionOf(p.instrumentKind, p.side);
     let confidence = p.confidence;
     if (ex.source === 'rule') confidence -= 0.05;
@@ -820,7 +828,7 @@ export class SignalIntakeService {
       targets: p.targets,
       qty: p.qty,
       horizon: p.horizon,
-      tags: p.tags,
+      tags: ex.mismatch ? [...p.tags, 'EXPIRY_UNLISTED'] : p.tags,
       confidence: Math.round(Math.max(0, confidence) * 100) / 100,
       rawText: String(evt.text ?? ''),
       dedupKey: key,
@@ -844,7 +852,8 @@ export class SignalIntakeService {
     }
     await this.repo.flagConflict(plan.conflictClusterIds.filter((id) => id !== clusterId));
     await this.repo.setSignalCluster(signalId, clusterId);
-    await this.repo.saveClass({ ...base, status: 'SIGNAL', parser, signalId, llmResult, ...(reMatched ? { reason: reMatched } : {}) });
+    const why = [reMatched, ex.mismatch ? `expiry unresolved: ${ex.mismatch}` : null].filter(Boolean).join('; ');
+    await this.repo.saveClass({ ...base, status: 'SIGNAL', parser, signalId, llmResult, ...(why ? { reason: why.slice(0, 500) } : {}) });
 
     if (this.now().getTime() - postedAt.getTime() > this.config.readyMaxAgeMs) return; // history: stored, not traded
     const ready = (id: string): SignalReadyEvent => ({ signalId: id, clusterId, agreeCount: plan.cluster.agreeCount, conflict: plan.cluster.conflict });

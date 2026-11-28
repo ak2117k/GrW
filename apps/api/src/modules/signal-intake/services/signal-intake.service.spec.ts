@@ -1196,3 +1196,36 @@ describe('SignalIntakeService — supreme fixes W3 (audit 2026-11-27)', () => {
     });
   });
 });
+
+describe('named expiry (audit 2026-11-28, Mr P "December 29" traded on the weekly)', () => {
+  const row = (d: string, mon: string, token: string) => ({
+    exch_seg: 'NFO', name: 'NIFTY', instrumenttype: 'OPTIDX', symbol: `NIFTY${d}${mon}2624000CE`, expiry: `${d}${mon}2026`, strike: '2400000.000000', token,
+  });
+  const master = [row('27', 'OCT', '111'), row('03', 'NOV', '222'), row('24', 'NOV', '333')];
+  const llmCall = { underlying: 'NIFTY', instrumentKind: 'CE', strike: 24000, expiry: null, side: 'BUY', entryType: 'ABOVE', entryLow: 120, entryHigh: 120, sl: 100, targets: [150], qty: null, horizon: 'BTST', confidence: 0.8 };
+
+  it('an LLM parse with no expiry takes the expiry the post names', async () => {
+    const llm = jest.fn(async (): Promise<LlmParseReply> => ({ isSignal: true, signals: [llmCall as never] }));
+    const { svc, mem, msg } = make({ llm, master });
+    await svc.handle(msg('m1', 'A', 'Btst (November 24) NIFTY 24000 CE 120 ke upar lelo, 100 ka stop, 150 tak jayega'));
+    await flush();
+    await svc.handle(msg('x', 'A', 'BUY NIFTY 24100 CE ABOVE 120 SL 100 TGT 140', 1));
+    expect(llm).toHaveBeenCalledTimes(1);
+    expect(mem.signals[0]).toMatchObject({ parser: 'llm', expiry: '2026-11-24', expirySource: 'message', token: '333', tradingsymbol: 'NIFTY24NOV2624000CE' });
+  });
+
+  it('a named expiry that is not listed stays unresolved (no token) and records why — never the nearest weekly', async () => {
+    const { svc, mem, msg } = make({ master });
+    await svc.handle(msg('m1', 'A', 'BUY NIFTY 24000 CE 25 Nov ABOVE 120 SL 100 TGT 140'));
+    expect(mem.signals[0]).toMatchObject({ expiry: '2026-11-25', expirySource: 'message', token: null, tradingsymbol: null });
+    expect(mem.signals[0].tags).toContain('EXPIRY_UNLISTED');
+    expect(mem.classes.get('m1')?.reason).toMatch(/named expiry 2026-11-25 is not listed/);
+  });
+
+  it('no expiry named → nearest listed, unchanged', async () => {
+    const { svc, mem, msg } = make({ master });
+    await svc.handle(msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+    expect(mem.signals[0]).toMatchObject({ expiry: '2026-10-27', expirySource: 'master', token: '111' });
+    expect(mem.signals[0].tags).not.toContain('EXPIRY_UNLISTED');
+  });
+});

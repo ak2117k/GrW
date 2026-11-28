@@ -80,7 +80,8 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
     const w = t[i];
     if (isNumber(w)) {
       const v = Number(w);
-      if (t[i + 1] === 'LOT' || t[i + 1] === 'LOTS') {
+      // "2 LOTS" is a quantity; "SL 300 LOT SIZE 65" (Mr P 2026-11-27) is a stop followed by the next field.
+      if ((t[i + 1] === 'LOT' || t[i + 1] === 'LOTS') && t[i + 2] !== 'SIZE') {
         qty = Math.round(v);
         continue;
       }

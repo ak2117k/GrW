@@ -26,6 +26,14 @@ const DEFAULT_FALLBACK_STEP = 50;
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 /**
+ * The venue's session open (IST hour, minute): MCX 09:00, everything else 09:15. The opening range is the first
+ * 15 minutes of THAT session (3 × 5m bars) — an MCX book used to take 09:15–09:30 as its OR. 2026-11-28 (W4).
+ */
+export function sessionOpenHm(exchange: string | null | undefined): [number, number] {
+  return String(exchange ?? '').trim().toUpperCase().startsWith('MCX') ? [9, 0] : [9, 15];
+}
+
+/**
  * The UTC moment that corresponds to **today 00:00 IST**. Angel One stamps
  * daily candles at midnight IST of the trading day they represent — which
  * is 18:30 UTC of the *previous* calendar day. So the candle for trading
@@ -380,7 +388,7 @@ export class LevelBookService {
         istNow.getUTCFullYear(),
         istNow.getUTCMonth(),
         istNow.getUTCDate(),
-        9, 15, 0, 0,
+        ...sessionOpenHm(exchange), 0, 0,
       ),
     );
     const sessionOpen = new Date(sessionOpenIst.getTime() - istOffsetMs);
@@ -581,7 +589,7 @@ export class LevelBookService {
       const prevIst = new Date(prevDayUtc.getTime() + istOffsetMs);
       const prevSessionOpenIst = new Date(Date.UTC(
         prevIst.getUTCFullYear(), prevIst.getUTCMonth(), prevIst.getUTCDate(),
-        9, 15, 0, 0,
+        ...sessionOpenHm(exchange), 0, 0,
       ));
       const prevSessionOROpen = new Date(prevSessionOpenIst.getTime() - istOffsetMs);
       const prevSessionORClose = new Date(prevSessionOROpen.getTime() + 15 * 60 * 1000);

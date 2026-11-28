@@ -66,6 +66,15 @@ export function nextBarReadyAt(t: number): number {
   return Math.floor((t - PUBLISH_GRACE_MS) / BAR_MS) * BAR_MS + BAR_MS + PUBLISH_GRACE_MS;
 }
 
+/**
+ * The pre-warm pass runs at bar close + 50 s, not + 20 s: the sentinel / MBM refreshers hit the shared historical
+ * gate right at close + 20 s, and the desk's burst must not land in the same window.
+ */
+export const PREWARM_OFFSET_MS = 50_000;
+export function nextPrewarmAt(t: number): number {
+  return Math.floor((t - PREWARM_OFFSET_MS) / BAR_MS) * BAR_MS + BAR_MS + PREWARM_OFFSET_MS;
+}
+
 /** Live-feed bars are trusted only while the newest 1m bar ENDED within this of now (venue open). */
 const LIVE_STALE_MS = 3 * MIN;
 /** …and its close is within this fraction of Angel's live price. */
@@ -143,7 +152,8 @@ export interface DeskDaily {
  * A level book built from daily + 15m bars with the existing builder (LevelBookService.seedSession /
  * lockOpeningRange / updateFromTick on a private instance, never the shared map): PDH / PDL / prev close / ATR
  * from the daily candles before today (none → the previous session's 15m bars), today's opening range = the first
- * closed 15m bar (the book's 3 × 5m), yesterday's OR = the previous session's first 15m bar, today's high / low
+ * closed 15m bar of the VENUE's session (sessionOnlyBars: MCX 09:00–09:15, NSE/BSE 09:15–09:30 — the same window
+ * LevelBookService.lazyLoad uses via sessionOpenHm), yesterday's OR = the previous session's first 15m bar, today's high / low
  * from today's closed bars, `vwap` as given. Null when there is no previous session at all.
  */
 export function buildDeskLevelBook(input: {
@@ -240,7 +250,7 @@ export class DeskMarketAdapter implements DeskMarketPort, OnApplicationBootstrap
     @Optional() private readonly moduleRef?: ModuleRef,
   ) {}
 
-  /** Boot pre-warm + one pass per closed 15m bar (close + 20 s). Nothing while DESK_MANAGER=off. */
+  /** Boot pre-warm + one pass per closed 15m bar (close + 50 s, see nextPrewarmAt). Nothing while DESK_MANAGER=off. */
   onApplicationBootstrap(): void {
     if (!this.cfg || this.cfg.mode === 'off') return;
     void this.prewarm().catch(() => undefined);
@@ -258,7 +268,7 @@ export class DeskMarketAdapter implements DeskMarketPort, OnApplicationBootstrap
       void this.prewarm()
         .catch(() => undefined)
         .finally(() => this.schedule());
-    }, Math.max(1_000, nextBarReadyAt(t) - t));
+    }, Math.max(1_000, nextPrewarmAt(t) - t));
     this.timer.unref?.();
   }
 
@@ -280,6 +290,7 @@ export class DeskMarketAdapter implements DeskMarketPort, OnApplicationBootstrap
     const names = new Set((list ?? this.prewarmList).map((s) => s.toUpperCase()));
     for (const [u, at] of this.seen) if (t - at <= SEEN_FRESH_MS) names.add(u);
     const visited: string[] = [];
+    const histBefore = this.historicalCalls;
     for (const u of names) {
       try {
         const ref = await this.ref(u, now, false);
@@ -301,6 +312,8 @@ export class DeskMarketAdapter implements DeskMarketPort, OnApplicationBootstrap
         this.logger.debug(`[desk] prewarm ${u}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    this.lastPrewarmHistoricalCalls = this.historicalCalls - histBefore;
+    this.logger.log(`[desk] prewarm: ${visited.length} underlyings, ${this.lastPrewarmHistoricalCalls} historical calls`);
     return visited;
   }
 
@@ -316,8 +329,16 @@ export class DeskMarketAdapter implements DeskMarketPort, OnApplicationBootstrap
 
   /** Wall clock for the bar cache (tests set it); `now` arguments stay the packet's own time. */
   clock: () => number = () => Date.now();
-  private readonly barCache = new Map<string, { bars: DeskBar[]; validUntil: number; inflight: Promise<DeskBar[]> | null }>();
+  /**
+   * `retriedFor` = the closed bar (start ts) a publish-lag retry was already spent on: ONE early retry per closed
+   * bar, then the entry waits for nextBarReadyAt (an illiquid line that never prints the bar is not re-asked every
+   * minute on the shared historical gate).
+   */
+  private readonly barCache = new Map<string, { bars: DeskBar[]; validUntil: number; inflight: Promise<DeskBar[]> | null; retriedFor?: number | null }>();
   private infoBarsMemo: InfoBars | null | undefined;
+  /** Historical-API fetches made (the pre-warm logs its share per pass). */
+  historicalCalls = 0;
+  lastPrewarmHistoricalCalls = 0;
 
   /** The owner-session bar loader (SIGNAL_INFO_BARS, with volume) when the app has it; else the setups market's. */
   private infoBars(): InfoBars | null {
@@ -326,6 +347,9 @@ export class DeskMarketAdapter implements DeskMarketPort, OnApplicationBootstrap
       this.infoBarsMemo = (this.moduleRef?.get(SIGNAL_INFO_BARS, { strict: false }) as InfoBars | undefined) ?? null;
     } catch {
       this.infoBarsMemo = null;
+    }
+    if (!this.infoBarsMemo) {
+      this.logger.warn('[desk] SIGNAL_INFO_BARS not found: 15m bars without volume (no VWAP from volume), no daily statics for built level books');
     }
     return this.infoBarsMemo;
   }
@@ -357,20 +381,23 @@ export class DeskMarketAdapter implements DeskMarketPort, OnApplicationBootstrap
     const hit = this.barCache.get(key);
     if (hit?.inflight) return hit.bars.length && !wait ? hit.bars : hit.inflight;
     if (hit && !force && t < hit.validUntil) return hit.bars;
+    const retriedBefore = hit?.retriedFor ?? null;
     const inflight = this.fetchBars(ref, t).then((bars) => {
-      const fresh = bars.length > 0 ? { bars, validUntil: this.validUntil(ref, bars, t) } : { bars: hit?.bars ?? [], validUntil: t + RETRY_EMPTY_MS };
+      const fresh =
+        bars.length > 0 ? { bars, ...this.validity(ref, bars, t, retriedBefore) } : { bars: hit?.bars ?? [], validUntil: t + RETRY_EMPTY_MS, retriedFor: retriedBefore };
       this.barCache.set(key, { ...fresh, inflight: null });
       return fresh.bars;
     });
-    this.barCache.set(key, { bars: hit?.bars ?? [], validUntil: 0, inflight });
+    this.barCache.set(key, { bars: hit?.bars ?? [], validUntil: 0, inflight, retriedFor: retriedBefore });
     return hit?.bars.length && !wait ? hit.bars : inflight;
   }
 
   /**
    * Fresh bars are good until the next bar is published, unless the answer lacks the last closed bar of an open
-   * venue (Angel publishes a few seconds late): then it is asked again after a minute, not 15.
+   * venue (Angel publishes a few seconds late): then it is asked again after a minute, not 15 — ONCE per closed
+   * bar; a second answer still without it waits for the next bar like any other.
    */
-  private validUntil(ref: WatchRef, bars: readonly DeskBar[], t: number): number {
+  private validity(ref: WatchRef, bars: readonly DeskBar[], t: number, retriedFor: number | null): { validUntil: number; retriedFor: number | null } {
     const lastClosedStart = Math.floor(t / BAR_MS) * BAR_MS - BAR_MS;
     const newest = bars[bars.length - 1].ts;
     let open = false;
@@ -379,13 +406,15 @@ export class DeskMarketAdapter implements DeskMarketPort, OnApplicationBootstrap
     } catch {
       open = false;
     }
-    return open && newest < lastClosedStart ? t + RETRY_EMPTY_MS : nextBarReadyAt(t);
+    if (open && newest < lastClosedStart && retriedFor !== lastClosedStart) return { validUntil: t + RETRY_EMPTY_MS, retriedFor: lastClosedStart };
+    return { validUntil: nextBarReadyAt(t), retriedFor };
   }
 
   /** 1) Angel's live feed (the hub's tick bars) when it passes liveFeedGate; 2) else Angel's historical API. */
   private async fetchBars(ref: WatchRef, t: number): Promise<DeskBar[]> {
     const live = await this.liveFeedBars(ref, t).catch(() => null);
     if (live) return live;
+    this.historicalCalls++;
     const raw = await this.historicalBars(ref, new Date(t - TREND_LOOKBACK_MS), new Date(t)).catch(() => [] as DeskBar[]);
     return [...(raw ?? [])].filter((b) => Number.isFinite(b.ts) && Number.isFinite(b.close)).sort((a, b) => a.ts - b.ts);
   }
@@ -471,8 +500,24 @@ export class DeskMarketAdapter implements DeskMarketPort, OnApplicationBootstrap
       return { ...shared, vwap: vwap ?? 0 };
     }
     const [bars, daily, vwap] = await Promise.all([this.loadRefBars(ref), this.dailyOf(ref, this.clock()), this.vwapOf(underlying, ref, now)]);
-    return buildDeskLevelBook({ token: ref.token, symbol: underlying.toUpperCase(), exchange: ref.exchange, daily, bars, now, vwap });
+    // One build per (underlying, session date, last closed bar): the inputs only change when a bar closes (the
+    // daily count and VWAP are in the key so a late daily answer / future bar still rebuilds).
+    const closed = closedBy(bars, now);
+    const lastClosed = closed.length ? closed[closed.length - 1].ts : 0;
+    const key = `${underlying.toUpperCase()}|${istYmd(now)}|${lastClosed}|${daily.length}|${vwap ?? ''}`;
+    const memo = this.builtBooks.get(ref.token);
+    if (memo && memo.key === key) {
+      this.builtBookHits++;
+      return memo.book;
+    }
+    const book = buildDeskLevelBook({ token: ref.token, symbol: underlying.toUpperCase(), exchange: ref.exchange, daily, bars, now, vwap });
+    this.builtBooks.set(ref.token, { key, book });
+    return book;
   }
+
+  private readonly builtBooks = new Map<string, { key: string; book: LevelBook | null }>();
+  /** Built-book cache hits (spec visibility). */
+  builtBookHits = 0;
 
   /**
    * The underlying's 15m bars built from Angel's LIVE feed: the market hub writes every tick into 1-minute bars

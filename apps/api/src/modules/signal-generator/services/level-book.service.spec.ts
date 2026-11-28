@@ -609,5 +609,25 @@ describe('LevelBookService', () => {
       expect(book!.prevOrh).toBe(132);
       expect(book!.prevOrl).toBe(122);
     });
+
+    it('MCX: the opening range windows start at the venue open (09:00 IST), not 09:15', async () => {
+      const istMin = (d: Date) => Math.floor(((d.getTime() + 330 * 60_000) % 86_400_000) / 60_000);
+      const instrumentService = { getByToken: jest.fn().mockResolvedValue({ id: 'inst1' }) } as any;
+      const repo = {
+        getCandles: jest.fn().mockImplementation(async (_id: string, tf: string) => (tf === '1d' ? dailyRows() : [])),
+      } as any;
+      const svc = new LevelBookService(instrumentService, repo);
+      await svc.lazyLoad('TKN_MCX', 'MCX', 'CRUDEOIL');
+      const fiveMin = repo.getCandles.mock.calls.filter((c: unknown[]) => c[1] === '5m');
+      // Today's session replay and every previous-session OR window open at 09:00 IST.
+      expect(istMin(fiveMin[0][2])).toBe(540);
+      const orWindows = fiveMin.filter((c: unknown[]) => (c[3] as Date).getTime() - (c[2] as Date).getTime() === 15 * 60_000);
+      expect(orWindows.length).toBeGreaterThan(0);
+      expect(orWindows.every((c: unknown[]) => istMin(c[2] as Date) === 540)).toBe(true);
+      // NSE stays 09:15.
+      repo.getCandles.mockClear();
+      await svc.lazyLoad('TKN_NSE', 'NSE', 'X');
+      expect(istMin(repo.getCandles.mock.calls.filter((c: unknown[]) => c[1] === '5m')[0][2])).toBe(555);
+    });
   });
 });

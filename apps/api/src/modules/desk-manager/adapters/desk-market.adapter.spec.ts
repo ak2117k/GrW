@@ -1,5 +1,5 @@
 import type { Bar15m } from '../../ai-setups/domain/setup-watch';
-import { DeskMarketAdapter, liveFeedGate, nextBarReadyAt } from './desk-market.adapter';
+import { DeskMarketAdapter, liveFeedGate, nextBarReadyAt, nextPrewarmAt } from './desk-market.adapter';
 
 const MIN = 60_000;
 // 2026-11-27 11:10:00 IST = 05:40:00Z (a 15m close was 11:00 IST, the next is 11:15 IST).
@@ -248,6 +248,22 @@ describe('W4 shared 15m bar cache (one fetch per (exchange, token) per closed ba
     await new Promise((r) => setImmediate(r));
     expect(info.intraday15m).toHaveBeenCalledTimes(2);
   });
+
+  it('the publish-lag retry is spent ONCE per closed bar; a second short answer waits for the next bar', async () => {
+    const { a, info, setNow } = makeW4({ bars: () => sessionBars(['2026-11-26', '2026-11-27'], IST('2026-11-27T10:45:00')) });
+    const read = async (t: number) => {
+      setNow(t);
+      await a.trend15m('NIFTY', new Date(t));
+      await new Promise((r) => setImmediate(r));
+    };
+    await read(T0);
+    await read(T0 + 61_000); // the one early retry
+    await read(T0 + 122_000);
+    await read(T0 + 183_000);
+    expect(info.intraday15m).toHaveBeenCalledTimes(2);
+    await read(Date.parse('2026-11-27T05:45:30Z')); // next bar published: asked again
+    expect(info.intraday15m).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe('W4 pre-warm (boot, venue open, every closed bar)', () => {
@@ -284,6 +300,25 @@ describe('W4 pre-warm (boot, venue open, every closed bar)', () => {
     expect(info.intraday15m.mock.calls.length).toBe(n);
   });
 
+  it('the per-bar pass runs at bar close + 50 s (clear of the close + 20 s refreshers)', () => {
+    expect(nextPrewarmAt(T0)).toBe(Date.parse('2026-11-27T05:45:50Z')); // 11:10 → 11:15:50 IST
+    expect(nextPrewarmAt(Date.parse('2026-11-27T05:45:30Z'))).toBe(Date.parse('2026-11-27T05:45:50Z'));
+    expect(nextPrewarmAt(Date.parse('2026-11-27T05:45:50Z'))).toBe(Date.parse('2026-11-27T06:00:50Z'));
+  });
+
+  it('the boot timer is armed for bar close + 50 s; each pass counts its historical calls', async () => {
+    const spy = jest.spyOn(global, 'setTimeout');
+    const w = makeW4({ bars: () => sessionBars(['2026-11-26', '2026-11-27'], T0) });
+    w.a.onApplicationBootstrap();
+    const delays = spy.mock.calls.map((c) => c[1]);
+    w.a.onModuleDestroy();
+    spy.mockRestore();
+    expect(delays).toContain(Date.parse('2026-11-27T05:45:50Z') - T0);
+    const { a } = makeW4({ bars: () => sessionBars(['2026-11-26', '2026-11-27'], T0) });
+    await a.prewarm(['NIFTY']);
+    expect(a.lastPrewarmHistoricalCalls).toBe(2); // NIFTY + its near-month future, both via the historical API
+  });
+
   it('DESK_MANAGER=off starts no pre-warm timer', () => {
     const { a, info } = makeW4({ mode: 'off' });
     a.onApplicationBootstrap();
@@ -312,6 +347,34 @@ describe('W4 level book for every packet underlying', () => {
     // Daily statics are fetched once per session.
     await a.levels('NIFTY', new Date(T0 + MIN));
     expect(info.daily).toHaveBeenCalledTimes(1);
+  });
+
+  it('the built book is cached per (underlying, session, last closed bar), rebuilt when a bar closes', async () => {
+    const { a, setNow } = makeW4({ bars: () => sessionBars(['2026-11-26', '2026-11-27'], Date.parse('2026-11-27T06:00:00Z')), daily });
+    await a.levels('NIFTY', new Date(T0));
+    await a.levels('NIFTY', new Date(T0 + MIN));
+    expect(a.builtBookHits).toBe(1);
+    setNow(Date.parse('2026-11-27T05:46:00Z'));
+    await a.levels('NIFTY', new Date(Date.parse('2026-11-27T05:46:00Z'))); // the 11:00–11:15 bar is now closed
+    expect(a.builtBookHits).toBe(1);
+  });
+
+  it('SIGNAL_INFO_BARS missing → one warning, the setups market bars still serve', async () => {
+    const market = {
+      underlyingRef: jest.fn(async () => ref),
+      ltps: jest.fn(async () => new Map<string, number>()),
+      bars15m: jest.fn(async () => sessionBars(['2026-11-26', '2026-11-27'], T0)),
+      master: jest.fn(async () => MASTER),
+      isOpen: jest.fn(() => true),
+      minutesToClose: jest.fn(() => 60),
+    };
+    const a = new DeskMarketAdapter(market as never, { getLevels: () => null } as never, {} as never, { mode: 'shadow' } as never, { get: () => undefined } as never);
+    a.clock = () => T0;
+    const warn = jest.spyOn((a as unknown as { logger: { warn: (m: string) => void } }).logger, 'warn').mockImplementation(() => undefined);
+    await a.trend15m('NIFTY', new Date(T0));
+    await a.levels('NIFTY', new Date(T0));
+    expect(warn.mock.calls.filter((c) => /SIGNAL_INFO_BARS/.test(String(c[0])))).toHaveLength(1);
+    expect(market.bars15m).toHaveBeenCalled();
   });
 
   it('no daily answer → the previous session is taken from the 15m bars', async () => {

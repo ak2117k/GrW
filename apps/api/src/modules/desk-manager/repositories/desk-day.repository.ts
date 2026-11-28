@@ -4,7 +4,8 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { istDayStart } from '../../signal-trader/domain/execution';
 import { istDay, underlyingOf } from '../../portfolio-review/domain/symbols';
 import type { ClosedTrade, DayPnlPath, TradeOrigin } from '../domain/desk.types';
-import type { GuardOpenTrade } from '../domain/pnl-path';
+import { carriedTodayPnl, type GuardOpenTrade } from '../domain/pnl-path';
+import { inVenueSession } from '../../exit-discipline/session-bars';
 
 /** The guard's stored day state, already scoped to today (a row from another IST day reads as empty). */
 export interface GuardDayState {
@@ -23,8 +24,8 @@ function originOf(source: string | null | undefined): TradeOrigin {
 
 /**
  * The desk guard's reads and writes (plan Task 1). Reads EVERY live position tracker (IST day, NSE + MCX) with its
- * origin; which ones the guard counts is decided in guardDayPath (only the desk manager's own, not held — supreme
- * fixes W1, 2026-11-28). Never read: paper trades (`paper:` ids live in `trades`, never here), delivery HOLDING
+ * origin; which ones the guard counts is decided in guardDayPath (the app's own trades, not the owner's manual or
+ * held ones — supreme fixes W1, 2026-11-28). Never read: paper trades (`paper:` ids live in `trades`, never here), delivery HOLDING
  * rows (not day trades), and anything closed before the owner's reset today.
  */
 @Injectable()
@@ -61,23 +62,47 @@ export class DeskDayRepository {
   }
 
   /**
-   * The owner's open live position trackers (kind POSITION, non-paper) with their origin and stored pnl — the
-   * same pnl the packet's positions block shows (the guard reads it through positionOpenPnl; one reading, no
-   * second "today's move" computation). The guard decides which of them count (guardDayPath).
+   * The owner's open live position trackers (kind POSITION, non-paper) with their origin, the since-entry pnl
+   * (the positions-block value) and TODAY's P&L for the day guard: a tracker opened today counts its whole marked
+   * pnl; one carried in from an earlier IST day counts only its move since the previous session's close
+   * (carriedTodayPnl). The close is the last in-session candles_1m bar before today (session-only read). The
+   * guard decides which of them count (guardDayPath).
    */
-  async openTrades(userId: string): Promise<GuardOpenTrade[]> {
+  async openTrades(userId: string, now: Date): Promise<GuardOpenTrade[]> {
+    const dayStart = istDayStart(now);
     const rows = await this.prisma.tradeTracker.findMany({
       where: { userId, kind: 'POSITION', status: 'OPEN', NOT: { id: { startsWith: 'paper:' } } },
-      select: { id: true, symbol: true, pnl: true },
+      select: { id: true, symbol: true, exchange: true, token: true, entryPrice: true, entryTime: true, qty: true, pnl: true, lastLtp: true },
     });
     if (rows.length === 0) return [];
     const sourceBy = await this.sourcesOf(rows.map((r) => r.id));
-    return rows.map((r) => ({
-      trackerId: r.id,
-      symbol: r.symbol,
-      pnl: typeof r.pnl === 'number' && Number.isFinite(r.pnl) ? r.pnl : null,
-      origin: originOf(sourceBy.has(r.id) ? sourceBy.get(r.id) : undefined),
-    }));
+    const out: GuardOpenTrade[] = [];
+    for (const r of rows) {
+      const stored = typeof r.pnl === 'number' && Number.isFinite(r.pnl) ? r.pnl : null;
+      const pnl = stored ?? 0;
+      let todayPnl = pnl;
+      if (r.entryTime && r.entryTime.getTime() < dayStart.getTime()) {
+        const prevClose = await this.prevSessionClose(r.exchange, r.token, dayStart).catch(() => null);
+        todayPnl = carriedTodayPnl({ pnl, entryPrice: r.entryPrice, ltp: r.lastLtp ?? null, qty: r.qty, prevClose });
+      }
+      out.push({ trackerId: r.id, symbol: r.symbol, pnl: stored, todayPnl, origin: originOf(sourceBy.has(r.id) ? sourceBy.get(r.id) : undefined) });
+    }
+    return out;
+  }
+
+  /** The last in-session 1-minute close strictly before `dayStart` (within 7 days); null when none is stored. */
+  private async prevSessionClose(exchange: string | null, token: string | null, dayStart: Date): Promise<number | null> {
+    if (!exchange || !token) return null;
+    const since = new Date(dayStart.getTime() - 7 * 86_400_000);
+    const bars = await this.prisma.$queryRaw<Array<{ ts: Date; close: number }>>`
+      SELECT ts, close FROM candles_1m
+      WHERE exchange = ${exchange} AND token = ${token} AND ts >= ${since} AND ts < ${dayStart}
+      ORDER BY ts DESC LIMIT 2000`;
+    for (const b of bars) {
+      const ts = b.ts instanceof Date ? b.ts.getTime() : new Date(b.ts).getTime();
+      if (inVenueSession(ts, exchange) && Number.isFinite(Number(b.close))) return Number(b.close);
+    }
+    return null;
   }
 
   /** tracker id → signal_orders.source (first row wins; a row with a null source is the signal trader). */

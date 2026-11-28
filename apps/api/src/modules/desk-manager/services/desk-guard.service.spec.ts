@@ -8,7 +8,9 @@ const cfg = parseDeskManagerConfig({});
 const loser = (id: string, min: number, pnl = -500, origin: ClosedTrade['origin'] = 'manager', symbol = 'NIFTY02DEC2625000CE'): ClosedTrade => ({
   trackerId: id, symbol, underlying: 'NIFTY', exitAt: new Date(NOW.getTime() - min * 60_000), pnl, origin,
 });
-const openPos = (id: string, pnl: number, origin: GuardOpenTrade['origin'] = 'manager', symbol = 'NIFTY02DEC2625000CE'): GuardOpenTrade => ({ trackerId: id, symbol, pnl, origin });
+const openPos = (id: string, pnl: number, origin: GuardOpenTrade['origin'] = 'manager', symbol = 'NIFTY02DEC2625000CE', todayPnl = pnl): GuardOpenTrade => ({
+  trackerId: id, symbol, pnl, todayPnl, origin,
+});
 
 const HOLD_ENV = process.env.AI_AUTO_EXIT_HOLD;
 afterEach(() => {
@@ -30,8 +32,8 @@ function make(closed: ClosedTrade[] = [], open: GuardOpenTrade[] = []) {
 }
 
 describe('DeskGuardService', () => {
-  it('a third desk (manager) loser blocks and the block is recorded', async () => {
-    const t = make([loser('a', 30), loser('b', 20), loser('c', 10)]);
+  it('a third app loser (signal, reentry, manager) blocks and the block is recorded', async () => {
+    const t = make([loser('a', 30, -500, 'signal'), loser('b', 20, -500, 'reentry'), loser('c', 10)]);
     const g = await t.svc.check('owner', 'signal', 'NIFTY', NOW);
     expect(g.blocked).toBe(true);
     expect(g.reasons).toEqual(['3 losers in a row ≥ 3']);
@@ -49,7 +51,14 @@ describe('DeskGuardService', () => {
     expect((await t.svc.state('owner', NOW)).reasons).toContain('day loss ₹8000 ≥ ₹8000');
   });
 
-  describe("only the desk manager's own trades count (2026-11-27 prod day)", () => {
+  it("a carried counted position adds only today's move (todayPnl), not its since-entry pnl", async () => {
+    const t = make([], [openPos('c', -9000, 'signal', 'NIFTY02DEC2625000CE', -1000)]);
+    const g = await t.svc.state('owner', NOW);
+    expect(g.path).toEqual(expect.objectContaining({ open: -1000, drawdownFromPeak: 1000 }));
+    expect(g.blocked).toBe(false);
+  });
+
+  describe("owner manual and held trades never count (2026-11-27 prod day)", () => {
     // Desk realised +2,409; the owner's held MAZDOCK put (carried from 11-25) −4,399 and 3 owner manual losers.
     const day = () => {
       process.env.AI_AUTO_EXIT_HOLD = 'MAZDOCK29DEC261760PE';

@@ -18,9 +18,10 @@ const MAX_PAUSE_MIN = 390;
 
 /**
  * The desk guard (plan Task 1, spec §5.5): code only, the AI cannot override it. Blocks every automatic LIVE
- * entry (signal, reentry, manager) when the DESK's day P&L path breaches a limit or a pause is in force. The path
- * counts only the desk manager's own trades (origin 'manager', not on AI_AUTO_EXIT_HOLD); the owner's manual,
- * held and other trades are reported as path.ownerPnl and never decide (supreme fixes W1, 2026-11-28).
+ * entry (signal, reentry, manager) when the app's day P&L path breaches a limit or a pause is in force. The path
+ * counts the app's own trades (signal, reentry, manager — not on AI_AUTO_EXIT_HOLD), carried positions by
+ * today's move only; the owner's manual and held trades are reported as path.ownerPnl and never decide
+ * (supreme fixes W1, 2026-11-28).
  * Never consulted for the owner's own orders or for paper. `check` FAILS CLOSED: if the day cannot be read,
  * the entry is blocked with DESK_GUARD_UNAVAILABLE. A pause never loosens an existing one; only resume / reset
  * lift it.
@@ -37,7 +38,7 @@ export class DeskGuardService implements DeskGuardPort {
   async state(userId: string, now: Date, underlying: string | null = null): Promise<GuardState> {
     const [closed, open, day] = await Promise.all([
       this.repo.closedToday(userId, now),
-      this.repo.openTrades(userId),
+      this.repo.openTrades(userId, now),
       this.repo.guardDay(userId, now),
     ]);
     const hold = parseAutoExitConfig(process.env).hold ?? [];

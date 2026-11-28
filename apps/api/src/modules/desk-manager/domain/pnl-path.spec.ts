@@ -9,7 +9,9 @@ const t = (min: number, pnl: number, origin: TradeOrigin = 'manual', symbol = 'X
   pnl,
   origin,
 });
-const o = (id: string, pnl: number | null, origin: TradeOrigin = 'manager', symbol = 'NIFTY02DEC2625000CE'): GuardOpenTrade => ({ trackerId: id, symbol, pnl, origin });
+const o = (id: string, pnl: number | null, origin: TradeOrigin = 'manager', symbol = 'NIFTY02DEC2625000CE', todayPnl: number | null = pnl): GuardOpenTrade => ({
+  trackerId: id, symbol, pnl, todayPnl: todayPnl as number, origin,
+});
 
 describe('dayPnlPath', () => {
   it('peak and drawdown', () => {
@@ -35,7 +37,7 @@ describe('dayPnlPath', () => {
   });
 });
 
-describe('positionOpenPnl (the one open-P&L reading: the positions block value)', () => {
+describe('positionOpenPnl (a finite pnl, else 0)', () => {
   it('is the tracker pnl; a missing or non-finite pnl reads 0', () => {
     expect(positionOpenPnl(-4399)).toBe(-4399);
     expect(positionOpenPnl(null)).toBe(0);
@@ -44,7 +46,7 @@ describe('positionOpenPnl (the one open-P&L reading: the positions block value)'
   });
 });
 
-describe('guardDayPath: only the desk manager\'s own trades', () => {
+describe("guardDayPath: the app's own trades count; owner manual and held are excluded", () => {
   it('owner manual losers and a held owner position never reach the path; they are reported as ownerPnl', () => {
     const p = guardDayPath(
       [t(1, 2409, 'manager'), t(2, -900), t(3, -1100), t(4, -800)],
@@ -78,14 +80,24 @@ describe('guardDayPath: only the desk manager\'s own trades', () => {
     expect(p.ownerPnl).toEqual({ realised: 0, open: 0 });
   });
 
-  it('signal / reentry / unknown origins are not desk trades (reported in ownerPnl)', () => {
+  it("signal / reentry / unknown origins are the app's automated trades: they count (path and streak)", () => {
     const p = guardDayPath([t(1, -100, 'signal'), t(2, -200, 'reentry'), t(3, -300, 'unknown')], [o('s', -50, 'signal')], []);
-    expect(p).toEqual(expect.objectContaining({ realised: 0, open: 0, lossStreak: 0 }));
-    expect(p.ownerPnl).toEqual({ realised: -600, open: -50 });
+    expect(p).toEqual(expect.objectContaining({ realised: -600, open: -50, lossStreak: 3 }));
+    expect(p.ownerPnl).toEqual({ realised: 0, open: 0 });
   });
 
-  it('open P&L is the positions-block value (whole tracker pnl), a null pnl counts 0', () => {
-    const p = guardDayPath([], [o('a', -1200.5), o('b', null), o('c', 200)], []);
-    expect(p.open).toBe(-1000.5);
+  it('a held signal trade is excluded', () => {
+    const p = guardDayPath([t(1, -100, 'signal', 'HELDS')], [o('s', -50, 'signal', 'HELDS')], ['HELDS']);
+    expect(p).toEqual(expect.objectContaining({ realised: 0, open: 0, lossStreak: 0 }));
+    expect(p.ownerPnl).toEqual({ realised: -100, open: -50 });
+  });
+
+  it("open P&L is TODAY's move (todayPnl), not the since-entry pnl, for a carried counted position", () => {
+    const p = guardDayPath([], [o('carried', -5040, 'manager', 'NIFTY02DEC2625000CE', -3937.5), o('b', null), o('c', 200)], []);
+    expect(p.open).toBe(-3737.5);
+  });
+
+  it('a non-finite todayPnl reads 0', () => {
+    expect(guardDayPath([], [o('a', -100, 'signal', 'X', Number.NaN)], []).open).toBe(0);
   });
 });

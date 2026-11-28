@@ -1,5 +1,6 @@
 import { parseMasterExpiry, parseMasterStrike } from '../../market-data/services/master-contract';
 import { tickRupees } from '../../sentinel-executor/domain/exit-order';
+import { MCX_UNDERLYINGS } from '../../signal-intake/domain/mcx-underlyings';
 import type { SignalView } from './signal.types';
 
 /** A live, tradable contract from the instrument master. */
@@ -16,7 +17,6 @@ export interface ResolvedContract {
 
 export type ResolveResult = { ok: true; contract: ResolvedContract } | { ok: false; reason: string };
 
-const MCX_UNDERLYINGS = new Set(['CRUDEOIL', 'CRUDEOILM', 'NATURALGAS', 'NATGASMINI', 'GOLD', 'GOLDM', 'SILVER', 'SILVERM', 'COPPER', 'ZINC', 'ALUMINIUM', 'LEAD', 'NICKEL']);
 const BFO_UNDERLYINGS = new Set(['SENSEX', 'BANKEX']);
 
 type Row = Record<string, unknown>;

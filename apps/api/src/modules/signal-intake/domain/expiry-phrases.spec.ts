@@ -185,6 +185,16 @@ describe('expiry inference from a named expiry', () => {
     // NSE at the same minute has already rolled past its 15:15 cutoff.
     expect(inferExpiry('NIFTY', 'CE', null, eve, ['2026-11-23', '2026-12-01'], { exchange: 'NFO' })).toEqual({ expiry: '2026-12-01', source: 'master' });
   });
+  it('MCX: a post with NO named expiry keeps the old 15:15 default (the real 11-23 COPPER image calls at 20:27 IST stay on 23-Dec)', () => {
+    const at2027 = new Date('2026-11-23T14:57:56Z');
+    const copper = ['2026-11-23', '2026-12-23', '2027-01-22'];
+    expect(inferExpiry('COPPER', 'CE', null, at2027, copper, { exchange: 'MCX' })).toEqual({ expiry: '2026-12-23', source: 'master' });
+    expect(inferExpiry('COPPER', 'CE', null, at2027, copper)).toEqual({ expiry: '2026-12-23', source: 'master' });
+    // A relative word is not a named day / month either.
+    expect(inferExpiry('COPPER', 'CE', { day: null, month: 0, year: null, relative: 'WEEKLY' }, at2027, copper, { exchange: 'MCX' })).toEqual({ expiry: '2026-12-23', source: 'message' });
+    // Before 15:15 the expiring contract is still the default.
+    expect(inferExpiry('COPPER', 'CE', null, new Date('2026-11-23T08:00:00Z'), copper, { exchange: 'MCX' })).toEqual({ expiry: '2026-11-23', source: 'master' });
+  });
   it('month only → that month’s last listed expiry (the monthly)', () => {
     expect(inferExpiry('NIFTY', 'PE', { day: null, month: 12, year: null }, at, niftyListed)).toEqual({ expiry: '2026-12-29', source: 'message' });
     expect(inferExpiry('NIFTY', 'PE', { day: null, month: 1, year: null }, at, niftyListed)).toEqual({ expiry: '2027-01-25', source: 'message' });

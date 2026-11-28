@@ -810,7 +810,27 @@ export class SignalIntakeService {
     const contract = rows ? findContract(rows, { underlying: p.underlying, instrumentKind: p.instrumentKind, strike: p.strike, expiry: ex.expiry }, seg) : null;
     if (ex.mismatch) this.logger.warn(`[signal-intake] ${p.underlying} ${p.strike ?? ''} ${p.instrumentKind}: ${ex.mismatch} — left unresolved`);
     if (ex.expiryShifted) this.logger.log(`[signal-intake] ${p.underlying} ${p.strike ?? ''} ${p.instrumentKind}: named expiry ${ex.expiryShifted.named} not listed — holiday-shifted to ${ex.expiryShifted.listed}`);
-    return { ...ex, contract };
+    return { ...ex, contract, listed: listed ?? [] };
+  }
+
+  /**
+   * The same idea re-posted in this channel (Fix 3 re-review 2026-11-29). The stored key is the plain idea key, plus
+   * `|N:<expiry>` when the post named an expiry that resolved, or `|U:<expiry>` when it named an unlisted one. A post
+   * is a DUPLICATE of an earlier one unless the earlier was EXPIRY_UNLISTED (and this post is not the same unlisted
+   * call again) or both posts named different expiries: a bare repost of a named call stays a DUPLICATE, and an
+   * expiry-correcting repost ("EXPIRY - NOVEMBER" → "EXPIRY - DECEMBER" 33 s later, MCX COMMODITY 2026-11-18) is new.
+   */
+  private async duplicateIdea(idea: string, ex: { expiry: string | null; source: string; mismatch?: string; listed: readonly string[] }, since: Date) {
+    const named = ex.source === 'message' && ex.expiry ? ex.expiry : null;
+    const key = ex.mismatch && named ? `${idea}|U:${named}` : named ? `${idea}|N:${named}` : idea;
+    // Earlier keys this post duplicates: a bare earlier one always; the same named / unlisted one; for a bare post,
+    // any earlier named one (its expiry is one of the listed ones).
+    const candidates = ex.mismatch && named ? [idea, key] : named ? [idea, key] : [idea, ...ex.listed.map((e) => `${idea}|N:${e}`)];
+    for (const k of candidates) {
+      const dup = await this.repo.duplicateOf(k, since);
+      if (dup) return { key, dup };
+    }
+    return { key, dup: null };
   }
 
   /**
@@ -857,11 +877,10 @@ export class SignalIntakeService {
     const reMatched = sane.reMatched ? `reMatched ${JSON.stringify(sane.reMatched)}` : null;
     llmResult = withReMatched(llmResult, sane.reMatched);
     const W = this.config.clusterWindowMs;
-    // The resolved expiry is part of the idea: a repost that corrects the expiry ("EXPIRY - NOVEMBER" → "EXPIRY -
-    // DECEMBER" 30 s later, MCX COMMODITY 2026-11-18) is a new signal, not a DUPLICATE (Fix 3 review).
+    // A named expiry is part of the idea only when it matters (see duplicateIdea).
     const ex = await this.expiryAndContract(p, postedAt, evt.text);
-    const key = `${dedupKey({ channelId: evt.channelId, underlying: p.underlying, instrumentKind: p.instrumentKind, strike: p.strike, side: p.side, entryLow: p.entryLow, entryHigh: p.entryHigh })}${ex.expiry ? `|${ex.expiry}` : ''}`;
-    const dup = await this.repo.duplicateOf(key, new Date(postedAt.getTime() - W));
+    const idea = dedupKey({ channelId: evt.channelId, underlying: p.underlying, instrumentKind: p.instrumentKind, strike: p.strike, side: p.side, entryLow: p.entryLow, entryHigh: p.entryHigh });
+    const { key, dup } = await this.duplicateIdea(idea, ex, new Date(postedAt.getTime() - W));
     if (dup) {
       await this.repo.saveClass({ ...base, status: 'DUPLICATE', parser, signalId: dup, llmResult, reason: reMatched ? `same idea re-posted in this channel; ${reMatched}` : 'same idea re-posted in this channel' });
       return;

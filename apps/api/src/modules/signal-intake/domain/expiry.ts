@@ -1,3 +1,4 @@
+import { MCX_UNDERLYINGS } from './mcx-underlyings';
 import type { ExpiryHint, InstrumentKind } from './types';
 
 /**
@@ -70,37 +71,18 @@ export function inferExpiry(
   opts: InferOptions = {},
 ): InferredExpiry {
   if (kind === 'EQ') return { expiry: null, source: 'none' };
-  const mcx = opts.exchange === 'MCX' || MCX.has(underlying);
-  const from = earliestUsable(postedAt, mcx ? 'MCX' : opts.exchange);
+  const mcx = opts.exchange === 'MCX' || MCX_UNDERLYINGS.has(underlying);
+  // A post with no named expiry keeps the default 15:15 cutoff on every exchange (on an MCX expiry evening the next
+  // contract, as before). Only a NAMED day / month uses MCX's session close (re-review 2026-11-29).
+  const from = earliestUsable(postedAt);
   const list = (listed ?? []).filter((e) => /^\d{4}-\d{2}-\d{2}$/.test(e)).sort();
 
-  const live = list.filter((e) => e >= from);
-  const shown = () => (live.length ? live.slice(0, 6).join(', ') : 'none');
-
   if (hint && hint.month >= 1 && hint.month <= 12) {
-    const year = hint.year ?? yearFor(hint.month, from);
-    if (hint.day !== null) {
-      // The named day exactly: a day the master does not list is a mismatch, never the next listed one. A listed
-      // day is kept even after the cutoff on that day (the post names it; the market clock decides).
-      const want = ymdOf(year, hint.month, hint.day);
-      if (list.length === 0) return { expiry: want, source: 'message' };
-      if (list.includes(want)) return { expiry: want, source: 'message' };
-      const shifted = mcx ? null : holidayShift(want, list, from);
-      if (shifted) return { expiry: shifted, source: 'message', expiryShifted: { named: want, listed: shifted } };
-      const why = want < from ? 'has already expired' : 'is not listed';
-      return { expiry: want, source: 'message', mismatch: `named expiry ${want} ${why} for ${underlying} ${kind} (live: ${shown()})` };
-    }
-    const month = `${year}-${pad(hint.month)}`;
-    const inMonth = live.filter((e) => e.startsWith(month));
-    if (inMonth.length) return { expiry: inMonth[inMonth.length - 1], source: 'message' };
-    const rule = monthlyRule(underlying, year, hint.month);
-    if (list.length === 0) return { expiry: rule, source: rule ? 'rule' : 'none' };
-    // Listed, but nothing live in the named month: name that month's calendar monthly (or its last day) so no
-    // listed contract of another month is picked.
-    const want = rule ?? ymdOf(year, hint.month, new Date(Date.UTC(year, hint.month, 0)).getUTCDate());
-    return { expiry: want, source: 'message', mismatch: `named expiry month ${month} has no live ${underlying} ${kind} expiry (live: ${shown()})` };
+    const nFrom = mcx ? earliestUsable(postedAt, 'MCX') : from;
+    return namedExpiry(underlying, kind, hint, nFrom, list, mcx);
   }
 
+  const live = list.filter((e) => e >= from);
   if (hint?.relative) return relativeExpiry(underlying, kind, hint.relative, from, list, live);
 
   if (list.length) {
@@ -110,6 +92,33 @@ export function inferExpiry(
   }
   const rule = ruleExpiry(underlying, kind, from);
   return { expiry: rule, source: rule ? 'rule' : 'none' };
+}
+
+/** A day + month or month-only hint (`from`: the first usable day for a named expiry on this exchange). */
+function namedExpiry(underlying: string, kind: InstrumentKind, hint: ExpiryHint, from: string, list: readonly string[], mcx: boolean): InferredExpiry {
+  const live = list.filter((e) => e >= from);
+  const shown = () => (live.length ? live.slice(0, 6).join(', ') : 'none');
+  const year = hint.year ?? yearFor(hint.month, from);
+  if (hint.day !== null) {
+    // The named day exactly: a day the master does not list is a mismatch, never the next listed one. A listed
+    // day is kept even after the cutoff on that day (the post names it; the market clock decides).
+    const want = ymdOf(year, hint.month, hint.day);
+    if (list.length === 0) return { expiry: want, source: 'message' };
+    if (list.includes(want)) return { expiry: want, source: 'message' };
+    const shifted = mcx ? null : holidayShift(want, list, from);
+    if (shifted) return { expiry: shifted, source: 'message', expiryShifted: { named: want, listed: shifted } };
+    const why = want < from ? 'has already expired' : 'is not listed';
+    return { expiry: want, source: 'message', mismatch: `named expiry ${want} ${why} for ${underlying} ${kind} (live: ${shown()})` };
+  }
+  const month = `${year}-${pad(hint.month)}`;
+  const inMonth = live.filter((e) => e.startsWith(month));
+  if (inMonth.length) return { expiry: inMonth[inMonth.length - 1], source: 'message' };
+  const rule = monthlyRule(underlying, year, hint.month);
+  if (list.length === 0) return { expiry: rule, source: rule ? 'rule' : 'none' };
+  // Listed, but nothing live in the named month: name that month's calendar monthly (or its last day) so no
+  // listed contract of another month is picked.
+  const want = rule ?? ymdOf(year, hint.month, new Date(Date.UTC(year, hint.month, 0)).getUTCDate());
+  return { expiry: want, source: 'message', mismatch: `named expiry month ${month} has no live ${underlying} ${kind} expiry (live: ${shown()})` };
 }
 
 /** The underlying lists more than one expiry in some month (a weekly series). */
@@ -180,6 +189,8 @@ function normalExpiryWeekday(list: readonly string[]): number | null {
  * The named day must be the underlying's normal expiry weekday (from the master) — "by DEC 31" / "till 2 DEC" /
  * SENSEX's "03 DEC" on a NIFTY call are not holiday shifts — and, for a monthly-only underlying, in the last
  * week of its month.
+ * Known residual (accepted, re-review 2026-11-29): a commentary date that happens to fall on a shifted nominal
+ * expiry day ("target by 26 JAN" on NIFTY, a Tuesday) still shifts to that listed expiry (25-Jan).
  */
 function holidayShift(want: string, list: readonly string[], from: string): string | null {
   if (dowOf(want) !== normalExpiryWeekday(list)) return null;
@@ -212,14 +223,10 @@ function yearFor(month: number, from: string): number {
 
 const WEEKLY: Record<string, number> = { NIFTY: 2, SENSEX: 4 };
 const MONTHLY_DOW: Record<string, number> = { BANKEX: 4 };
-const MCX = new Set([
-  'CRUDEOIL', 'CRUDEOILM', 'NATURALGAS', 'NATGASMINI', 'GOLD', 'GOLDM', 'GOLDPETAL', 'GOLDGUINEA', 'SILVER', 'SILVERM', 'SILVERMIC',
-  'COPPER', 'ZINC', 'ZINCMINI', 'ALUMINIUM', 'ALUMINI', 'LEAD', 'LEADMINI', 'NICKEL',
-]);
 
 /** Calendar-rule expiry on or after `from` (YYYY-MM-DD). */
 export function ruleExpiry(underlying: string, kind: InstrumentKind, from: string): string | null {
-  if (MCX.has(underlying)) return null;
+  if (MCX_UNDERLYINGS.has(underlying)) return null;
   const weekly = WEEKLY[underlying];
   if (weekly !== undefined && kind !== 'FUT') {
     const d = new Date(`${from}T00:00:00Z`);
@@ -242,7 +249,7 @@ export function ruleExpiry(underlying: string, kind: InstrumentKind, from: strin
 
 /** Last <expiry weekday> of the month: Tuesday for NSE, Thursday for SENSEX / BANKEX. */
 export function monthlyRule(underlying: string, year: number, month: number): string | null {
-  if (MCX.has(underlying)) return null;
+  if (MCX_UNDERLYINGS.has(underlying)) return null;
   const dow = MONTHLY_DOW[underlying] ?? (underlying === 'SENSEX' ? 4 : 2);
   const d = new Date(Date.UTC(year, month, 0)); // last day of month
   while (d.getUTCDay() !== dow) d.setUTCDate(d.getUTCDate() - 1);

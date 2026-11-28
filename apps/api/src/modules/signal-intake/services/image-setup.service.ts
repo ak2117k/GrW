@@ -248,7 +248,7 @@ export class ImageSetupService implements OnApplicationBootstrap {
     const vocab = await this.vocab.get();
     const seg = segmentOf(s.underlying, s.instrumentKind, vocab.classOf.get(s.underlying));
     const listed = listedExpiries(rows, s.underlying, s.instrumentKind, seg);
-    const ex = inferExpiry(s.underlying, s.instrumentKind, s.expiryHint, postedAt, listed.length ? listed : null);
+    const ex = inferExpiry(s.underlying, s.instrumentKind, s.expiryHint, postedAt, listed.length ? listed : null, { exchange: seg });
     return findContract(rows, { underlying: s.underlying, instrumentKind: s.instrumentKind, strike: s.strike, expiry: ex.expiry }, seg) ?? false;
   }
 }

@@ -1,8 +1,31 @@
-import { findContract, listedExpiries } from '../../signal-intake/domain/contract';
-import { inferExpiry } from '../../signal-intake/domain/expiry';
+import { findContract, listedExpiries, segmentOf } from '../../signal-intake/domain/contract';
+import { inferExpiry, ruleExpiry } from '../../signal-intake/domain/expiry';
+import { MCX_UNDERLYINGS } from '../../signal-intake/domain/mcx-underlyings';
 import { expiryHintOfText } from '../../signal-intake/domain/text';
-import { resolveContract } from './contract-resolver';
+import { resolveContract, segmentFor } from './contract-resolver';
 import type { SignalView } from './signal.types';
+
+describe('one MCX list for intake and trader (Fix 3 re-review)', () => {
+  it.each(['GOLDPETAL', 'GOLDGUINEA', 'SILVERMIC', 'ZINCMINI', 'ALUMINI', 'LEADMINI', 'CRUDEOILM', 'NATGASMINI', 'GOLDM', 'SILVERM'])(
+    '%s is MCX in intake and in the trader',
+    (u) => {
+      expect(MCX_UNDERLYINGS.has(u)).toBe(true);
+      expect(segmentOf(u, 'CE', undefined)).toBe('MCX');
+      expect(segmentFor({ underlying: u, instrumentKind: 'CE' })).toBe('MCX');
+      expect(ruleExpiry(u, 'CE', '2026-11-27')).toBeNull();
+    },
+  );
+  it('a mini contract resolved in intake is the one the trader resolves (not refused as NFO)', () => {
+    const rows = [{ token: '77', symbol: 'GOLDPETAL31DEC26FUT', name: 'GOLDPETAL', expiry: '31DEC2026', strike: '-1', lotsize: '1', instrumenttype: 'FUTCOM', exch_seg: 'MCX', tick_size: '100.000000' }];
+    const seg = segmentOf('GOLDPETAL', 'FUT', undefined);
+    expect(findContract(rows, { underlying: 'GOLDPETAL', instrumentKind: 'FUT', strike: null, expiry: '2026-12-31' }, seg)).toMatchObject({ token: '77' });
+    expect(resolveContract(rows, { ...sig({}), underlying: 'GOLDPETAL', instrumentKind: 'FUT', strike: null, expiry: '2026-12-31' }, new Date(2026, 10, 27))).toMatchObject({ ok: true, contract: { token: '77', exchange: 'MCX' } });
+  });
+  it('NSE / BSE names stay off MCX', () => {
+    expect(segmentFor({ underlying: 'NIFTY', instrumentKind: 'CE' })).toBe('NFO');
+    expect(segmentFor({ underlying: 'SENSEX', instrumentKind: 'CE' })).toBe('BFO');
+  });
+});
 
 /**
  * Fix 3 (2026-11-28): an EXPIRY_UNLISTED signal keeps the date the post named, and the trader's exact-expiry resolve

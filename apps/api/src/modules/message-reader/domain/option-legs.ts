@@ -2,6 +2,7 @@ import { parseMasterExpiry, parseMasterStrike } from '../../market-data/services
 import { strikesAround } from '../../mbm/domain/chain-snapshot';
 import { listedExpiries, type SignalContract } from '../../signal-intake/domain/contract';
 import { inferExpiry, type InferredExpiry } from '../../signal-intake/domain/expiry';
+import { expiryOwnerIn } from '../../signal-intake/domain/expiry-owner';
 import { instrumentHits } from '../../signal-intake/domain/prefilter';
 import { isNumber, normalise } from '../../signal-intake/domain/text';
 import type { ExpiryHint } from '../../signal-intake/domain/types';
@@ -71,7 +72,7 @@ export function optionLegsOf(text: string, vocab: Vocabulary | null, underlyings
     const other = tokens[i] === 'CE' ? 'PE' : 'CE';
     if (['&', 'AND', '/', '+'].includes(tokens[i + 1] ?? '') && tokens[i + 2] === other) pairs.push({ at: i - 1, strike, kind: other });
   }
-  const owner = vocab && expiryHint ? expiryOwner(text, vocab, hits, named) : null;
+  const owner = vocab && expiryHint ? expiryOwnerIn(text, vocab, hits, named) : null;
   const out: OptionLeg[] = [];
   const seen = new Set<string>();
   for (const p of pairs) {
@@ -86,23 +87,6 @@ export function optionLegsOf(text: string, vocab: Vocabulary | null, underlyings
     out.push({ underlying, strike: p.strike, kind: p.kind, expiryHint: owner === underlying ? expiryHint : null });
   }
   return out;
-}
-
-/**
- * The underlying the post's expiry was written next to: the last instrument named before the expiry text
- * (the shortest prefix whose normalised form already carries the expiry), else the first one named after it,
- * else the post's only named underlying.
- */
-function expiryOwner(text: string, vocab: Vocabulary, hits: ReadonlyArray<{ i: number; name: string }>, named: readonly string[]): string | null {
-  let lo = 1;
-  let hi = text.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (normalise(text.slice(0, mid), vocab).expiry) hi = mid;
-    else lo = mid + 1;
-  }
-  const prefix = instrumentHits(normalise(text.slice(0, lo), vocab).tokens, vocab);
-  return prefix.length ? prefix[prefix.length - 1].name : (hits[0]?.name ?? (named.length === 1 ? named[0] : null));
 }
 
 type Row = Record<string, unknown>;
@@ -128,7 +112,7 @@ export interface ResolvedOptionLeg {
 export function resolveOptionLeg(master: readonly unknown[], leg: OptionLeg, seg: string, now: Date): ResolvedOptionLeg | { ok: false; reason: string } {
   const listed = listedExpiries(master, leg.underlying, leg.kind, seg);
   if (listed.length === 0) return { ok: false, reason: `no ${leg.underlying} ${leg.kind} options in the instrument master on ${seg}` };
-  const inferred = inferExpiry(leg.underlying, leg.kind, leg.expiryHint, now, listed);
+  const inferred = inferExpiry(leg.underlying, leg.kind, leg.expiryHint, now, listed, { exchange: seg });
   const expiry = inferred.expiry;
   if (!expiry) return { ok: false, reason: `no usable ${leg.underlying} option expiry` };
   // A named expiry the master does not list live (signal-intake's expiry inference says so when it can).

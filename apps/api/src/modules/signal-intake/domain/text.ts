@@ -238,7 +238,11 @@ function liftExpiry(input: string): { s: string; expiry: ExpiryHint | null } {
   return { s, expiry };
 }
 
-/** Month names that are also ordinary words ("may", Hinglish "mar", "march"). */
+/**
+ * Month names that are also ordinary words ("may", Hinglish "mar", "march").
+ * Known residual (accepted, re-review 2026-11-29): such a word still reads as a month when it happens to sit next to
+ * the contract or an EXPIRY word in prose ("NIFTY 25700 PE 20 mar ke …"); the result is a mismatch (a missed trade).
+ */
 const ENGLISH_MONTH = /^(?:MAY|MAR|MARCH)$/;
 
 /** A strike + CE/PE right before (`before` ends with it, maybe with "(" / "-") or right after (`after` starts with it). */

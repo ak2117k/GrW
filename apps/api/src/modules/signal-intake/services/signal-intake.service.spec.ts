@@ -1371,4 +1371,31 @@ describe('named expiry (audit 2026-11-28, Mr P "December 29" traded on the weekl
     await svc.handle(at('2026-11-18T05:55:40Z', 'm3', post('DECEMBER')));
     expect(mem.classes.get('m3')?.status).toBe('DUPLICATE');
   });
+
+  it('a bare repost of a named call stays a DUPLICATE; two different named expiries are two signals', async () => {
+    const { svc, mem, msg } = make({ master });
+    await svc.handle(msg('m1', 'A', 'BUY NIFTY 24000 CE 03 Nov ABOVE 120 SL 100 TGT 140'));
+    await svc.handle(msg('m2', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', 1));
+    expect(mem.classes.get('m2')).toMatchObject({ status: 'DUPLICATE', signalId: 'sig1' });
+    await svc.handle(msg('m3', 'A', 'BUY NIFTY 24000 CE 23 Nov ABOVE 120 SL 100 TGT 140', 2));
+    expect(mem.classes.get('m3')?.status).toBe('SIGNAL');
+    expect(mem.signals.map((s) => s.expiry)).toEqual(['2026-11-03', '2026-11-23']);
+    // A named repost of a bare call is still the same idea.
+    await svc.handle(msg('m4', 'B', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', 3));
+    await svc.handle(msg('m5', 'B', 'BUY NIFTY 24000 CE 03 Nov ABOVE 120 SL 100 TGT 140', 4));
+    expect(mem.classes.get('m5')?.status).toBe('DUPLICATE');
+  });
+
+  it('the real 11-23 COPPER calls at 20:27 IST with no expiry stay on 23-Dec (the MCX close applies only to a named expiry)', async () => {
+    const copper = ['23NOV2026', '23DEC2026'].map((e, i) => ({
+      exch_seg: 'MCX', name: 'COPPER', instrumenttype: 'OPTFUT', symbol: `COPPER${e.slice(0, 5)}${e.slice(7)}1170CE`, expiry: e, strike: '117000.000000', token: `c${i}`,
+    }));
+    const call = { underlying: 'COPPER', instrumentKind: 'CE', strike: 1170, expiry: null, side: 'BUY', entryType: 'AT', entryLow: 11, entryHigh: 11, sl: null, targets: [], qty: null, horizon: 'INTRADAY', confidence: 0.8 };
+    const llm = jest.fn(async (): Promise<LlmParseReply> => ({ isSignal: true, signals: [call as never] }));
+    const { svc, mem } = make({ llm, master: copper, now: new Date('2026-11-23T14:58:00Z') });
+    await svc.handle({ messageId: 'm1', channelId: 'C', text: 'Copper 1170 ce 11 wala lelo, jaldi', postedAt: new Date('2026-11-23T14:57:56Z'), hasMedia: false });
+    await flush();
+    await svc.handle({ messageId: 'x', channelId: 'C', text: 'BUY NIFTY 24100 CE ABOVE 120 SL 100 TGT 140', postedAt: new Date('2026-11-23T14:58:30Z'), hasMedia: false });
+    expect(mem.signals[0]).toMatchObject({ underlying: 'COPPER', expiry: '2026-12-23', expirySource: 'master', token: 'c1', tradingsymbol: 'COPPER23DEC261170CE' });
+  });
 });

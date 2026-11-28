@@ -1,4 +1,5 @@
 import { parseMasterExpiry, parseMasterStrike } from '../../market-data/services/master-contract';
+import { MCX_UNDERLYINGS } from './mcx-underlyings';
 import type { InstrumentKind } from './types';
 import type { UnderlyingClass } from './vocabulary';
 
@@ -14,7 +15,7 @@ const ymdLocal = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).pad
 
 export function segmentOf(underlying: string, kind: InstrumentKind, cls: UnderlyingClass | undefined): string {
   if (kind === 'EQ') return 'NSE';
-  if (cls === 'COMMODITY') return 'MCX';
+  if (cls === 'COMMODITY' || MCX_UNDERLYINGS.has(underlying)) return 'MCX';
   if (underlying === 'SENSEX' || underlying === 'BANKEX') return 'BFO';
   return 'NFO';
 }

@@ -229,6 +229,15 @@ describe('shotInSession — NSE/BSE screens only in the NSE session, MCX screens
     expect(shotInSession(REAL.crude, ist('23:58'))).toBe(false);
     expect(shotInSession(REAL.goldOpen, ist('08:30'))).toBe(false);
   });
+  it('the venue must also be trading at packet time: no NSE screen in an MCX-only evening packet, nothing on a weekend', () => {
+    const evening = ist('19:00'); // Fri 27-Nov, MCX only
+    expect(shotInSession(MRP_DESC, ist('14:00'), ist('15:00'))).toBe(true);
+    expect(shotInSession(MRP_DESC, ist('14:00'), evening)).toBe(false);
+    expect(shotInSession(REAL.crude, ist('17:00'), evening)).toBe(true);
+    const saturday = new Date('2026-11-28T11:00:00+05:30');
+    expect(shotInSession(MRP_DESC, ist('14:00'), saturday)).toBe(false);
+    expect(shotInSession(REAL.crude, ist('17:00'), saturday)).toBe(false);
+  });
 });
 
 describe('channelViewsSince — position screenshots (fix 8 + review)', () => {
@@ -261,7 +270,7 @@ describe('channelViewsSince — position screenshots (fix 8 + review)', () => {
 
   it('one query: NOISE/RECAP/UPDATE readings with a description, trusted channel titles only (signal-vision default)', async () => {
     const p = make([infoRow(0)], [shotRow(0)]);
-    const out = await new DeskStateRepository(p as never).channelViewsSince(at(180));
+    const out = await new DeskStateRepository(p as never).channelViewsSince(at(180), NOW);
     expect(p.$queryRaw).toHaveBeenCalledTimes(1);
     const q = capturedSql(p.$queryRaw.mock.calls as unknown[][]);
     expect(q.text).toMatch(/r\.kind IN \('NOISE', 'RECAP', 'UPDATE'\)/);
@@ -274,10 +283,10 @@ describe('channelViewsSince — position screenshots (fix 8 + review)', () => {
 
   it('an untrusted channel title is never a candidate (even if the SQL returned it); empty trust list = no query', async () => {
     const p = make([], [shotRow(0, { title: 'SHRI RAM TRADERS CLUB' })]);
-    expect(await new DeskStateRepository(p as never).channelViewsSince(at(180))).toEqual([]);
+    expect(await new DeskStateRepository(p as never).channelViewsSince(at(180), NOW)).toEqual([]);
     process.env[ENV] = '';
     const q = make([], [shotRow(0)]);
-    expect(await new DeskStateRepository(q as never).channelViewsSince(at(180))).toEqual([]);
+    expect(await new DeskStateRepository(q as never).channelViewsSince(at(180), NOW)).toEqual([]);
     expect(q.$queryRaw).not.toHaveBeenCalled();
   });
 
@@ -285,36 +294,53 @@ describe('channelViewsSince — position screenshots (fix 8 + review)', () => {
     const brags = Object.values(REAL).map((d, i) => shotRow(i, { rawText: '', description: d, postedAt: new Date('2026-11-27T12:00:00+05:30') }));
     const late = shotRow(20, { postedAt: new Date('2026-11-27T18:07:00+05:30') });
     const p = make([], [...brags, late]);
-    expect(await new DeskStateRepository(p as never).channelViewsSince(at(10_000))).toEqual([]);
+    expect(await new DeskStateRepository(p as never).channelViewsSince(at(10_000), NOW)).toEqual([]);
   });
 
   it('1 per channel, at most 3, and they never push an INFO view out of the 10', async () => {
     const sameChannel = [0, 1].map((i) => shotRow(i, { channelId: 'mrp' }));
-    const a = await new DeskStateRepository(make([], sameChannel) as never).channelViewsSince(at(180));
+    const a = await new DeskStateRepository(make([], sameChannel) as never).channelViewsSince(at(180), NOW);
     expect(a).toHaveLength(1);
     expect(a[0].at).toBe(at(1).toISOString()); // the newest
 
     const six = Array.from({ length: 6 }, (_, i) => shotRow(i));
-    const b = await new DeskStateRepository(make([infoRow(0), infoRow(1)], six) as never).channelViewsSince(at(180));
+    const b = await new DeskStateRepository(make([infoRow(0), infoRow(1)], six) as never).channelViewsSince(at(180), NOW);
     expect(b.filter((v) => v.kind === 'position-screenshot')).toHaveLength(3);
     expect(b).toHaveLength(5);
     expect(b.map((v) => v.at)).toEqual([...b.map((v) => v.at)].sort().reverse());
 
-    const nine = await new DeskStateRepository(make(Array.from({ length: 9 }, (_, i) => infoRow(i)), six) as never).channelViewsSince(at(180));
+    const nine = await new DeskStateRepository(make(Array.from({ length: 9 }, (_, i) => infoRow(i)), six) as never).channelViewsSince(at(180), NOW);
     expect(nine).toHaveLength(10);
     expect(nine.filter((v) => v.kind === 'position-screenshot')).toHaveLength(1);
   });
 
   it('INFO fills the cap: the screenshot query is not run at all', async () => {
     const p = make(Array.from({ length: 10 }, (_, i) => infoRow(i)), [shotRow(0)]);
-    const out = await new DeskStateRepository(p as never).channelViewsSince(at(180));
+    const out = await new DeskStateRepository(p as never).channelViewsSince(at(180), NOW);
     expect(out).toHaveLength(10);
     expect(p.$queryRaw).not.toHaveBeenCalled();
   });
 
   it('a failed screenshot query never costs the INFO views', async () => {
     const p = make([infoRow(0)], new Error('statement timeout'));
-    const out = await new DeskStateRepository(p as never).channelViewsSince(at(180));
+    const out = await new DeskStateRepository(p as never).channelViewsSince(at(180), NOW);
     expect(out).toEqual([{ channel: 'Mr. P Investments', at: at(30).toISOString(), summary: 'view 0', subject: null, bias: null }]);
+  });
+
+  it('a hung screenshot query is cut by its own time box; the INFO views still come back', async () => {
+    const p = make([infoRow(0)], [shotRow(0)]);
+    p.$queryRaw.mockImplementationOnce(() => new Promise<never>(() => undefined));
+    const t0 = Date.now();
+    const out = await new DeskStateRepository(p as never).channelViewsSince(at(180), NOW);
+    expect(Date.now() - t0).toBeLessThan(2500);
+    expect(out).toEqual([{ channel: 'Mr. P Investments', at: at(30).toISOString(), summary: 'view 0', subject: null, bias: null }]);
+  });
+
+  it('packet time decides too: the same NSE screen is dropped from an evening (MCX-only) packet', async () => {
+    const posted = new Date('2026-11-26T14:00:00+05:30');
+    const p = make([], [shotRow(0, { postedAt: posted })]);
+    expect(await new DeskStateRepository(p as never).channelViewsSince(at(600), new Date('2026-11-26T16:30:00+05:30'))).toEqual([]);
+    const q = make([], [shotRow(0, { postedAt: posted })]);
+    expect(await new DeskStateRepository(q as never).channelViewsSince(at(600), new Date('2026-11-26T15:00:00+05:30'))).toHaveLength(1);
   });
 });

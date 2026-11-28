@@ -12,6 +12,7 @@ import {
   MEMORY_DECISIONS_CAP,
   PROPOSAL_QUOTAS,
   TEXT_CAP,
+  timedValue,
   underlyingFromSymbol,
 } from '../domain/packet-blocks';
 import { positionOpenPnl } from '../domain/pnl-path';
@@ -23,6 +24,7 @@ import { normalise } from '../../signal-intake/domain/text';
 import { buildVocabulary } from '../../signal-intake/domain/vocabulary';
 import { parseSignalIntakeConfig } from '../../signal-intake/signal-intake.config';
 import { istMinuteOf, venueSession } from '../../exit-discipline/session-bars';
+import { isExchangeOpen } from '../../trade-sentinel/market-sessions';
 
 /** Engine rows read per packet before the (underlying, side) merge: 2 h of a ~1-min engine over a few underlyings. */
 const ENGINE_ROWS_READ = 400;
@@ -69,14 +71,22 @@ export function isPositionScreenshot(postText: string, description: string): boo
   return SHOT_LIVE.test(d) || POST_LIVE.test(t);
 }
 
-/** True when the screenshot was posted inside its venue's session (MCX for commodity screens, else NSE / BSE). */
-export function shotInSession(description: string, postedAt: Date): boolean {
+/**
+ * True when the screenshot was posted inside its venue's session (MCX for commodity screens, else NSE / BSE) AND, when
+ * `now` (the packet time) is given, that venue is trading now (trade-sentinel isExchangeOpen: weekends closed) — an NSE
+ * screen never appears in an MCX-only evening packet.
+ */
+export function shotInSession(description: string, postedAt: Date, now?: Date): boolean {
   const venue = SHOT_MCX.test(String(description ?? '').normalize('NFKC').toUpperCase()) ? 'MCX' : 'NSE';
   const s = venueSession(venue);
   if (!s) return false;
   const min = istMinuteOf(postedAt.getTime());
-  return min >= s.fromMin && min < s.toMin;
+  if (min < s.fromMin || min >= s.toMin) return false;
+  return !now || isExchangeOpen(venue, now);
 }
+
+/** The screenshot read's own time box: a hang returns no screenshots, never the INFO views. */
+const POSITION_SHOT_READ_MS = 1000;
 
 /** SIGNAL_VISION_TRUSTED_CHANNELS (signal-intake config, same default): lower-case channel-title substrings. */
 function trustedChannels(): string[] {
@@ -380,7 +390,7 @@ export class DeskStateRepository {
    * when INFO fills the cap, and a failed screenshot read never costs the INFO views. Each carries `messageId` so the
    * service drops one that is also a proposal (and strips the id before the packet).
    */
-  async channelViewsSince(since: Date): Promise<ChannelView[]> {
+  async channelViewsSince(since: Date, now: Date = new Date()): Promise<ChannelView[]> {
     const rows = await this.prisma.messageReading.findMany({
       where: { postedAt: { gte: since }, kind: 'INFO' },
       select: { messageId: true, channelId: true, postedAt: true, summary: true, claims: true },
@@ -388,7 +398,8 @@ export class DeskStateRepository {
       take: CHANNEL_VIEW_CAP,
     });
     const room = Math.max(0, Math.min(POSITION_SHOT_CAP, CHANNEL_VIEW_CAP - rows.length));
-    const shots = room > 0 ? (await this.positionShotsSince(since).catch(() => [])).slice(0, room) : [];
+    const read = room > 0 ? await timedValue(() => this.positionShotsSince(since, now), POSITION_SHOT_READ_MS) : null;
+    const shots = read?.ok ? read.value.slice(0, room) : [];
     const views: ChannelView[] = [];
     if (rows.length) {
       const ids = [...new Set(rows.map((r) => r.channelId))];
@@ -411,7 +422,7 @@ export class DeskStateRepository {
    * UPDATE, with a vision description, that isPositionScreenshot accepts and that were posted inside their venue's
    * session; newest first, one per channel. One query, rows without a description filtered in SQL.
    */
-  private async positionShotsSince(since: Date): Promise<Array<{ messageId: string; channel: string; postedAt: Date; description: string }>> {
+  private async positionShotsSince(since: Date, now: Date): Promise<Array<{ messageId: string; channel: string; postedAt: Date; description: string }>> {
     const trusted = trustedChannels();
     if (trusted.length === 0) return [];
     const patterns = trusted.map((s) => `%${s.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
@@ -433,7 +444,7 @@ export class DeskStateRepository {
       if (!trusted.some((s) => title.includes(s))) continue; // the SQL pattern, checked again the way signal-vision does
       const d = String(r.description ?? '').trim();
       const at = r.postedAt instanceof Date ? r.postedAt : new Date(r.postedAt);
-      if (!d || seen.has(r.channelId) || !shotInSession(d, at) || !isPositionScreenshot(r.rawText ?? '', d)) continue;
+      if (!d || seen.has(r.channelId) || !shotInSession(d, at, now) || !isPositionScreenshot(r.rawText ?? '', d)) continue;
       seen.add(r.channelId);
       out.push({ messageId: r.messageId, channel: r.title || r.channelId, postedAt: at, description: d });
     }

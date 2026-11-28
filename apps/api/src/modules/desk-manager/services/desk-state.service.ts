@@ -186,7 +186,7 @@ export class DeskStateService {
       timedBlock<RecentExit[]>(SRC.recentExits, () => this.recentExits(userId, now), SLOW_BLOCK_MS),
       timedBlock<Proposal[]>(SRC.proposals, () => this.repo.proposalsSince(userId, new Date(now.getTime() - PROPOSAL_WINDOW_MS))),
       timedBlock<MemoryView>(SRC.memory, () => this.memory(userId, now)),
-      timedBlock<ChannelView[]>(SRC.channelViews, () => this.repo.channelViewsSince(new Date(now.getTime() - CHANNEL_VIEW_WINDOW_MS))),
+      timedBlock<ChannelView[]>(SRC.channelViews, () => this.repo.channelViewsSince(new Date(now.getTime() - CHANNEL_VIEW_WINDOW_MS), now)),
       this.lotMarket ? timedValue(() => (this.lotMarket as DeskMarket).master()) : Promise.resolve({ ok: false as const, reason: 'lot market not wired' }),
     ]);
     const pnl: Block<DayPnlPath> =

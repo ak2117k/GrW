@@ -144,7 +144,7 @@ describe('DeskStateService.build', () => {
     const repo = repoMock({ channelViewsSince: jest.fn(async () => views) });
     const p = await make(repo).build('owner', NOW, cfg);
     expect(p.channelViews).toEqual({ status: 'present', value: views, source: expect.any(String) });
-    expect(repo.channelViewsSince).toHaveBeenCalledWith(new Date(NOW.getTime() - 3 * 3600_000));
+    expect(repo.channelViewsSince).toHaveBeenCalledWith(new Date(NOW.getTime() - 3 * 3600_000), NOW);
     // a channel view's subject gets an instrument slot
     expect(Object.keys(p.instruments.value ?? {})).toEqual(['NIFTY']);
   });

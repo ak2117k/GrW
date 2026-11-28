@@ -6,7 +6,7 @@ import { dedupKey, planCluster } from '../domain/cluster';
 import { findContract, listedExpiries, segmentOf } from '../domain/contract';
 import { inferExpiry } from '../domain/expiry';
 import { classifyCommentary, hasBias, recapReason, type CommentaryClass, type InfoItem, type RefPrices } from '../domain/info';
-import { CALL_AT_TAG, clockOrNull, readImageDescription, validateInfoItems, validateLlmSignal, type InfoLlmReply, type LlmParseReply, type VisionReply } from '../domain/llm-schema';
+import { cachedVisionReply, CALL_AT_TAG, clockOrNull, hasImageDescription, readImageDescription, validateInfoItems, validateLlmSignal, type InfoLlmReply, type LlmParseReply, type VisionReply } from '../domain/llm-schema';
 import { prefilter, type PrefilterResult } from '../domain/prefilter';
 import { hasNewCall, resultPostReason } from '../domain/result-post';
 import { parseSignal } from '../domain/rule-parser';
@@ -102,6 +102,8 @@ export class SignalIntakeService {
   private visionInflight = 0;
   /** The IST day the vision reserve was last logged (once per day). */
   private visionReserveLoggedDay = '';
+  /** Image sha256s sent to vision by this process: a cached reply without a description is re-read at most once. */
+  private readonly visionReadShas = new Set<string>();
   /** In-process count of INFO extractions today (a floor under the ai_calls count). */
   private infoDay = '';
   private infoUsed = 0;
@@ -282,6 +284,11 @@ export class SignalIntakeService {
     return null;
   }
 
+  /** The next vision read carries a description (the describe schema is on and the provider has not rejected it). */
+  private visionDescribes(): boolean {
+    return this.config.visionDescribe && (this.vision?.describes?.() ?? true);
+  }
+
   private visionBlocked(): string | null {
     if (!this.config.visionEnabled) return 'SIGNAL_VISION=off';
     if (!this.vision) return 'no vision transport';
@@ -319,15 +326,20 @@ export class SignalIntakeService {
     opts: { backfill?: boolean; describeOnly?: boolean } = {},
   ): Promise<void> {
     const describeOnly = !!opts.describeOnly;
+    const cached = cachedVisionReply(await this.repo.cachedVision(media.sha256));
+    // Fix 4 (prod 2026-11-28 14:55 UTC): a reply cached before the describe schema has no description — a miss for a
+    // describe read, re-read once per process. Whatever stops that re-read (age, cap, reserve, a failure) uses the old reply.
+    const stale = !!cached && !hasImageDescription(cached) && this.visionDescribes() && !this.visionReadShas.has(media.sha256);
+    if (cached && !stale) {
+      await this.applyVision(evt, postedAt, media, cached, base, 'cache', describeOnly);
+      return;
+    }
+    const useCached = stale && cached ? () => this.applyVision(evt, postedAt, media, cached, base, 'cache', describeOnly) : null;
     const skip = async (reason: string, announced = reason) => {
+      if (useCached) return useCached();
       if (!describeOnly) await this.repo.saveClass({ ...base, status: 'LLM_SKIPPED', parser: 'vision', reason });
       this.visionSkipped(evt, postedAt, announced);
     };
-    const cached = await this.repo.cachedVision(media.sha256);
-    if (cached && typeof (cached as { kind?: unknown }).kind === 'string') {
-      await this.applyVision(evt, postedAt, media, cached as VisionReply, base, 'cache', describeOnly);
-      return;
-    }
     // A backfilled image is read whatever its age (R paces it: 6 per 5 min); its reads are not the live cap's.
     if (!opts.backfill && this.now().getTime() - postedAt.getTime() > this.config.visionMaxAgeMs) {
       await skip('image too old for the model (history)', 'image too old for the model');
@@ -357,7 +369,9 @@ export class SignalIntakeService {
       this.visionInflight++;
     }
     this.inflight.add(evt.messageId);
-    if (!describeOnly) await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
+    if (this.visionReadShas.size >= 20_000) this.visionReadShas.clear();
+    this.visionReadShas.add(media.sha256);
+    if (!describeOnly && !useCached) await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
     // Outside the serial chain, like the text fallback.
     void (this.vision as SignalVision)
       .classify(String(evt.text ?? ''), media, { channelId: evt.channelId })
@@ -366,6 +380,10 @@ export class SignalIntakeService {
         (e) =>
           this.serial(async () => {
             if (e instanceof AssistBusyError && !opts.backfill) this.visionUsed = Math.max(0, this.visionUsed - 1); // never started: no spend
+            if (useCached) {
+              this.logger.warn(`[signal-intake] vision re-describe of ${evt.messageId} failed (the cached reply is used): ${errText(e)}`);
+              return useCached();
+            }
             if (!describeOnly) await this.repo.saveClass({ ...base, status: 'LLM_FAILED', parser: 'vision', attempts: 1, reason: `vision: ${errText(e)}`.slice(0, 500) });
             this.visionSkipped(evt, postedAt, `vision failed: ${errText(e)}`.slice(0, 300));
           }),

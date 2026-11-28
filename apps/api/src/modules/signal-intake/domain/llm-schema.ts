@@ -250,6 +250,9 @@ const VISION_DESCRIBE_LINES = [
   'instruments: the exchange names of the instruments shown (as for underlying), [] when none. bias: BULL, BEAR, NEUTRAL, or NONE when',
   'the image shows no direction. levels: every price level drawn or written, each {kind: ENTRY | STOP | TARGET | SUPPORT | RESISTANCE |',
   'OTHER, price}; [] when none.',
+  'Never leave description empty, whatever the kind. A broker position / order book / P&L screenshot is NOISE but its description still says',
+  'what it shows: the instrument (and CE / PE / FUT), the side (long / short, buy / sell) if visible, the P&L and LTP, and what is scribbled out',
+  'or hidden (e.g. "position screenshot: SENSEX option PE, +₹4.33L, strike hidden"); its instruments[] names the instrument too.',
 ];
 
 /**
@@ -343,6 +346,35 @@ export function readImageDescription(o: Record<string, unknown> | null | undefin
     if (levels.length) out.levels = levels;
   }
   return out;
+}
+
+/** The reply (a stored or a fresh one) says, in words, what its image shows. */
+export function hasImageDescription(reply: unknown): boolean {
+  const d = reply && typeof reply === 'object' ? (reply as { description?: unknown }).description : undefined;
+  return typeof d === 'string' && !!d.trim();
+}
+
+/**
+ * A stored `llm_result` as a vision reply for the sha256 cache, or null. A describe-only read onto a row that already
+ * held an LLM parse keeps the image reading under `image` (the top level then has no kind): that reading is the reply.
+ */
+export function cachedVisionReply(raw: unknown): VisionReply | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  if (typeof o.kind === 'string') return o as unknown as VisionReply;
+  const nested = o.image;
+  if (nested && typeof nested === 'object' && !Array.isArray(nested) && typeof (nested as { kind?: unknown }).kind === 'string') return nested as VisionReply;
+  return null;
+}
+
+/**
+ * A describe-schema reply with no usable description gets a plain stand-in (kind + named instruments), so every
+ * described read stores a description: the reader is told the model gave none, and the sha256 cache never re-reads it.
+ */
+export function withDescription(reply: VisionReply): VisionReply {
+  if (hasImageDescription(reply)) return reply;
+  const names = reply.instruments?.length ? ` showing ${reply.instruments.join(', ')}` : '';
+  return { ...reply, description: `${reply.kind} image${names}; the model gave no description` };
 }
 
 /** A trade_signals tag carrying the screenshot's own call time: `CALL_AT:HH:MM` (IST clock). */

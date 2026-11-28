@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Logger } from '@nestjs/common';
-import { readVisionReply, SIGNAL_VISION_SCHEMA, SIGNAL_VISION_SCHEMA_LEGACY, SIGNAL_VISION_SYSTEM, SIGNAL_VISION_SYSTEM_LEGACY } from '../domain/llm-schema';
+import { cachedVisionReply, hasImageDescription, readVisionReply, SIGNAL_VISION_SCHEMA, SIGNAL_VISION_SCHEMA_LEGACY, SIGNAL_VISION_SYSTEM, SIGNAL_VISION_SYSTEM_LEGACY } from '../domain/llm-schema';
 import { parseSignalIntakeConfig } from '../signal-intake.config';
 import { isRequestRejected, servedVisionModel, SIGNAL_VISION_JOB, SignalVisionService, visionModelFor, visionTransportState } from './signal-vision.service';
 
@@ -41,6 +41,17 @@ describe('readVisionReply — strict schema', () => {
     ['unknown kind', { kind: 'CHART', isSignal: false, signals: [] }],
     ['no signals array', { kind: 'NOISE', isSignal: false }],
   ])('%s → null', (_why, o) => expect(readVisionReply(JSON.stringify(o))).toBeNull());
+
+  it('cachedVisionReply: a stored reply, or the `image` reading nested on an LLM-parse row; else null', () => {
+    const r = { kind: 'NOISE', isSignal: false, signals: [], imageSha256: 'x' };
+    expect(cachedVisionReply(r)).toBe(r);
+    expect(cachedVisionReply({ isSignal: true, signals: [], image: r, description: null, imageSha256: 'x' })).toBe(r);
+    expect(cachedVisionReply({ isSignal: true, signals: [] })).toBeNull();
+    expect(cachedVisionReply(null)).toBeNull();
+    expect(hasImageDescription(r)).toBe(false);
+    expect(hasImageDescription({ ...r, description: '  ' })).toBe(false);
+    expect(hasImageDescription({ ...r, description: 'broker P&L screenshot' })).toBe(true);
+  });
 
   it('not JSON → null; SIGNAL with no signals is not a signal', () => {
     expect(readVisionReply('I see a chart')).toBeNull();
@@ -192,6 +203,42 @@ describe('SignalVisionService.classify', () => {
     });
   });
 
+  describe('a describe reply always carries a description (Fix 4, 2026-11-28: Mr P 11-27 12:56 position screenshot)', () => {
+    beforeEach(() => jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined));
+    afterEach(() => jest.restoreAllMocks());
+
+    it('the prompt asks for a description of position / P&L screenshots even when the kind is NOISE, never empty', () => {
+      expect(SIGNAL_VISION_SYSTEM).toMatch(/position screenshot: SENSEX option PE, \+₹4\.33L, strike hidden/);
+      expect(SIGNAL_VISION_SYSTEM).toMatch(/never leave description empty/i);
+      expect(SIGNAL_VISION_SYSTEM).toMatch(/scribbled out/);
+      expect(SIGNAL_VISION_SYSTEM_LEGACY).not.toMatch(/position screenshot/);
+    });
+
+    it('a NOISE describe reply with no description gets a plain stand-in (kind + instruments), so the cache never re-reads it', async () => {
+      const { svc } = make({ SENTINEL_JUDGE: 'cli' }, JSON.stringify({ kind: 'NOISE', isSignal: false, signals: [], items: [], shownTime: null, description: ' ', instruments: ['sensex'], bias: 'NONE', levels: [] }));
+      const r = await svc.classify('A small short side trade is active!', image);
+      expect(r.kind).toBe('NOISE');
+      expect(r.description).toMatch(/^NOISE image showing SENSEX/);
+      expect(r.description).toMatch(/no description/);
+    });
+
+    it('a described reply is kept as given', async () => {
+      const d = 'position screenshot: SENSEX option PE, +₹4.33L, strike hidden';
+      const { svc } = make({ SENTINEL_JUDGE: 'cli' }, JSON.stringify({ kind: 'NOISE', isSignal: false, signals: [], description: d, instruments: ['SENSEX'], bias: 'NONE', levels: [] }));
+      await expect(svc.classify('', image)).resolves.toMatchObject({ kind: 'NOISE', description: d, instruments: ['SENSEX'] });
+    });
+
+    it('describes(): true by default; false with SIGNAL_VISION_DESCRIBE=off; false once the provider rejected the describe schema', async () => {
+      expect(make({ SENTINEL_JUDGE: 'cli' }, NOISE).svc.describes()).toBe(true);
+      expect(make({ SENTINEL_JUDGE: 'cli', SIGNAL_VISION_DESCRIBE: 'off' }, NOISE).svc.describes()).toBe(false);
+      const { svc, cli } = make({ SENTINEL_JUDGE: 'cli' }, NOISE);
+      cli.createWithMeta.mockRejectedValueOnce(rejected400());
+      // The legacy reply carries no description and gets no stand-in (it was never asked for one).
+      await expect(svc.classify('', image)).resolves.toEqual({ kind: 'NOISE', isSignal: false, signals: [] });
+      expect(svc.describes()).toBe(false);
+    });
+  });
+
   it('a reply cut at max_tokens is its own error', async () => {
     const { svc, cli } = make({ SENTINEL_JUDGE: 'cli' }, NOISE);
     cli.createWithMeta.mockResolvedValueOnce({
@@ -203,7 +250,7 @@ describe('SignalVisionService.classify', () => {
 
   it('sends the image as base64 over the CLI in the shared slot, records ai_calls signal.vision without the bytes', async () => {
     const { svc, cli, audit, cycle } = make({ SENTINEL_JUDGE: 'cli' }, JSON.stringify({ kind: 'NOISE', isSignal: false, signals: [] }));
-    await expect(svc.classify('', image)).resolves.toEqual({ kind: 'NOISE', isSignal: false, signals: [] });
+    await expect(svc.classify('', image)).resolves.toMatchObject({ kind: 'NOISE', isSignal: false, signals: [] });
     expect(cycle.runShared).toHaveBeenCalledTimes(1);
     const req = (cli.createWithMeta.mock.calls[0] as unknown as [{ model: string; messages: Array<{ images: Array<{ data: string; mediaType: string }> }> }])[0];
     expect(req.model).toBe('claude-haiku-5-5');

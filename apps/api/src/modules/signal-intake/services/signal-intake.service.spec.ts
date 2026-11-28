@@ -513,6 +513,123 @@ describe('SignalIntakeService — image posts (vision)', () => {
       expect(classify).toHaveBeenCalledTimes(1);
       expect(doneOf(m).map((d) => d.reading?.description)).toEqual([DESC.description, DESC.description]);
     });
+
+    describe('Fix 4 (prod 2026-11-28 14:55 UTC "vision (cache)" row): a cached reply from before the describe schema is a miss', () => {
+      // The 11-14 / 11-21 / 11-28 rows of sha 49d5da69…: kind NOISE, no description.
+      const OLD = { kind: 'NOISE', isSignal: false, signals: [], imageSha256: IMG.sha256 };
+      const seedOld = (m: ReturnType<typeof make>, llmResult: Record<string, unknown> = OLD) =>
+        m.mem.store.saveClass({ messageId: 'old', channelId: 'X', postedAt: new Date(T0.getTime() - 86_400_000), textHash: 'hOld', status: 'NOISE', parser: 'vision', llmResult, reason: 'vision (llm): image is noise' });
+      const drain = async (m: ReturnType<typeof make>, at = 5) => {
+        await flush();
+        await m.svc.handle(m.msg('z', 'A', 'Good night', at));
+      };
+
+      it('re-read once: the new row stores the description, vision.done carries it, the next repost is a cache hit', async () => {
+        const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [], ...DESC });
+        const m = make({ vision: v });
+        await seedOld(m);
+        await m.svc.handle(img(m, 'm1', 'A'));
+        await drain(m);
+        expect(classify).toHaveBeenCalledTimes(1);
+        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', reason: 'vision (llm): image is noise', llmResult: expect.objectContaining({ description: DESC.description }) });
+        expect(doneOf(m)[0].reading).toMatchObject({ description: DESC.description });
+        await m.svc.handle(img(m, 'm2', 'B', '', 2));
+        await drain(m, 6);
+        expect(classify).toHaveBeenCalledTimes(1);
+        expect(m.mem.classes.get('m2')).toMatchObject({ reason: 'vision (cache): image is noise' });
+      });
+
+      it('a describe-only read (caption decided the class) re-reads a stale cache too', async () => {
+        const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [], ...DESC });
+        const m = make({ vision: v });
+        await seedOld(m);
+        await m.svc.handle(img(m, 'm1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+        await drain(m);
+        expect(classify).toHaveBeenCalledTimes(1);
+        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', parser: 'rule', llmResult: expect.objectContaining({ description: DESC.description }) });
+      });
+
+      it('a backfilled image (the 14:55 row: posted 06:53, read 8 h later) re-reads a stale cache', async () => {
+        const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [], ...DESC });
+        const m = make({ vision: v, now: new Date(T0.getTime() + 8 * 3_600_000) });
+        await seedOld(m);
+        await m.svc.handle({ ...img(m, 'm1', 'A'), backfill: true } as never);
+        await drain(m, 8 * 60);
+        expect(classify).toHaveBeenCalledTimes(1);
+        expect(m.mem.classes.get('m1')).toMatchObject({ llmResult: expect.objectContaining({ description: DESC.description }) });
+      });
+
+      it('the model still gives no description: one re-read per process, then the old reply is used (no loop)', async () => {
+        const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] });
+        const m = make({ vision: v });
+        await seedOld(m);
+        await m.svc.handle(img(m, 'm1', 'A'));
+        await drain(m);
+        await m.svc.handle(img(m, 'm2', 'B', '', 2));
+        await drain(m, 6);
+        expect(classify).toHaveBeenCalledTimes(1);
+      });
+
+      it.each([
+        ['too old for a live read', { now: new Date(T0.getTime() + 61 * 60_000) }, undefined],
+        ['the daily cap is reached', {}, 120],
+      ] as const)('a re-read that cannot run (%s) falls back to the old cached reply, never LLM_SKIPPED', async (_why, o, used) => {
+        const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [], ...DESC }, { used });
+        const m = make({ vision: v, ...o });
+        await seedOld(m);
+        await m.svc.handle(img(m, 'm1', 'A'));
+        await drain(m, 62);
+        expect(classify).not.toHaveBeenCalled();
+        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', reason: 'vision (cache): image is noise' });
+        expect(doneOf(m)[0].reading).toMatchObject({ kind: 'NOISE' });
+      });
+
+      it('a describe-only re-read past the 70% reserve falls back to the old cached reply', async () => {
+        const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [], ...DESC }, { used: 84 });
+        const m = make({ vision: v });
+        await seedOld(m);
+        await m.svc.handle(img(m, 'm1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+        await drain(m);
+        expect(classify).not.toHaveBeenCalled();
+        expect(doneOf(m)).toEqual([expect.objectContaining({ reading: expect.objectContaining({ kind: 'NOISE', imageSha256: IMG.sha256 }) })]);
+      });
+
+      it('a failed re-read falls back to the old cached reply, never LLM_FAILED', async () => {
+        const { v, classify } = fakeVision(async () => {
+          throw new Error('claude CLI: timed out');
+        });
+        const m = make({ vision: v });
+        await seedOld(m);
+        await m.svc.handle(img(m, 'm1', 'A'));
+        await drain(m);
+        expect(classify).toHaveBeenCalledTimes(1);
+        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', reason: 'vision (cache): image is noise' });
+        expect(doneOf(m)).toEqual([expect.objectContaining({ reading: expect.objectContaining({ kind: 'NOISE' }) })]);
+      });
+
+      it.each([
+        ['SIGNAL_VISION_DESCRIBE=off', { env: { SIGNAL_VISION_DESCRIBE: 'off' } }, true],
+        ['the provider rejected the describe schema (sticky legacy)', {}, false],
+      ] as const)('no describe path (%s): the old cached reply is a hit', async (_why, o, describes) => {
+        const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [], ...DESC });
+        const m = make({ vision: Object.assign(v, { describes: () => describes }), ...o });
+        await seedOld(m);
+        await m.svc.handle(img(m, 'm1', 'A'));
+        await drain(m);
+        expect(classify).not.toHaveBeenCalled();
+        expect(m.mem.classes.get('m1')).toMatchObject({ reason: 'vision (cache): image is noise' });
+      });
+
+      it('a described reading nested under `image` on an LLM-parse row is a cache hit', async () => {
+        const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [], ...DESC });
+        const m = make({ vision: v });
+        await seedOld(m, { isSignal: true, signals: [], image: { ...OLD, ...DESC }, description: DESC.description, imageSha256: IMG.sha256 });
+        await m.svc.handle(img(m, 'm1', 'A'));
+        await drain(m);
+        expect(classify).not.toHaveBeenCalled();
+        expect(doneOf(m)[0].reading).toMatchObject({ kind: 'NOISE', description: DESC.description });
+      });
+    });
   });
 
   it('a vision call emits signal.ready, then signal.vision.done', async () => {

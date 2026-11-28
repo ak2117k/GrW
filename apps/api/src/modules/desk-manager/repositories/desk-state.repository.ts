@@ -10,6 +10,7 @@ import {
   istMidnight,
   istYmdOf,
   MEMORY_DECISIONS_CAP,
+  normaliseUnderlyingKey,
   PROPOSAL_QUOTAS,
   TEXT_CAP,
   underlyingFromSymbol,
@@ -18,9 +19,48 @@ import { positionOpenPnl } from '../domain/pnl-path';
 import { DESK_MANAGER_TAG, type ChannelView, type Proposal, type Scorecard, type TradeOrigin } from '../domain/desk.types';
 import { isDrillReason } from '../../exit-authority/domain/drill';
 import { originsOf } from './desk-day.repository';
+import { resultPostReason } from '../../signal-intake/domain/result-post';
+import { normalise } from '../../signal-intake/domain/text';
+import { buildVocabulary } from '../../signal-intake/domain/vocabulary';
 
 /** Engine rows read per packet before the (underlying, side) merge: 2 h of a ~1-min engine over a few underlyings. */
 const ENGINE_ROWS_READ = 400;
+
+/** Position-screenshot views in channelViews: at most 3, description cut to 200 chars; candidate readings read per packet. */
+const POSITION_SHOT_CAP = 3;
+const POSITION_SHOT_TEXT_CAP = 200;
+const POSITION_SHOT_ROWS_READ = 60;
+
+/** A broker positions / P&L screen. */
+const SHOT_SCREEN = /\b(POSITIONS?|P&L|P\/L|PNL|MTM|PORTFOLIO)\b/;
+/** …of a derivative (a US-stock holding or a cash portfolio is not a desk view). */
+const SHOT_DERIVATIVE = /\b(CE|PE|CALLS?|PUTS?|FUT|FUTURES?|OPTIONS?)\b/;
+/** The description shows the position live: open, a live price beside it. */
+const SHOT_LIVE = /\b(OPEN|ACTIVE|RUNNING|LIVE|HOLDING|LTP|MARKET PRICE|CMP|UNREALI[SZ]ED)\b/;
+/** …or the post says so ("trade is active", "hold", "trail SL"). */
+const POST_LIVE = /\b(ACTIVE|RUNNING|HOLD|HOLDING|TRAIL|TRAILING|OPEN)\b/;
+/** A finished trade on the screen. */
+const SHOT_CLOSED = /\b(CLOSED|EXITED|SQUARED[ -]?OFF|SOLD AT|QTY 0|BOOKED|REALI[SZ]ED)\b/;
+/** Not a trading screen at all. */
+const SHOT_NOT_TRADE = /\b(PAYMENT|PAID|BANK|UPI|CHAT|WHATSAPP|TESTIMONIAL)\b/;
+/** Account-handling / profit-sharing promotions (client screenshots, not the channel's own trade view). */
+const PROMO = /ACCOUNT HANDLING|PROFIT SHARING|50-50/;
+/** Index vocabulary only: the result-post matcher reads outcome phrases, not names. */
+const SHOT_VOCAB = buildVocabulary([]);
+
+/**
+ * True when a channel image's vision description is a broker positions screen of an ACTIVE derivative position (or
+ * the post says the trade is live), and neither the post nor the description reports a completed outcome
+ * (signal-intake result-post: "target achieved", "booked", "x to y done"), a closed position, or a promotion.
+ */
+export function isPositionScreenshot(postText: string, description: string): boolean {
+  const d = ` ${String(description ?? '').normalize('NFKC').toUpperCase()} `;
+  const t = ` ${String(postText ?? '').normalize('NFKC').toUpperCase()} `;
+  if (!SHOT_SCREEN.test(d) || !SHOT_DERIVATIVE.test(d)) return false;
+  if (SHOT_CLOSED.test(d) || SHOT_NOT_TRADE.test(d) || PROMO.test(d) || PROMO.test(t)) return false;
+  if (resultPostReason(normalise(postText ?? '', SHOT_VOCAB)) || resultPostReason(normalise(description ?? '', SHOT_VOCAB))) return false;
+  return SHOT_LIVE.test(d) || POST_LIVE.test(t);
+}
 
 /** One open position as the packet needs it, before the HOLD list, sentinel and manager levels are joined. */
 export interface OpenPositionRow {
@@ -312,23 +352,77 @@ export class DeskStateRepository {
     return out;
   }
 
-  /** Channel market views: INFO readings posted at or after `since`, newest first, at most CHANNEL_VIEW_CAP. */
+  /**
+   * Channel market views, newest first, at most CHANNEL_VIEW_CAP: INFO readings posted at or after `since`, plus up to
+   * POSITION_SHOT_CAP channel images whose vision description shows an ACTIVE position (kind 'position-screenshot';
+   * isPositionScreenshot). The reader classes such posts NOISE / RECAP / bare UPDATE (Mr P 11-27 12:56 "small short
+   * side trade is active" + a SENSEX PE positions screenshot never reached the desk). Screenshots only fill slots INFO
+   * leaves free — they never push an INFO view out.
+   */
   async channelViewsSince(since: Date): Promise<ChannelView[]> {
-    const rows = await this.prisma.messageReading.findMany({
-      where: { postedAt: { gte: since }, kind: 'INFO' },
-      select: { messageId: true, channelId: true, postedAt: true, summary: true, claims: true },
-      orderBy: { postedAt: 'desc' },
-      take: CHANNEL_VIEW_CAP,
-    });
-    if (rows.length === 0) return [];
-    const ids = [...new Set(rows.map((r) => r.channelId))];
+    const [rows, shots] = await Promise.all([
+      this.prisma.messageReading.findMany({
+        where: { postedAt: { gte: since }, kind: 'INFO' },
+        select: { messageId: true, channelId: true, postedAt: true, summary: true, claims: true },
+        orderBy: { postedAt: 'desc' },
+        take: CHANNEL_VIEW_CAP,
+      }),
+      this.positionShotsSince(since),
+    ]);
+    const room = Math.max(0, Math.min(POSITION_SHOT_CAP, CHANNEL_VIEW_CAP - rows.length));
+    const keptShots = shots.slice(0, room);
+    if (rows.length === 0 && keptShots.length === 0) return [];
+    const ids = [...new Set([...rows.map((r) => r.channelId), ...keptShots.map((s) => s.channelId)])];
     const channels = await this.prisma.telegramChannel.findMany({ where: { id: { in: ids } }, select: { id: true, title: true, username: true } });
     const name = new Map(channels.map((c) => [c.id, c.title || c.username || c.id] as const));
-    return rows.map((r) => {
+    const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+    const views: ChannelView[] = rows.map((r) => {
       const first = (Array.isArray(r.claims) ? (r.claims as Array<Record<string, unknown>>) : []).find((c) => c && typeof c === 'object') ?? null;
-      const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
       return { channel: name.get(r.channelId) ?? r.channelId, at: r.postedAt.toISOString(), summary: cut(r.summary), subject: str(first?.subject), bias: str(first?.bias) };
     });
+    for (const s of keptShots) {
+      views.push({ channel: name.get(s.channelId) ?? s.channelId, at: s.postedAt.toISOString(), summary: cut(s.description, POSITION_SHOT_TEXT_CAP), subject: null, bias: null, kind: 'position-screenshot' });
+    }
+    return views.sort((a, b) => b.at.localeCompare(a.at));
+  }
+
+  /** Channel images since `since` whose vision description is an active position (newest first, one per channel + description). */
+  private async positionShotsSince(since: Date): Promise<Array<{ channelId: string; postedAt: Date; description: string }>> {
+    const cands = await this.prisma.messageReading.findMany({
+      where: { postedAt: { gte: since }, kind: { in: ['NOISE', 'RECAP', 'UPDATE'] } },
+      select: { messageId: true, channelId: true, postedAt: true, kind: true, call: true },
+      orderBy: { postedAt: 'desc' },
+      take: POSITION_SHOT_ROWS_READ,
+    });
+    // An UPDATE whose call names an instrument is a proposal of its own; one naming none (empty, 'MARKET' — Mr P 12:56)
+    // carries nothing the desk can place, so its screenshot is looked at.
+    const pool = cands.filter((r) => {
+      if (r.kind !== 'UPDATE') return true;
+      const u = ((r.call ?? null) as Record<string, unknown> | null)?.underlying;
+      return normaliseUnderlyingKey(typeof u === 'string' ? u : null) === null;
+    });
+    if (pool.length === 0) return [];
+    const ids = pool.map((r) => r.messageId);
+    const classes = await this.prisma.signalMessageClass.findMany({ where: { messageId: { in: ids } }, select: { messageId: true, llmResult: true } });
+    const desc = new Map<string, string>();
+    for (const c of classes) {
+      const d = ((c.llmResult ?? null) as Record<string, unknown> | null)?.description;
+      if (typeof d === 'string' && d.trim()) desc.set(c.messageId, d.trim());
+    }
+    if (desc.size === 0) return [];
+    const msgs = await this.prisma.telegramMessage.findMany({ where: { id: { in: [...desc.keys()] } }, select: { id: true, rawText: true } });
+    const text = new Map(msgs.map((m) => [m.id, m.rawText ?? ''] as const));
+    const seen = new Set<string>();
+    const out: Array<{ channelId: string; postedAt: Date; description: string }> = [];
+    for (const r of pool) {
+      const d = desc.get(r.messageId);
+      if (!d || !isPositionScreenshot(text.get(r.messageId) ?? '', d)) continue;
+      const key = `${r.channelId}|${d}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ channelId: r.channelId, postedAt: r.postedAt, description: d });
+    }
+    return out;
   }
 
   /** Claims of every reading of the IST session day (the health block counts NOT_CHECKABLE ones). */

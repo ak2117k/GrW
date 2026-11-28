@@ -23,6 +23,10 @@ describe('nightStatuses: recent weeknights, gaps said out loud', () => {
     const n = nightStatuses([run('2026-11-10', { diagnosis: null, id: 'late' }), run('2026-11-10')], now, 1);
     expect(n[0].state).toBe('REVIEWED');
   });
+  it('a PARTIAL run (scored, AI diagnosis failed) reads as NO_DIAGNOSIS, not FAILED', () => {
+    const n = nightStatuses([run('2026-11-10', { status: 'PARTIAL', diagnosis: null, error: 'diagnosis: reply stopped: max_tokens' })], now, 1);
+    expect(n[0]).toMatchObject({ state: 'NO_DIAGNOSIS', tone: 'bad', text: 'Tue 10 Nov: review ran but the AI diagnosis did not (no findings written)' });
+  });
   it('before 03:00 IST the previous night is pending, not missing', () => {
     const early = new Date('2026-11-10T19:15:00Z'); // Wed 00:45 IST
     expect(nightStatuses([], early, 1)[0]).toMatchObject({ session: '2026-11-10', state: 'PENDING' });

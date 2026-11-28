@@ -99,7 +99,7 @@ const SRC = {
   instruments: 'market-hub+level-book+oi_snapshots',
   health: 'message_readings.claims+feed+agents',
   memory: 'desk_manager_decisions+agent_lessons',
-  channelViews: 'message_readings(kind INFO, 3h)+telegram_channels',
+  channelViews: 'message_readings(kind INFO, 3h)+telegram_channels; position screenshots: message_readings+signal_message_classes.llm_result.description+telegram_messages (trusted channels)',
   funds: 'broker RMS net (signal-trader funds read)+instrument master+ATM premiums',
 } as const;
 
@@ -201,6 +201,13 @@ export class DeskStateService {
     const names = rows ? masterNames(rows) : null;
     // Quotas after the master: a bare UPDATE is kept when its summary names a listed instrument.
     if (proposals.status === 'present') proposals.value = quotaProposals(proposals.value ?? [], undefined, names);
+    // A post is never both a proposal and a position-screenshot view; the view's messageId never reaches the packet.
+    if (channelViews.value) {
+      const refs = new Set((proposals.value ?? []).map((p) => p.ref));
+      channelViews.value = channelViews.value
+        .filter((v) => !(v.messageId && refs.has(`reading:${v.messageId}`)))
+        .map(({ messageId: _id, ...v }) => v);
+    }
     const pos = positions.value ?? [];
     const underlyings = pickUnderlyings(
       [

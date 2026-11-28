@@ -138,8 +138,10 @@ export interface ChannelView {
   summary: string;
   subject: string | null;
   bias: string | null;
-  /** Absent = an INFO reading. 'position-screenshot' = a channel image of an active position; summary = its vision description. */
+  /** Absent = an INFO reading. 'position-screenshot' = a trusted channel's positions-screen image; summary = its vision description. */
   kind?: 'position-screenshot';
+  /** Repository → service only (drops a view that is also a proposal); stripped before the packet. */
+  messageId?: string;
 }
 
 export interface HealthView {

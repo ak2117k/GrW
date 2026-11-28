@@ -43,6 +43,13 @@ describe('manager system prompt (audit 2026-11-27 packet blocks)', () => {
   });
 
   it('version bumped for the new wording', () => {
-    expect(MANAGER_PROMPT_VERSION).toBe('desk-manager-v3');
+    expect(MANAGER_PROMPT_VERSION).toBe('desk-manager-v4');
+  });
+
+  it('fix 8: a position-screenshot view is context only (maybe a client or closed; never a lead, level, proposalRef or OPEN evidence)', () => {
+    expect(p).toMatch(/position-screenshot/);
+    expect(p).toMatch(/may be a client's or already closed/);
+    expect(p).toMatch(/never a lead, a level or a reason to OPEN/);
+    expect(p).toMatch(/never cite it as a proposalRef or as evidence for an OPEN/);
   });
 });

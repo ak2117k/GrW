@@ -149,6 +149,17 @@ describe('DeskStateService.build', () => {
     expect(Object.keys(p.instruments.value ?? {})).toEqual(['NIFTY']);
   });
 
+  it('fix 8: a post that is also a proposal is never a position-screenshot view; the messageId never reaches the packet', async () => {
+    const shot = (id: string) => ({ channel: 'Mr P', at: NOW.toISOString(), summary: 'positions screen', subject: null, bias: null, kind: 'position-screenshot' as const, messageId: id });
+    const repo = repoMock({
+      proposalsSince: jest.fn(async () => [{ ...proposal(1), underlying: 'MARKET' }]),
+      channelViewsSince: jest.fn(async () => [shot('1'), shot('2')]),
+    });
+    const p = await make(repo).build('owner', NOW, cfg);
+    expect(p.proposals.value?.map((x) => x.ref)).toEqual(['reading:1']);
+    expect(p.channelViews?.value).toEqual([{ channel: 'Mr P', at: NOW.toISOString(), summary: 'positions screen', subject: null, bias: null, kind: 'position-screenshot' }]);
+  });
+
   it('instrument slots: F&O/MCX positions, proposals + channel views, exits, equity holdings last; keys normalised', async () => {
     const eq = (i: number, u: string) => pos(i, { underlying: u, symbol: `${u}-EQ`, exchange: 'NSE' });
     const repo = repoMock({

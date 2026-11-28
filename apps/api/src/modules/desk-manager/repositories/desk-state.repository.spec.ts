@@ -1,4 +1,5 @@
-import { DeskStateRepository, isPositionScreenshot } from './desk-state.repository';
+import { DeskStateRepository, isPositionScreenshot, shotInSession } from './desk-state.repository';
+import { capturedSql } from '../../market-hub/testing/captured-sql';
 
 const NOW = new Date('2026-11-26T06:00:00Z');
 
@@ -177,93 +178,143 @@ describe('DeskStateRepository', () => {
   });
 });
 
-describe('isPositionScreenshot — a channel image showing an ACTIVE position (fix 8, real 11-27 descriptions)', () => {
-  const yes: Array<[string, string]> = [
-    ['', 'Broker app (Groww F&O) positions screenshot showing total P&L +63,056.50 on a NIFTY 01 Dec 25500 Put position, avg 47.75, market price 57.35. NIFTY 50 at 25,805.50 (-0.31%).'],
-    ['', 'Phone photo of a broker positions screen showing an open BUY position in GOLD 27-Nov-26 122000 PE, 21 lots, average 193.43, LTP 210.50, profit +35,847. It is a P&L screenshot, not a fresh call.'],
-    ['', 'Broker positions screenshot showing total P&L +2,662.80 on a Crude Oil Mini 16 Dec 8000 Call (MCX) long position, market price 355.65.'],
-    // Mr P 11-27 12:56 (the row has no description yet; this is what the vision step would write for that image).
-    ['Small short side trade is active, will trail SL', 'Broker positions screenshot of a SENSEX PE position with P&L +4,33,000; strike hidden.'],
-  ];
-  const no: Array<[string, string, string]> = [
-    ['closed (qty 0)', '', 'Photo of a phone broker Positions screen showing total P&L +29,653.00 on a closed NIFTY 01 DEC 26250 CE position (qty 0, LTP 37.00).'],
-    ['bought and sold', '', 'Broker positions screenshot showing a NIFTY 01-Dec-26 25850 PE position of 89 lots, bought at 177.89 and sold at 265.00, with a profit of +5,03,931.35.'],
-    ['account-handling promo', '50-50% Profit sharing work ✅ Account handling work done ✅', 'Broker F&O positions screenshot showing total P&L +₹2,16,258.25 on a NIFTY 01 Dec 25750 Call position (market price 156.25).'],
-    ['payment chat', '', 'Chat screenshot of a private conversation and a payment-app screenshot showing a Rs 1,08,000 paid successfully.'],
-    ['US stock holding (no option / future)', 'Bullish on SANDISK', 'Broker holding screenshot of SanDisk Corp (US stock): avg $71.87, price $80.21, P&L +$590.05 (+11.60%).'],
-    ['outcome phrase in the post', 'NIFTY 25850 PE 170 TO 284 ALL TARGET ACHIEVED', 'Broker positions screenshot of a NIFTY 25850 PE position, LTP 284, P&L +1,14,000.'],
-    ['no sign the position is live', '', 'Photo of a broker F&O positions screen showing total P&L +₹42,836.30 on NIFTY 01 Dec options: 25600 Put +1,677, 25700 Put +23,323.30.'],
-    ['not a positions screen', 'Trade is active', 'Chart of NIFTY 15m with a trendline and an arrow pointing down.'],
-  ];
-  it.each(yes)('yes: %s | %s', (text, d) => expect(isPositionScreenshot(text, d)).toBe(true));
-  it.each(no)('no (%s)', (_why, text, d) => expect(isPositionScreenshot(text, d)).toBe(false));
+/** REAL prod descriptions (signal_message_classes.llm_result.description, 11-27), full text. */
+const REAL = {
+  closedQty0: 'Photo of a phone broker Positions screen showing total P&L +29,653.00 on a closed NIFTY 01 DEC 26250 CE position (qty 0, LTP 37.00); NIFTY 50 at 25,847.50 and BANK NIFTY at 63,821.40 in the header. A P&L brag with no new trade call.',
+  intradayPe: 'Photo of a broker app portfolio screenshot (Intraday tab) showing a NIFTY 1 Dec 2026 25950 PE position, qty 975, avg 252.12, CMP 315.5, P&L +61046.31 (+173.84%). It is a profit brag, not a trade call.',
+  goldOpen: 'Phone photo of a broker positions screen showing an open BUY position in GOLD 27-Nov-26 122000 PE, 21 lots, average 193.43, LTP 210.50, profit +35,847. It is a P&L screenshot, not a fresh call.',
+  buySell: 'Broker positions screenshot showing profit on NIFTY 01-Dec-26 25550 PE (90 lots, buy 79.71, sell 86.04, LTP 112.80, +37,030.50) and 25700 PE (19 lots, buy 85.35, sell 119.60, LTP 182.45, +42,298.75); total +73,323.25. It is a P&L brag, not a fresh call.',
+  groww: 'Broker app (Groww F&O) positions screenshot showing total P&L +63,056.50 on a NIFTY 01 Dec 25500 Put position, avg 47.75, market price 57.35. NIFTY 50 at 25,805.50 (-0.31%), SENSEX 83,993.61 (-0.40%). This is a P&L brag, not a trade call.',
+  crude: 'Broker positions screenshot showing total P&L +2,662.80 on a Crude Oil Mini 16 Dec 8000 Call (MCX) long position, market price 355.65; NIFTY 50 25,818.15 and SENSEX 83,999.32 shown in header. A P&L screenshot, not a trade call.',
+  promo: 'Broker F&O positions screenshot showing total P&L +₹2,16,258.25 on a NIFTY 01 Dec 25750 Call position (market price 156.25); NIFTY 50 at 25,739.20 and SENSEX at 83,800.08. The caption advertises profit-sharing and account handling services.',
+  payment: "Chat screenshot of a private conversation: a canceled call, 'Send completed', 'Awesome experience', and a payment-app screenshot showing a Rs 1,08,000 paid successfully for Education, with a message 'Monday pe phir dekh lijiyega'. No market instrument, levels or trade call.",
+  sandisk: 'Broker holding screenshot of SanDisk Corp (US stock): avg $71.87, qty 70.749270, price $80.21 (+8.97%), invested $5084.75, current value $5,674.80, P&L +$590.05 (+11.60%). Caption says bullish on SANDISK and MU, with no entry, stop or target.',
+};
+/** Mr P 11-27 12:56 — real post text; the row has NO description, so this one is what the vision step would write. */
+const MRP_TEXT = 'A small short side trade is active!\n\nWill trail now!';
+const MRP_DESC = 'Broker positions screenshot of an open SENSEX PE position, strike hidden, P&L +4,33,000. Realised P&L 0.00 shown in the header.';
+
+describe('isPositionScreenshot — a live derivative positions screen, never a brag (fix 8 + review)', () => {
+  it('Mr P: the post says the trade is active (a "Realised P&L" header alone does not reject)', () => {
+    expect(isPositionScreenshot(MRP_TEXT, MRP_DESC)).toBe(true);
+    expect(isPositionScreenshot('', MRP_DESC)).toBe(true); // "open … position" in the description
+  });
+  it.each(Object.entries(REAL))('every real 11-27 description is out: %s', (_k, d) => expect(isPositionScreenshot('', d)).toBe(false));
+  it('the brag label alone rejects, even with an "active" post', () => {
+    expect(isPositionScreenshot('Trade is active', 'Broker positions screenshot of an open NIFTY 25950 PE position. It is a profit brag, not a trade call.')).toBe(false);
+    expect(isPositionScreenshot('Trade is active', 'Broker positions screenshot of an open NIFTY PE position of a client.')).toBe(false);
+  });
+  it('LTP / CMP / market price are not a live sign', () => {
+    expect(isPositionScreenshot('', 'Broker positions screenshot of a NIFTY 25500 Put position, avg 47.75, market price 57.35, LTP 57.35, CMP 57.35.')).toBe(false);
+  });
+  it('"market open" / "open interest" / "hold tight" in the post are not a live sign', () => {
+    const d = 'Broker positions screenshot of a NIFTY 25500 Put position, avg 47.75, LTP 57.35.';
+    for (const t of ['Market open ho gaya', 'Open interest is rising', 'Hold tight guys']) expect(isPositionScreenshot(t, d)).toBe(false);
+    for (const t of ['Position still running', 'trail SL now', 'Still holding']) expect(isPositionScreenshot(t, d)).toBe(true);
+  });
+  it('an outcome phrase in the post rejects', () => {
+    expect(isPositionScreenshot('NIFTY 25850 PE 170 TO 284 ALL TARGET ACHIEVED', MRP_DESC)).toBe(false);
+  });
 });
 
-describe('channelViewsSince — position screenshots (fix 8)', () => {
-  const at = (min: number) => new Date(NOW.getTime() - min * 60_000);
-  const SHOT = 'Broker positions screenshot of a SENSEX PE position with P&L +4,33,000; LTP 512. ' + 'x'.repeat(300);
-  const make = (info: unknown[], cands: unknown[], classes: unknown[], msgs: unknown[]) => {
+describe('shotInSession — NSE/BSE screens only in the NSE session, MCX screens only in the MCX session', () => {
+  const ist = (hhmm: string) => new Date(`2026-11-27T${hhmm}:00+05:30`);
+  it('NSE screen', () => {
+    expect(shotInSession(MRP_DESC, ist('12:56'))).toBe(true);
+    expect(shotInSession(MRP_DESC, ist('18:07'))).toBe(false); // the 11-27 SHRI RAM batch
+    expect(shotInSession(MRP_DESC, ist('09:10'))).toBe(false);
+  });
+  it('MCX screen', () => {
+    expect(shotInSession(REAL.crude, ist('20:20'))).toBe(true);
+    expect(shotInSession(REAL.crude, ist('23:58'))).toBe(false);
+    expect(shotInSession(REAL.goldOpen, ist('08:30'))).toBe(false);
+  });
+});
+
+describe('channelViewsSince — position screenshots (fix 8 + review)', () => {
+  const at = (min: number) => new Date(NOW.getTime() - min * 60_000); // NOW = 11:30 IST
+  type Row = { messageId: string; channelId: string; title: string; postedAt: Date; rawText: string; description: string };
+  const shotRow = (i: number, o: Partial<Row> = {}): Row => ({ messageId: `s${i}`, channelId: `ch${i}`, title: `Mr. P Investments ${i}`, postedAt: at(i + 1), rawText: MRP_TEXT, description: MRP_DESC, ...o });
+  const make = (info: unknown[], shots: Row[] | Error) => {
     const p = {
       ...prismaMock(),
       telegramChannel: { findMany: jest.fn(async () => [{ id: 'mrp', title: 'Mr. P Investments', username: null }]) },
-      signalMessageClass: { findMany: jest.fn(async () => classes) },
-      telegramMessage: { findMany: jest.fn(async () => msgs) },
+      $queryRaw: jest.fn(async () => {
+        if (shots instanceof Error) throw shots;
+        return shots;
+      }),
     };
-    p.messageReading.findMany.mockResolvedValueOnce(info).mockResolvedValueOnce(cands);
+    p.messageReading.findMany.mockResolvedValueOnce(info);
     return p;
   };
   const infoRow = (i: number) => ({ messageId: `i${i}`, channelId: 'mrp', postedAt: at(30 + i), summary: `view ${i}`, claims: [] });
+  const ENV = 'SIGNAL_VISION_TRUSTED_CHANNELS';
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env[ENV];
+    delete process.env[ENV]; // the signal-vision default: "Mr. P Investments,Stock Gainers"
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env[ENV];
+    else process.env[ENV] = saved;
+  });
 
-  it('a NOISE / RECAP / bare-UPDATE image with an active-position description becomes a position-screenshot view', async () => {
-    const p = make(
-      [infoRow(0)],
-      [
-        // The real 12:56 reading: UPDATE with call.underlying 'MARKET' (no instrument).
-        { messageId: 's1', channelId: 'mrp', postedAt: at(5), kind: 'UPDATE', call: { side: 'SELL', strike: null, underlying: 'MARKET' } },
-        { messageId: 's2', channelId: 'mrp', postedAt: at(6), kind: 'UPDATE', call: { underlying: 'NIFTY' } }, // a real UPDATE: proposals has it
-        { messageId: 's3', channelId: 'mrp', postedAt: at(7), kind: 'NOISE', call: null }, // no description
-        { messageId: 's4', channelId: 'mrp', postedAt: at(8), kind: 'RECAP', call: null }, // booked result
-      ],
-      [
-        { messageId: 's1', llmResult: { kind: 'NOISE', description: SHOT } },
-        { messageId: 's2', llmResult: { kind: 'NOISE', description: SHOT } },
-        { messageId: 's3', llmResult: { kind: 'NOISE' } },
-        { messageId: 's4', llmResult: { description: 'Broker positions screenshot of a closed NIFTY CE position, P&L +29,000.' } },
-      ],
-      [{ id: 's1', rawText: 'Small short side trade is active' }, { id: 's4', rawText: '' }],
-    );
+  it('one query: NOISE/RECAP/UPDATE readings with a description, trusted channel titles only (signal-vision default)', async () => {
+    const p = make([infoRow(0)], [shotRow(0)]);
     const out = await new DeskStateRepository(p as never).channelViewsSince(at(180));
-    const q = (p.messageReading.findMany.mock.calls[1] as unknown as [{ where: Record<string, unknown> }])[0];
-    expect(q.where).toMatchObject({ postedAt: { gte: at(180) }, kind: { in: ['NOISE', 'RECAP', 'UPDATE'] } });
+    expect(p.$queryRaw).toHaveBeenCalledTimes(1);
+    const q = capturedSql(p.$queryRaw.mock.calls as unknown[][]);
+    expect(q.text).toMatch(/r\.kind IN \('NOISE', 'RECAP', 'UPDATE'\)/);
+    expect(q.text).toMatch(/llm_result->>'description', ''\) <> ''/);
+    expect(q.text).toMatch(/ILIKE ANY/);
+    expect(q.values).toContainEqual(['%mr. p investments%', '%stock gainers%']);
     expect(out.map((v) => v.kind ?? 'info')).toEqual(['position-screenshot', 'info']);
-    expect(out[0]).toMatchObject({ channel: 'Mr. P Investments', at: at(5).toISOString(), subject: null, bias: null });
-    expect(out[0].summary.length).toBeLessThanOrEqual(200);
-    expect(out[0].summary.startsWith('Broker positions screenshot of a SENSEX PE')).toBe(true);
+    expect(out[0]).toEqual({ channel: 'Mr. P Investments 0', at: at(1).toISOString(), summary: MRP_DESC, subject: null, bias: null, kind: 'position-screenshot', messageId: 's0' });
   });
 
-  it('at most 3 screenshots, and they never push an INFO view out of the 10', async () => {
-    const cands = Array.from({ length: 6 }, (_, i) => ({ messageId: `s${i}`, channelId: 'mrp', postedAt: at(i + 1), kind: 'NOISE', call: null }));
-    const classes = cands.map((c, i) => ({ messageId: c.messageId, llmResult: { description: `${SHOT.slice(0, 80)} #${i}` } }));
-    const few = make([infoRow(0), infoRow(1)], cands, classes, []);
-    const a = await new DeskStateRepository(few as never).channelViewsSince(at(180));
-    expect(a.filter((v) => v.kind === 'position-screenshot')).toHaveLength(3);
-    expect(a).toHaveLength(5);
-    expect(a.map((v) => v.at)).toEqual([...a.map((v) => v.at)].sort().reverse());
-
-    const full = make(Array.from({ length: 10 }, (_, i) => infoRow(i)), cands, classes, []);
-    const b = await new DeskStateRepository(full as never).channelViewsSince(at(180));
-    expect(b).toHaveLength(10);
-    expect(b.some((v) => v.kind === 'position-screenshot')).toBe(false);
-
-    const nine = make(Array.from({ length: 9 }, (_, i) => infoRow(i)), cands, classes, []);
-    const c = await new DeskStateRepository(nine as never).channelViewsSince(at(180));
-    expect(c).toHaveLength(10);
-    expect(c.filter((v) => v.kind === 'position-screenshot')).toHaveLength(1);
+  it('an untrusted channel title is never a candidate (even if the SQL returned it); empty trust list = no query', async () => {
+    const p = make([], [shotRow(0, { title: 'SHRI RAM TRADERS CLUB' })]);
+    expect(await new DeskStateRepository(p as never).channelViewsSince(at(180))).toEqual([]);
+    process.env[ENV] = '';
+    const q = make([], [shotRow(0)]);
+    expect(await new DeskStateRepository(q as never).channelViewsSince(at(180))).toEqual([]);
+    expect(q.$queryRaw).not.toHaveBeenCalled();
   });
 
-  it('the same screenshot posted twice in a channel is one view', async () => {
-    const cands = [1, 2].map((i) => ({ messageId: `s${i}`, channelId: 'mrp', postedAt: at(i), kind: 'NOISE', call: null }));
-    const p = make([], cands, cands.map((c) => ({ messageId: c.messageId, llmResult: { description: SHOT } })), []);
-    expect(await new DeskStateRepository(p as never).channelViewsSince(at(180))).toHaveLength(1);
+  it('the real 11-27 brags (trusted title for the test) and an after-close NSE screen are dropped', async () => {
+    const brags = Object.values(REAL).map((d, i) => shotRow(i, { rawText: '', description: d, postedAt: new Date('2026-11-27T12:00:00+05:30') }));
+    const late = shotRow(20, { postedAt: new Date('2026-11-27T18:07:00+05:30') });
+    const p = make([], [...brags, late]);
+    expect(await new DeskStateRepository(p as never).channelViewsSince(at(10_000))).toEqual([]);
+  });
+
+  it('1 per channel, at most 3, and they never push an INFO view out of the 10', async () => {
+    const sameChannel = [0, 1].map((i) => shotRow(i, { channelId: 'mrp' }));
+    const a = await new DeskStateRepository(make([], sameChannel) as never).channelViewsSince(at(180));
+    expect(a).toHaveLength(1);
+    expect(a[0].at).toBe(at(1).toISOString()); // the newest
+
+    const six = Array.from({ length: 6 }, (_, i) => shotRow(i));
+    const b = await new DeskStateRepository(make([infoRow(0), infoRow(1)], six) as never).channelViewsSince(at(180));
+    expect(b.filter((v) => v.kind === 'position-screenshot')).toHaveLength(3);
+    expect(b).toHaveLength(5);
+    expect(b.map((v) => v.at)).toEqual([...b.map((v) => v.at)].sort().reverse());
+
+    const nine = await new DeskStateRepository(make(Array.from({ length: 9 }, (_, i) => infoRow(i)), six) as never).channelViewsSince(at(180));
+    expect(nine).toHaveLength(10);
+    expect(nine.filter((v) => v.kind === 'position-screenshot')).toHaveLength(1);
+  });
+
+  it('INFO fills the cap: the screenshot query is not run at all', async () => {
+    const p = make(Array.from({ length: 10 }, (_, i) => infoRow(i)), [shotRow(0)]);
+    const out = await new DeskStateRepository(p as never).channelViewsSince(at(180));
+    expect(out).toHaveLength(10);
+    expect(p.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('a failed screenshot query never costs the INFO views', async () => {
+    const p = make([infoRow(0)], new Error('statement timeout'));
+    const out = await new DeskStateRepository(p as never).channelViewsSince(at(180));
+    expect(out).toEqual([{ channel: 'Mr. P Investments', at: at(30).toISOString(), summary: 'view 0', subject: null, bias: null }]);
   });
 });

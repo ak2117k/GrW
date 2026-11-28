@@ -10,7 +10,6 @@ import {
   istMidnight,
   istYmdOf,
   MEMORY_DECISIONS_CAP,
-  normaliseUnderlyingKey,
   PROPOSAL_QUOTAS,
   TEXT_CAP,
   underlyingFromSymbol,
@@ -22,11 +21,13 @@ import { originsOf } from './desk-day.repository';
 import { resultPostReason } from '../../signal-intake/domain/result-post';
 import { normalise } from '../../signal-intake/domain/text';
 import { buildVocabulary } from '../../signal-intake/domain/vocabulary';
+import { parseSignalIntakeConfig } from '../../signal-intake/signal-intake.config';
+import { istMinuteOf, venueSession } from '../../exit-discipline/session-bars';
 
 /** Engine rows read per packet before the (underlying, side) merge: 2 h of a ~1-min engine over a few underlyings. */
 const ENGINE_ROWS_READ = 400;
 
-/** Position-screenshot views in channelViews: at most 3, description cut to 200 chars; candidate readings read per packet. */
+/** Position-screenshot views in channelViews: at most 3 (1 per channel), description cut to 200 chars; rows read per packet. */
 const POSITION_SHOT_CAP = 3;
 const POSITION_SHOT_TEXT_CAP = 200;
 const POSITION_SHOT_ROWS_READ = 60;
@@ -35,31 +36,51 @@ const POSITION_SHOT_ROWS_READ = 60;
 const SHOT_SCREEN = /\b(POSITIONS?|P&L|P\/L|PNL|MTM|PORTFOLIO)\b/;
 /** …of a derivative (a US-stock holding or a cash portfolio is not a desk view). */
 const SHOT_DERIVATIVE = /\b(CE|PE|CALLS?|PUTS?|FUT|FUTURES?|OPTIONS?)\b/;
-/** The description shows the position live: open, a live price beside it. */
-const SHOT_LIVE = /\b(OPEN|ACTIVE|RUNNING|LIVE|HOLDING|LTP|MARKET PRICE|CMP|UNREALI[SZ]ED)\b/;
-/** …or the post says so ("trade is active", "hold", "trail SL"). */
-const POST_LIVE = /\b(ACTIVE|RUNNING|HOLD|HOLDING|TRAIL|TRAILING|OPEN)\b/;
-/** A finished trade on the screen. */
-const SHOT_CLOSED = /\b(CLOSED|EXITED|SQUARED[ -]?OFF|SOLD AT|QTY 0|BOOKED|REALI[SZ]ED)\b/;
+/**
+ * The description says the position is live. LTP / CMP / market price are NOT a sign: every positions screen, open or
+ * closed, shows one (review of 8144d8db).
+ */
+const SHOT_LIVE = /\b(OPEN(?! INTEREST)|ACTIVE|RUNNING|HOLDING|UNREALI[SZ]ED)\b/;
+/** …or the post says its trade is live ("trade is active", "position running", "trail SL", "still holding") — not "market open" / "hold tight". */
+const POST_LIVE = /\b(TRADES?|POSITIONS?|CALLS?|SHORT|LONG|BUY|SELL)\b[^.!?\n]{0,30}?\b(IS |ARE |STILL )?(ACTIVE|RUNNING|LIVE)\b|\bTRAIL(ING)?\b|\bSTILL HOLDING\b|\bHOLDING (IT|THE|OUR|MY)\b/;
+/** A finished trade on the screen (a "Realised P&L" header alone is not one: open screens print it too). */
+const SHOT_CLOSED = /\b(CLOSED|EXITED|SQUARED[ -]?OFF|SOLD|QTY 0|BOOKED)\b|\bSELL(ING)?( PRICE)?( AT)? ₹?\d/;
 /** Not a trading screen at all. */
 const SHOT_NOT_TRADE = /\b(PAYMENT|PAID|BANK|UPI|CHAT|WHATSAPP|TESTIMONIAL)\b/;
-/** Account-handling / profit-sharing promotions (client screenshots, not the channel's own trade view). */
-const PROMO = /ACCOUNT HANDLING|PROFIT SHARING|50-50/;
+/** Brags, client P&L and promotions — the vision model labels them ("a P&L brag, not a trade call"). */
+const SHOT_BRAG = /\bBRAG|\bNOT A (TRADE|FRESH) CALL|\bCLIENTS?\b|ACCOUNT HANDLING|PROFIT SHARING|50-50/;
 /** Index vocabulary only: the result-post matcher reads outcome phrases, not names. */
 const SHOT_VOCAB = buildVocabulary([]);
+/** Commodity screens are MCX; every other derivative screen is NSE / BSE (same session). */
+const SHOT_MCX = /\b(MCX|CRUDE|CRUDEOIL|GOLD|GOLDM|SILVER|SILVERM|NATURAL ?GAS|NATGAS|COPPER|ZINC|ALUMINI?UM|LEAD|NICKEL)\b/;
 
 /**
- * True when a channel image's vision description is a broker positions screen of an ACTIVE derivative position (or
- * the post says the trade is live), and neither the post nor the description reports a completed outcome
- * (signal-intake result-post: "target achieved", "booked", "x to y done"), a closed position, or a promotion.
+ * True when a channel image's vision description is a broker positions screen of a derivative position that is
+ * live (the description says open / active / running / holding, or the post says its trade is active / trailing),
+ * and neither the post nor the description reports a completed outcome (signal-intake result-post: "target
+ * achieved", "booked", "x to y done"), a closed or sold position, a payment chat, a brag, client P&L or a promotion.
  */
 export function isPositionScreenshot(postText: string, description: string): boolean {
   const d = ` ${String(description ?? '').normalize('NFKC').toUpperCase()} `;
   const t = ` ${String(postText ?? '').normalize('NFKC').toUpperCase()} `;
   if (!SHOT_SCREEN.test(d) || !SHOT_DERIVATIVE.test(d)) return false;
-  if (SHOT_CLOSED.test(d) || SHOT_NOT_TRADE.test(d) || PROMO.test(d) || PROMO.test(t)) return false;
+  if (SHOT_CLOSED.test(d) || SHOT_NOT_TRADE.test(d) || SHOT_BRAG.test(d) || SHOT_BRAG.test(t)) return false;
   if (resultPostReason(normalise(postText ?? '', SHOT_VOCAB)) || resultPostReason(normalise(description ?? '', SHOT_VOCAB))) return false;
   return SHOT_LIVE.test(d) || POST_LIVE.test(t);
+}
+
+/** True when the screenshot was posted inside its venue's session (MCX for commodity screens, else NSE / BSE). */
+export function shotInSession(description: string, postedAt: Date): boolean {
+  const venue = SHOT_MCX.test(String(description ?? '').normalize('NFKC').toUpperCase()) ? 'MCX' : 'NSE';
+  const s = venueSession(venue);
+  if (!s) return false;
+  const min = istMinuteOf(postedAt.getTime());
+  return min >= s.fromMin && min < s.toMin;
+}
+
+/** SIGNAL_VISION_TRUSTED_CHANNELS (signal-intake config, same default): lower-case channel-title substrings. */
+function trustedChannels(): string[] {
+  return parseSignalIntakeConfig(process.env).visionTrustedChannels;
 }
 
 /** One open position as the packet needs it, before the HOLD list, sentinel and manager levels are joined. */
@@ -354,73 +375,67 @@ export class DeskStateRepository {
 
   /**
    * Channel market views, newest first, at most CHANNEL_VIEW_CAP: INFO readings posted at or after `since`, plus up to
-   * POSITION_SHOT_CAP channel images whose vision description shows an ACTIVE position (kind 'position-screenshot';
-   * isPositionScreenshot). The reader classes such posts NOISE / RECAP / bare UPDATE (Mr P 11-27 12:56 "small short
-   * side trade is active" + a SENSEX PE positions screenshot never reached the desk). Screenshots only fill slots INFO
-   * leaves free — they never push an INFO view out.
+   * POSITION_SHOT_CAP images from SIGNAL_VISION_TRUSTED_CHANNELS whose vision description is a live positions screen
+   * (kind 'position-screenshot'; positionShotsSince). Screenshots only fill slots INFO leaves free, are not read at all
+   * when INFO fills the cap, and a failed screenshot read never costs the INFO views. Each carries `messageId` so the
+   * service drops one that is also a proposal (and strips the id before the packet).
    */
   async channelViewsSince(since: Date): Promise<ChannelView[]> {
-    const [rows, shots] = await Promise.all([
-      this.prisma.messageReading.findMany({
-        where: { postedAt: { gte: since }, kind: 'INFO' },
-        select: { messageId: true, channelId: true, postedAt: true, summary: true, claims: true },
-        orderBy: { postedAt: 'desc' },
-        take: CHANNEL_VIEW_CAP,
-      }),
-      this.positionShotsSince(since),
-    ]);
-    const room = Math.max(0, Math.min(POSITION_SHOT_CAP, CHANNEL_VIEW_CAP - rows.length));
-    const keptShots = shots.slice(0, room);
-    if (rows.length === 0 && keptShots.length === 0) return [];
-    const ids = [...new Set([...rows.map((r) => r.channelId), ...keptShots.map((s) => s.channelId)])];
-    const channels = await this.prisma.telegramChannel.findMany({ where: { id: { in: ids } }, select: { id: true, title: true, username: true } });
-    const name = new Map(channels.map((c) => [c.id, c.title || c.username || c.id] as const));
-    const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
-    const views: ChannelView[] = rows.map((r) => {
-      const first = (Array.isArray(r.claims) ? (r.claims as Array<Record<string, unknown>>) : []).find((c) => c && typeof c === 'object') ?? null;
-      return { channel: name.get(r.channelId) ?? r.channelId, at: r.postedAt.toISOString(), summary: cut(r.summary), subject: str(first?.subject), bias: str(first?.bias) };
+    const rows = await this.prisma.messageReading.findMany({
+      where: { postedAt: { gte: since }, kind: 'INFO' },
+      select: { messageId: true, channelId: true, postedAt: true, summary: true, claims: true },
+      orderBy: { postedAt: 'desc' },
+      take: CHANNEL_VIEW_CAP,
     });
-    for (const s of keptShots) {
-      views.push({ channel: name.get(s.channelId) ?? s.channelId, at: s.postedAt.toISOString(), summary: cut(s.description, POSITION_SHOT_TEXT_CAP), subject: null, bias: null, kind: 'position-screenshot' });
+    const room = Math.max(0, Math.min(POSITION_SHOT_CAP, CHANNEL_VIEW_CAP - rows.length));
+    const shots = room > 0 ? (await this.positionShotsSince(since).catch(() => [])).slice(0, room) : [];
+    const views: ChannelView[] = [];
+    if (rows.length) {
+      const ids = [...new Set(rows.map((r) => r.channelId))];
+      const channels = await this.prisma.telegramChannel.findMany({ where: { id: { in: ids } }, select: { id: true, title: true, username: true } });
+      const name = new Map(channels.map((c) => [c.id, c.title || c.username || c.id] as const));
+      const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+      for (const r of rows) {
+        const first = (Array.isArray(r.claims) ? (r.claims as Array<Record<string, unknown>>) : []).find((c) => c && typeof c === 'object') ?? null;
+        views.push({ channel: name.get(r.channelId) ?? r.channelId, at: r.postedAt.toISOString(), summary: cut(r.summary), subject: str(first?.subject), bias: str(first?.bias) });
+      }
+    }
+    for (const s of shots) {
+      views.push({ channel: s.channel, at: s.postedAt.toISOString(), summary: cut(s.description, POSITION_SHOT_TEXT_CAP), subject: null, bias: null, kind: 'position-screenshot', messageId: s.messageId });
     }
     return views.sort((a, b) => b.at.localeCompare(a.at));
   }
 
-  /** Channel images since `since` whose vision description is an active position (newest first, one per channel + description). */
-  private async positionShotsSince(since: Date): Promise<Array<{ channelId: string; postedAt: Date; description: string }>> {
-    const cands = await this.prisma.messageReading.findMany({
-      where: { postedAt: { gte: since }, kind: { in: ['NOISE', 'RECAP', 'UPDATE'] } },
-      select: { messageId: true, channelId: true, postedAt: true, kind: true, call: true },
-      orderBy: { postedAt: 'desc' },
-      take: POSITION_SHOT_ROWS_READ,
-    });
-    // An UPDATE whose call names an instrument is a proposal of its own; one naming none (empty, 'MARKET' — Mr P 12:56)
-    // carries nothing the desk can place, so its screenshot is looked at.
-    const pool = cands.filter((r) => {
-      if (r.kind !== 'UPDATE') return true;
-      const u = ((r.call ?? null) as Record<string, unknown> | null)?.underlying;
-      return normaliseUnderlyingKey(typeof u === 'string' ? u : null) === null;
-    });
-    if (pool.length === 0) return [];
-    const ids = pool.map((r) => r.messageId);
-    const classes = await this.prisma.signalMessageClass.findMany({ where: { messageId: { in: ids } }, select: { messageId: true, llmResult: true } });
-    const desc = new Map<string, string>();
-    for (const c of classes) {
-      const d = ((c.llmResult ?? null) as Record<string, unknown> | null)?.description;
-      if (typeof d === 'string' && d.trim()) desc.set(c.messageId, d.trim());
-    }
-    if (desc.size === 0) return [];
-    const msgs = await this.prisma.telegramMessage.findMany({ where: { id: { in: [...desc.keys()] } }, select: { id: true, rawText: true } });
-    const text = new Map(msgs.map((m) => [m.id, m.rawText ?? ''] as const));
+  /**
+   * Images of trusted channels (SIGNAL_VISION_TRUSTED_CHANNELS) since `since` that the reader classed NOISE / RECAP /
+   * UPDATE, with a vision description, that isPositionScreenshot accepts and that were posted inside their venue's
+   * session; newest first, one per channel. One query, rows without a description filtered in SQL.
+   */
+  private async positionShotsSince(since: Date): Promise<Array<{ messageId: string; channel: string; postedAt: Date; description: string }>> {
+    const trusted = trustedChannels();
+    if (trusted.length === 0) return [];
+    const patterns = trusted.map((s) => `%${s.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+    const rows = await this.prisma.$queryRaw<Array<{ messageId: string; channelId: string; title: string | null; postedAt: Date; rawText: string | null; description: string | null }>>`
+      SELECT r.message_id AS "messageId", r.channel_id AS "channelId", ch.title, r.posted_at AS "postedAt", m."rawText", c.llm_result->>'description' AS description
+      FROM message_readings r
+      JOIN signal_message_classes c ON c.message_id = r.message_id
+      JOIN telegram_messages m ON m.id = r.message_id
+      JOIN telegram_channels ch ON ch.id = r.channel_id
+      WHERE r.posted_at >= ${since} AND r.kind IN ('NOISE', 'RECAP', 'UPDATE')
+        AND COALESCE(c.llm_result->>'description', '') <> ''
+        AND ch.title ILIKE ANY (${patterns}::text[])
+      ORDER BY r.posted_at DESC
+      LIMIT ${POSITION_SHOT_ROWS_READ}`;
     const seen = new Set<string>();
-    const out: Array<{ channelId: string; postedAt: Date; description: string }> = [];
-    for (const r of pool) {
-      const d = desc.get(r.messageId);
-      if (!d || !isPositionScreenshot(text.get(r.messageId) ?? '', d)) continue;
-      const key = `${r.channelId}|${d}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ channelId: r.channelId, postedAt: r.postedAt, description: d });
+    const out: Array<{ messageId: string; channel: string; postedAt: Date; description: string }> = [];
+    for (const r of rows) {
+      const title = String(r.title ?? '').toLowerCase();
+      if (!trusted.some((s) => title.includes(s))) continue; // the SQL pattern, checked again the way signal-vision does
+      const d = String(r.description ?? '').trim();
+      const at = r.postedAt instanceof Date ? r.postedAt : new Date(r.postedAt);
+      if (!d || seen.has(r.channelId) || !shotInSession(d, at) || !isPositionScreenshot(r.rawText ?? '', d)) continue;
+      seen.add(r.channelId);
+      out.push({ messageId: r.messageId, channel: r.title || r.channelId, postedAt: at, description: d });
     }
     return out;
   }

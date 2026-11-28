@@ -172,10 +172,46 @@ describe('DeskStateService.build', () => {
     const f = p.funds?.value;
     expect(f?.available).toBe(30_000);
     const c = f?.lots.CRUDEOIL;
-    expect(c?.atmCe).toEqual({ contract: 'CRUDEOIL16DEC265200CE', premium: 385, lotSize: 100, valueFactor: 1, cost: 38_500, fits: false });
+    expect(c?.atmCe).toMatchObject({ contract: 'CRUDEOIL16DEC265200CE', premium: 385, lotSize: 100, valueFactor: 1, cost: 38_500, fits: false });
     expect(c?.atmPe?.contract).toBe('CRUDEOIL16DEC265200PE');
     expect(c?.mini?.underlying).toBe('CRUDEOILM');
     expect(c?.mini?.atmCe).toMatchObject({ contract: 'CRUDEOILM16DEC265200CE', lotSize: 10, cost: 3_850, fits: true });
+  });
+
+  it('funds block: fits uses the order path requiredFunds (cost + the funds buffer)', async () => {
+    const repo = repoMock({ openPositions: jest.fn(async () => [pos(1, { underlying: 'CRUDEOIL', symbol: 'CRUDEOIL16DEC265200CE', exchange: 'MCX' })]) });
+    const svc = new DeskStateService(repo as never, { state: async () => guardState }, market({ ltp: async () => 5210 }), undefined, undefined, undefined, { available: async () => 4_000 }, lotMarket(), { fundsBufferPct: 10, futMarginPct: 25 });
+    const mini = (await svc.build('owner', NOW, cfg)).funds?.value?.lots.CRUDEOIL.mini?.atmCe;
+    expect(mini).toMatchObject({ cost: 3_850, required: 4_235, fits: false });
+  });
+
+  it('funds block: a slow premium read never blanks the available funds (separate boxes)', async () => {
+    const repo = repoMock({ openPositions: jest.fn(async () => [pos(1, { underlying: 'CRUDEOIL', symbol: 'CRUDEOIL16DEC265200CE', exchange: 'MCX' })]) });
+    const slow = lotMarket({ ltps: jest.fn(() => new Promise(() => undefined)) });
+    const p = await new DeskStateService(repo as never, { state: async () => guardState }, market({ ltp: async () => 5210 }), undefined, undefined, undefined, { available: async () => 30_000 }, slow).build('owner', NOW, cfg);
+    expect(p.funds?.status).toBe('present');
+    expect(p.funds?.value?.available).toBe(30_000);
+    expect(p.funds?.value?.lots.CRUDEOIL.missing.join(' ')).toMatch(/lot pricing: timed out after 4000 ms/);
+  }, 15_000);
+
+  it('funds block: premium reads run at most 3 underlyings at a time', async () => {
+    const us = ['CRUDEOIL', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6'];
+    const repo = repoMock({ openPositions: jest.fn(async () => us.map((u, i) => pos(i, { underlying: u, symbol: `${u}16DEC265200CE`, exchange: 'MCX' }))) });
+    let live = 0;
+    let peak = 0;
+    const base = lotMarket();
+    const counting = lotMarket({
+      underlyingRef: jest.fn(async (u: string) => {
+        live++;
+        peak = Math.max(peak, live);
+        await new Promise((r) => setTimeout(r, 20));
+        live--;
+        return base.underlyingRef(u);
+      }),
+    });
+    await new DeskStateService(repo as never, { state: async () => guardState }, market({ ltp: async () => null }), undefined, undefined, undefined, { available: async () => 30_000 }, counting).build('owner', NOW, cfg);
+    expect(counting.underlyingRef).toHaveBeenCalledTimes(us.length);
+    expect(peak).toBeLessThanOrEqual(3);
   });
 
   it('funds block: unknown funds keep the costs with fits null; no funds read wired = unavailable', async () => {

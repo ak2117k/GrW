@@ -10,6 +10,11 @@ describe('manager system prompt (audit 2026-11-27 packet blocks)', () => {
     expect(p).toMatch(/packet\.funds/);
     expect(p).toMatch(/never OPEN when .*1-lot cost.*available/i);
     expect(p).toMatch(/mini/i);
+    expect(p).toMatch(/available null.*lot cost null = do not assume it fits: NO_ACTION or FLAG_DATA_HOLE for a full-size lot/);
+  });
+
+  it('channelViews fields named as in the packet (at, not time)', () => {
+    expect(p).toMatch(/\(channel, at, summary, subject, bias\)/);
   });
 
   it('channel views, per-source quotas and the owner P&L are explained', () => {

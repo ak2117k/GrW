@@ -108,7 +108,9 @@ export interface LotCost {
   lotSize: number;
   valueFactor: number;
   cost: number;
-  /** cost <= the available funds; null when the funds are unknown. */
+  /** What the order path's funds check asks for 1 lot (the cost plus its charges buffer). */
+  required: number;
+  /** required <= the available funds; null when the funds are unknown. */
   fits: boolean | null;
 }
 

@@ -16,6 +16,7 @@ import { SIGNAL_FUNDS, SIGNAL_QUOTES, SIGNAL_TRADER_CONFIG, type FundsLike, type
 import { DESK_MANAGER_CONFIG, type DeskManagerConfig } from '../desk-manager.config';
 import { authorityLive } from '../domain/authority';
 import type { ActionContext, ActionResult, DeskActionsPort, DeskMode, DeskPacket, ManagerDecision } from '../domain/desk.types';
+import { normaliseUnderlyingKey } from '../domain/packet-blocks';
 import { ceilingFor, estimatePremiumLoss, estimateSpread, pickContractSpec, premiumStop } from '../domain/premium-risk';
 import { DeskActionsRepository, type PendingEntryRow } from '../repositories/desk-actions.repository';
 import {
@@ -254,8 +255,9 @@ export class DeskActionsService implements DeskActionsPort {
     const n = await this.store.entriesToday(owner, now, excludeDecisionId);
     if (n >= cfg.maxEntries) return `${n} manager entries today ≥ DESK_MANAGER_MAX_ENTRIES ${cfg.maxEntries}`;
     const busy = await this.store.busyUnderlyings(owner, now, excludeDecisionId);
-    const what = busy.get(u);
-    if (what) return `${u} already has ${what}`;
+    // A mini and its parent are one underlying (CRUDEOILM / CRUDEOIL): either side's open position counts.
+    const family = normaliseUnderlyingKey(u) ?? u;
+    for (const [k, what] of busy) if (k === u || normaliseUnderlyingKey(k) === family) return `${u} already has ${what}`;
     return null;
   }
 

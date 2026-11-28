@@ -1,3 +1,4 @@
+import { normaliseUnderlyingKey } from './packet-blocks';
 import { BRIEF_MAX_CHARS, BRIEF_MIN_CHARS, type DeskPacket, type InstrumentView, type ManagerDecision, type PositionView } from './desk.types';
 
 /** Reward ≥ 1.2 × risk on the underlying (Global Constraints; cfg.minRewardRisk is the same literal). */
@@ -48,7 +49,11 @@ export function validateDecision(d: ManagerDecision, packet: DeskPacket): string
       break;
     }
     case 'OPEN': {
-      const view = instrumentsOf(packet)[d.underlying];
+      // The instruments block is keyed by the data name (a mini reads as its parent: CRUDEOILM -> CRUDEOIL), so an
+      // OPEN on the mini is checked against its parent's prices (the mini tracks the same price).
+      const inst = instrumentsOf(packet);
+      const key = normaliseUnderlyingKey(d.underlying);
+      const view = inst[d.underlying] ?? (key ? inst[key] : undefined);
       if (!view) {
         problems.push(`underlying ${d.underlying} not in packet.instruments`);
         break;

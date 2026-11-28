@@ -281,7 +281,7 @@ export class DeskStateRepository {
           kind: r.kind,
           call,
           missedByRules: r.missedByRules,
-          claims: claims.slice(0, 6).map((c) => ({ text: cut(c.text, 160), verdict: c.verdict ?? null, reasonCode: c.reasonCode ?? null })),
+          claims: claims.slice(0, 6).map((c) => ({ text: cut(c.text, 160), subject: typeof c.subject === 'string' ? c.subject : null, verdict: c.verdict ?? null, reasonCode: c.reasonCode ?? null })),
         },
       });
     }

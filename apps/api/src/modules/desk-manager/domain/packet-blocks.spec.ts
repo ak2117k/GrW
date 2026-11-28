@@ -1,6 +1,5 @@
 import type { Proposal } from './desk.types';
 import {
-  capProposals,
   countNotCheckable,
   firstNumber,
   isBareUpdate,
@@ -38,12 +37,12 @@ describe('packet blocks', () => {
     expect(await timedBlock('ok', async () => 5)).toEqual({ status: 'present', value: 5, source: 'ok' });
   });
 
-  it('proposals capped at 40 newest first', () => {
+  it('readings over the quota: the 16 newest kept', () => {
     const list = Array.from({ length: 55 }, (_, i) => proposal(i));
-    const out = capProposals(list.reverse().sort(() => 0));
-    expect(out).toHaveLength(40);
+    const out = quotaProposals(list.reverse());
+    expect(out).toHaveLength(16);
     expect(out[0].ref).toBe('reading:54');
-    expect(out[39].ref).toBe('reading:15');
+    expect(out[15].ref).toBe('reading:39');
   });
 
   it('underlyings de-duplicated in order and capped at 8 (minis read as their parent)', () => {
@@ -121,6 +120,17 @@ describe('packet blocks', () => {
     expect(quotaProposals([r('1', 'UPDATE', null, null), r('4', 'UPDATE', { underlying: 'NIFTY' }, 'NIFTY')]).map((p) => p.ref)).toEqual(['reading:4']);
   });
 
+  it('an UPDATE whose claim subject or summary names an instrument is kept', () => {
+    const r = (detail: Record<string, unknown>, text = ''): Proposal => ({ ref: 'reading:x', kind: 'reading', at: new Date().toISOString(), underlying: null, text, detail: { kind: 'UPDATE', call: null, ...detail } });
+    expect(isBareUpdate(r({ claims: [{ subject: 'BANKNIFTY', text: 'holding' }] }))).toBe(false);
+    expect(isBareUpdate(r({ claims: [{ subject: 'MARKET', text: 'weak' }] }))).toBe(true);
+    expect(isBareUpdate(r({}, 'Bank Nifty 120++ running'))).toBe(false);
+    expect(isBareUpdate(r({}, 'crude target done'))).toBe(false);
+    expect(isBareUpdate(r({}, 'Mazdock 1760 PE 40++'), new Set(['MAZDOCK']))).toBe(false);
+    expect(isBareUpdate(r({}, '120++ running'))).toBe(true);
+    expect(isBareUpdate(r({}, 'Mazdock 40++'))).toBe(true); // a stock needs the master's names
+  });
+
   it('mini contract name per underlying (CRUDEOILM, GOLDM, SILVERM, NATGASMINI)', () => {
     expect(miniUnderlyingOf('CRUDEOIL')).toBe('CRUDEOILM');
     expect(miniUnderlyingOf('GOLD')).toBe('GOLDM');
@@ -130,9 +140,11 @@ describe('packet blocks', () => {
   });
 
   it('1-lot cost = premium x lot size x value factor; fits only when within the funds', () => {
-    expect(lotCost({ contract: 'CRUDEOIL16DEC265200CE', premium: 154, lotSize: 100, valueFactor: 1 }, 30_000)).toEqual({ contract: 'CRUDEOIL16DEC265200CE', premium: 154, lotSize: 100, valueFactor: 1, cost: 15_400, fits: true });
+    expect(lotCost({ contract: 'CRUDEOIL16DEC265200CE', premium: 154, lotSize: 100, valueFactor: 1 }, 30_000)).toEqual({ contract: 'CRUDEOIL16DEC265200CE', premium: 154, lotSize: 100, valueFactor: 1, cost: 15_400, required: 15_400, fits: true });
     expect(lotCost({ contract: 'X', premium: 385, lotSize: 100, valueFactor: 1 }, 30_000).fits).toBe(false);
     expect(lotCost({ contract: 'X', premium: 10, lotSize: 1, valueFactor: 100 }, null)).toMatchObject({ cost: 1000, fits: null });
+    // fits compares what the order path will ask for (cost + charges buffer), not the bare cost
+    expect(lotCost({ contract: 'X', premium: 295, lotSize: 100, valueFactor: 1 }, 30_000, 30_090)).toMatchObject({ cost: 29_500, required: 30_090, fits: false });
   });
 
   it('underlying from a contract symbol', () => {

@@ -2,7 +2,9 @@ import { Inject, Injectable, Optional } from '@nestjs/common';
 import { contractValueFactor } from '@td/shared';
 import { engineContract } from '../../entry-engine/domain/engine-contract';
 import type { ResolvedContract } from '../../signal-trader/domain/contract-resolver';
-import { SIGNAL_FUNDS, type FundsLike } from '../../signal-trader/services/signal-trader.service';
+import { requiredFunds } from '../../signal-trader/domain/funds';
+import { parseSignalTraderConfig, type SignalTraderConfig } from '../../signal-trader/domain/signal-trader.config';
+import { SIGNAL_FUNDS, SIGNAL_TRADER_CONFIG, type FundsLike } from '../../signal-trader/services/signal-trader.service';
 import { isHeld } from '../../sentinel-executor/domain/guards';
 import { parseAutoExitConfig } from '../../sentinel-executor/domain/auto-exit.config';
 import { AUTHORITY_STATE, TRADE_BRIEFS, type AuthorityStatePort, type TradeBriefsPort } from '../../exit-authority/exit-authority.tokens';
@@ -34,6 +36,7 @@ import {
   CHANNEL_VIEW_WINDOW_MS,
   countNotCheckable,
   cut,
+  DESK_BLOCK_MS,
   DESK_SLOW_BLOCK_MS,
   failedBlocks,
   istClock,
@@ -106,6 +109,11 @@ const SRC = {
  */
 const SLOW_BLOCK_MS = DESK_SLOW_BLOCK_MS + 500;
 const INSTRUMENTS_BLOCK_MS = SLOW_BLOCK_MS;
+/** Funds: the RMS read gets the 3 s box, the lot pricing its own 4 s, the block both plus a margin. */
+const LOT_PRICING_MS = 4_000;
+const FUNDS_BLOCK_MS = DESK_BLOCK_MS + LOT_PRICING_MS + 500;
+/** Underlyings priced at once (each does 1-3 quote reads): stays well under Angel's 10 req/s. */
+const LOT_PRICING_CONCURRENCY = 3;
 
 function minutesSince(from: Date, now: Date): number {
   return Math.max(0, Math.round((now.getTime() - from.getTime()) / 60_000));
@@ -151,7 +159,14 @@ export class DeskStateService {
     // quotes / instrument master the manager's OPEN prices with (desk-actions DESK_MARKET). Absent = said so.
     @Optional() @Inject(SIGNAL_FUNDS) private readonly funds?: Pick<FundsLike, 'available'> | null,
     @Optional() @Inject(DESK_LOT_MARKET) private readonly lotMarket?: DeskMarket | null,
+    // The order path's funds buffer (SIGNAL_FUNDS_BUFFER_PCT): `fits` asks what the order path will ask.
+    @Optional() @Inject(SIGNAL_TRADER_CONFIG) private traderCfg?: Pick<SignalTraderConfig, 'fundsBufferPct' | 'futMarginPct'> | null,
   ) {}
+
+  private fundsCfg(): { fundsBufferPct: number; futMarginPct: number } {
+    const c = (this.traderCfg ??= parseSignalTraderConfig(process.env));
+    return { fundsBufferPct: c.fundsBufferPct, futMarginPct: c.futMarginPct };
+  }
 
   async build(userId: string, now: Date, cfg: DeskManagerConfig): Promise<DeskPacket> {
     const hold = parseAutoExitConfig(process.env).hold ?? [];
@@ -169,7 +184,7 @@ export class DeskStateService {
       timedBlock<GuardState>(SRC.guard, () => guardRead),
       timedBlock<PositionView[]>(SRC.positions, () => this.positions(userId, now, hold)),
       timedBlock<RecentExit[]>(SRC.recentExits, () => this.recentExits(userId, now), SLOW_BLOCK_MS),
-      timedBlock<Proposal[]>(SRC.proposals, async () => quotaProposals(await this.repo.proposalsSince(userId, new Date(now.getTime() - PROPOSAL_WINDOW_MS)))),
+      timedBlock<Proposal[]>(SRC.proposals, () => this.repo.proposalsSince(userId, new Date(now.getTime() - PROPOSAL_WINDOW_MS))),
       timedBlock<MemoryView>(SRC.memory, () => this.memory(userId, now)),
       timedBlock<ChannelView[]>(SRC.channelViews, () => this.repo.channelViewsSince(new Date(now.getTime() - CHANNEL_VIEW_WINDOW_MS))),
       this.lotMarket ? timedValue(() => (this.lotMarket as DeskMarket).master()) : Promise.resolve({ ok: false as const, reason: 'lot market not wired' }),
@@ -184,6 +199,8 @@ export class DeskStateService {
     // with a live proposal, had no data in 79/154 runs). Keys normalised against the instrument master.
     const rows = master.ok && Array.isArray(master.value) ? master.value : null;
     const names = rows ? masterNames(rows) : null;
+    // Quotas after the master: a bare UPDATE is kept when its summary names a listed instrument.
+    if (proposals.status === 'present') proposals.value = quotaProposals(proposals.value ?? [], undefined, names);
     const pos = positions.value ?? [];
     const underlyings = pickUnderlyings(
       [
@@ -202,7 +219,7 @@ export class DeskStateService {
         if (k && e.underlyingNow == null) e.underlyingNow = instruments.value?.[k]?.ltp ?? null;
       }
     }
-    const funds = await timedBlock<FundsView>(SRC.funds, () => this.fundsView(fundsRead, underlyings, instruments.value ?? {}, rows, now));
+    const funds = await timedBlock<FundsView>(SRC.funds, () => this.fundsView(fundsRead, underlyings, instruments.value ?? {}, rows, now), FUNDS_BLOCK_MS);
 
     const failed = failedBlocks({ day, pnl, guard, positions, recentExits, proposals, instruments, memory, channelViews, funds });
     const health = await timedBlock<HealthView>(SRC.health, () => this.health(now, failed));
@@ -216,43 +233,57 @@ export class DeskStateService {
    * each packet underlying, what 1 lot of the ATM CE / PE (nearest expiry) costs, plus the mini's where one exists.
    */
   private async fundsView(fundsRead: Promise<number | null>, underlyings: string[], instruments: Record<string, InstrumentView>, master: readonly unknown[] | null, now: Date): Promise<FundsView> {
-    const raw = await fundsRead;
+    // Two boxes: a slow premium read must never blank `available` (RMS 3 s, lot pricing its own 4 s).
+    if (!this.funds) await fundsRead; // throws: "funds read not wired" -> the block is unavailable
+    const read = await timedValue(() => fundsRead, DESK_BLOCK_MS);
+    const raw = read.ok ? read.value : null;
     const available = typeof raw === 'number' && Number.isFinite(raw) ? Math.round(raw * 100) / 100 : null;
     const lots: Record<string, UnderlyingLotCosts> = {};
+    for (const u of underlyings) lots[u] = { atmCe: null, atmPe: null, missing: [] };
     const m = this.lotMarket;
     if (!m || !master || master.length === 0) {
-      for (const u of underlyings) lots[u] = { atmCe: null, atmPe: null, missing: [m ? 'instrument master unavailable' : 'lot market not wired'] };
+      for (const u of underlyings) lots[u].missing.push(m ? 'instrument master unavailable' : 'lot market not wired');
       return { available, lots };
     }
+    const priced = await timedValue(() => this.priceLots(lots, underlyings, instruments, master, available, now), LOT_PRICING_MS);
+    if (!priced.ok) for (const u of underlyings) if (!lots[u].atmCe && !lots[u].atmPe) lots[u].missing.push(`lot pricing: ${priced.reason}`);
+    return { available, lots };
+  }
+
+  /** Fills `lots` in place; at most LOT_PRICING_CONCURRENCY underlyings priced at once (Angel REST 10 req/s). */
+  private async priceLots(lots: Record<string, UnderlyingLotCosts>, underlyings: string[], instruments: Record<string, InstrumentView>, master: readonly unknown[], available: number | null, now: Date): Promise<void> {
+    const m = this.lotMarket as DeskMarket;
     // One pass over the master: only the packet's names (and their minis) are searched per contract.
     const wanted = new Set(underlyings.flatMap((u) => [u, miniUnderlyingOf(u)].filter((x): x is string => !!x)));
     const rows = (master as Array<{ name?: unknown }>).filter((r) => r && wanted.has(String(r.name ?? '').trim().toUpperCase()));
-    await Promise.all(
-      underlyings.map(async (u) => {
-        const view: UnderlyingLotCosts = { atmCe: null, atmPe: null, missing: [] };
-        lots[u] = view;
-        let spot = instruments[u]?.ltp ?? null;
-        if (spot == null) {
-          const ref = await m.underlyingRef(u, now).catch(() => null);
-          spot = ref ? ((await m.ltps([ref], now).catch(() => new Map<string, number>())).get(refKey(ref)) ?? null) : null;
-        }
-        if (spot == null || !(spot > 0)) {
-          view.missing.push(`no price for ${u}: no ATM strike`);
-          return;
-        }
-        const full = await this.atmCosts(rows, u, spot, available, now);
-        view.atmCe = full.ce;
-        view.atmPe = full.pe;
-        view.missing.push(...full.missing);
-        const mini = miniUnderlyingOf(u);
-        if (mini) {
-          const mc = await this.atmCosts(rows, mini, spot, available, now);
-          view.mini = { underlying: mini, atmCe: mc.ce, atmPe: mc.pe };
-          view.missing.push(...mc.missing);
-        }
-      }),
-    );
-    return { available, lots };
+    const queue = [...underlyings];
+    const worker = async () => {
+      for (let u = queue.shift(); u !== undefined; u = queue.shift()) await this.priceOne(lots[u], u, rows, instruments, available, now, m);
+    };
+    await Promise.all(Array.from({ length: Math.min(LOT_PRICING_CONCURRENCY, queue.length) }, worker));
+  }
+
+  /** One underlying: the spot (instruments ltp, else its line), the ATM CE / PE and the mini's. */
+  private async priceOne(view: UnderlyingLotCosts, u: string, rows: readonly unknown[], instruments: Record<string, InstrumentView>, available: number | null, now: Date, m: DeskMarket): Promise<void> {
+    let spot = instruments[u]?.ltp ?? null;
+    if (spot == null) {
+      const ref = await m.underlyingRef(u, now).catch(() => null);
+      spot = ref ? ((await m.ltps([ref], now).catch(() => new Map<string, number>())).get(refKey(ref)) ?? null) : null;
+    }
+    if (spot == null || !(spot > 0)) {
+      view.missing.push(`no price for ${u}: no ATM strike`);
+      return;
+    }
+    const full = await this.atmCosts(rows, u, spot, available, now);
+    view.atmCe = full.ce;
+    view.atmPe = full.pe;
+    view.missing.push(...full.missing);
+    const mini = miniUnderlyingOf(u);
+    if (mini) {
+      const mc = await this.atmCosts(rows, mini, spot, available, now);
+      view.mini = { underlying: mini, atmCe: mc.ce, atmPe: mc.pe };
+      view.missing.push(...mc.missing);
+    }
   }
 
   /** The ATM CE and PE of `underlying` (nearest expiry) priced at the live premium: 1-lot cost each. */
@@ -281,7 +312,9 @@ export class DeskStateService {
         missing.push(`${c.tradingsymbol}: no fresh premium`);
         continue;
       }
-      const cost = lotCost({ contract: c.tradingsymbol, premium, lotSize: c.lotSize, valueFactor: contractValueFactor(c.exchange, c.tradingsymbol) }, available);
+      // `required` exactly as the order path's funds check computes it (requiredFunds: premium x qty x factor + buffer).
+      const need = requiredFunds({ side: 'BUY', limitPrice: premium, qty: c.lotSize, exchange: c.exchange, tradingsymbol: c.tradingsymbol }, { instrumentKind: kind, strike: null }, this.fundsCfg());
+      const cost = lotCost({ contract: c.tradingsymbol, premium, lotSize: c.lotSize, valueFactor: contractValueFactor(c.exchange, c.tradingsymbol) }, available, need.required);
       if (kind === 'CE') out.ce = cost;
       else out.pe = cost;
     }

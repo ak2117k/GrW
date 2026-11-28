@@ -9,8 +9,7 @@ import type { Block, LotCost, Proposal } from './desk.types';
 export const DESK_BLOCK_MS = 3000;
 /** The slower blocks (instruments, recentExits, funds: several market reads each) get this box. */
 export const DESK_SLOW_BLOCK_MS = 6000;
-/** Proposals the manager sees: newest first, last 2 h, at most this many. */
-export const PROPOSAL_CAP = 40;
+/** Proposals the manager sees: the last 2 h (per-source quotas: PROPOSAL_QUOTAS). */
 export const PROPOSAL_WINDOW_MS = 2 * 60 * 60_000;
 /** Underlyings the instruments block reads. */
 export const INSTRUMENT_CAP = 8;
@@ -60,15 +59,6 @@ export function cut(text: unknown, n = TEXT_CAP): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
-/** Newest first, at most `cap`. Unparseable times sort last. */
-export function capProposals(list: readonly Proposal[], cap = PROPOSAL_CAP): Proposal[] {
-  const t = (p: Proposal) => {
-    const v = Date.parse(p.at);
-    return Number.isFinite(v) ? v : -Infinity;
-  };
-  return [...list].sort((a, b) => t(b) - t(a)).slice(0, cap);
-}
-
 /**
  * Per-source lead quotas (audit 2026-11-27: the single cap 40 was hit in 149/165 runs, 81% entry-engine items).
  * Newest first within each source; a source's unused quota is NOT given to another (never to the engine).
@@ -81,16 +71,39 @@ const atMs = (p: Pick<Proposal, 'at'>) => {
 };
 const newestFirst = (a: Proposal, b: Proposal) => atMs(b) - atMs(a);
 
-/** An UPDATE reading that names no instrument and no level (a bare "120++"): nothing to act on. */
-export function isBareUpdate(p: Proposal): boolean {
+/**
+ * Does free text name an instrument? A word (or two-word alias, "BANK NIFTY") that is a fixed vocabulary alias
+ * (indices, commodities, stock nicknames) or, with the instrument master's names, a listed name of 3+ letters.
+ */
+export function textNamesInstrument(text: unknown, masterNames?: ReadonlySet<string> | null): boolean {
+  const words = String(text ?? '').toUpperCase().match(/[A-Z][A-Z0-9&]*/g) ?? [];
+  const alias = aliasNames();
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (alias.has(w) && w.length >= 3) return true;
+    if (i + 1 < words.length && alias.has(`${w} ${words[i + 1]}`)) return true;
+    if (w.length >= 3 && !NOT_INSTRUMENT.has(w) && masterNames?.has(w)) return true;
+  }
+  return false;
+}
+
+/**
+ * An UPDATE reading that names no instrument and no level (a bare "120++"): nothing to act on. Kept when a claim's
+ * subject or the summary names an instrument (the reader left call.underlying empty but said what it is about).
+ */
+export function isBareUpdate(p: Proposal, masterNames?: ReadonlySet<string> | null): boolean {
   if (p.kind !== 'reading' || p.detail?.kind !== 'UPDATE') return false;
   if (String(p.underlying ?? '').trim()) return false;
   const c = (p.detail.call ?? null) as Record<string, unknown> | null;
-  if (!c) return true;
-  if (String(c.underlying ?? '').trim()) return false;
-  const n = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
-  const levels = [c.strike, c.entryLow, c.entryHigh, c.stopLoss].some(n) || (Array.isArray(c.targets) && c.targets.some(n));
-  return !levels;
+  if (c) {
+    if (String(c.underlying ?? '').trim()) return false;
+    const n = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
+    if ([c.strike, c.entryLow, c.entryHigh, c.stopLoss].some(n) || (Array.isArray(c.targets) && c.targets.some(n))) return false;
+  }
+  const claims = Array.isArray(p.detail.claims) ? (p.detail.claims as Array<Record<string, unknown>>) : [];
+  if (claims.some((x) => x && typeof x.subject === 'string' && normaliseUnderlyingKey(x.subject) !== null)) return false;
+  if (textNamesInstrument(p.text, masterNames)) return false;
+  return true;
 }
 
 /** Entry-engine items merged to one per (underlying, side): the latest wins and carries `count` (how many were merged). */
@@ -109,8 +122,12 @@ export function mergeEngine(list: readonly Proposal[]): Proposal[] {
 }
 
 /** The proposals block: bare UPDATEs dropped, engine merged, then each source cut to its quota; newest first overall. */
-export function quotaProposals(list: readonly Proposal[], quotas: Readonly<Record<Proposal['kind'], number>> = PROPOSAL_QUOTAS): Proposal[] {
-  const kept = list.filter((p) => !isBareUpdate(p));
+export function quotaProposals(
+  list: readonly Proposal[],
+  quotas: Readonly<Record<Proposal['kind'], number>> = PROPOSAL_QUOTAS,
+  masterNames?: ReadonlySet<string> | null,
+): Proposal[] {
+  const kept = list.filter((p) => !isBareUpdate(p, masterNames));
   const out: Proposal[] = [];
   for (const kind of Object.keys(quotas) as Array<Proposal['kind']>) {
     const own = kept.filter((p) => p.kind === kind);
@@ -188,11 +205,16 @@ export function normaliseUnderlyingKey(raw: string | null | undefined, masterNam
   return k;
 }
 
-/** The 1-lot cost of a contract (premium x lot size x value factor), and whether it fits the funds (null = unknown). */
-export function lotCost(c: { contract: string; premium: number; lotSize: number; valueFactor: number }, available: number | null): LotCost {
+/**
+ * The 1-lot cost of a contract (premium x lot size x value factor) and whether it fits the funds (null = unknown).
+ * `required` is what the order path's funds check will ask for (signal-trader requiredFunds: the cost plus its
+ * charges buffer); `fits` compares that, so it matches what the order path accepts. Default: the bare cost.
+ */
+export function lotCost(c: { contract: string; premium: number; lotSize: number; valueFactor: number }, available: number | null, required?: number): LotCost {
   const vf = c.valueFactor > 0 ? c.valueFactor : 1;
   const cost = Math.round(c.premium * c.lotSize * vf * 100) / 100;
-  return { contract: c.contract, premium: c.premium, lotSize: c.lotSize, valueFactor: vf, cost, fits: available == null || !Number.isFinite(available) ? null : cost <= available };
+  const need = typeof required === 'number' && Number.isFinite(required) ? Math.round(required * 100) / 100 : cost;
+  return { contract: c.contract, premium: c.premium, lotSize: c.lotSize, valueFactor: vf, cost, required: need, fits: available == null || !Number.isFinite(available) ? null : need <= available };
 }
 
 /**

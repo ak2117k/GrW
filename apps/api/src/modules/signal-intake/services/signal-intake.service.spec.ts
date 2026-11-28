@@ -958,7 +958,7 @@ describe('SignalIntakeService — supreme fixes W3 (audit 2026-11-27)', () => {
       expect(m.mem.signals.map((s) => [s.underlying, s.strike, s.sl])).toEqual([['BANKNIFTY', 52000, 250]]);
     });
 
-    it('final review item 9: a repost of one of the SAME channel\'s calls from the last 2 sessions is RECAP, not a new signal', async () => {
+    it('final review item 9: a repost of one of the SAME channel\'s calls from the current session, with an outcome phrase, is RECAP, not a new signal', async () => {
       // Controller ruling: outcome phrase AND a match from the CURRENT session ⇒ RECAP.
       const m = make();
       await m.svc.handle(m.msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));

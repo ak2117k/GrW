@@ -164,6 +164,10 @@ export class SignalIntakeRepository {
       classVersion: CLASS_VERSION,
     };
     await this.prisma.signalMessageClass.upsert({ where: { messageId: row.messageId }, create: { messageId: row.messageId, ...data }, update: data });
+    // telegram_messages.parseStatus mirrors the class (it stayed 'pending' forever before 2026-11-28). Best effort.
+    await this.prisma.telegramMessage
+      .updateMany({ where: { id: row.messageId, NOT: { parseStatus: row.status } }, data: { parseStatus: row.status } })
+      .catch(() => undefined);
   }
 
   /** A previous validated LLM reply for exactly this text (the parse cache). */

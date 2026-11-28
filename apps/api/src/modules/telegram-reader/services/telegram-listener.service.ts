@@ -331,6 +331,10 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
           if ((err as { code?: string }).code === 'P2002') return false; // raced a duplicate delivery
           throw err;
         }
+        // The channel's high-water mark (stayed 0 for most channels before 2026-11-28). Best effort: never blocks the emit.
+        await this.prisma.telegramChannel
+          .updateMany({ where: { id: ch.id, lastSeenMsgId: { lt: m.tgMessageId } }, data: { lastSeenMsgId: m.tgMessageId } })
+          .catch((err: unknown) => this.logger.warn(`telegram-reader: lastSeenMsgId update failed for "${ch.title}": ${describe(err)}`));
       }
       this.lastMessageAt = new Date();
       this.counts.set(ch.title, (this.counts.get(ch.title) ?? 0) + 1);

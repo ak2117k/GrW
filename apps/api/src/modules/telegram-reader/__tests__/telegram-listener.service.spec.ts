@@ -26,6 +26,7 @@ function build(opts: { flag?: string; session?: boolean; env?: Record<string, st
   const prisma = {
     telegramChannel: {
       findMany: jest.fn(async () => [{ id: 'ch1', tgChannelId: '-1001', title: 'Alpha' }]),
+      updateMany: jest.fn(async () => ({ count: 1 })),
     },
     telegramMessage: {
       findUnique: jest.fn(async ({ where }: any) => {
@@ -92,6 +93,20 @@ describe('TelegramListenerService', () => {
       hasMedia: false,
       edited: false,
     });
+  });
+
+  it('every stored message moves the channel lastSeenMsgId forward (audit 2026-11-27: 0 for 6 of 8 channels)', async () => {
+    const { svc, prisma } = build();
+    await svc.start();
+    await svc.handle(msg({ tgMessageId: 42, raw: { id: 42 } }));
+    expect(prisma.telegramChannel.updateMany).toHaveBeenCalledWith({ where: { id: 'ch1', lastSeenMsgId: { lt: 42 } }, data: { lastSeenMsgId: 42 } });
+    // A failed bookkeeping write never stops the message being emitted.
+    prisma.telegramChannel.updateMany.mockRejectedValueOnce(new Error('db down'));
+    await expect(svc.handle(msg({ tgMessageId: 43, raw: { id: 43 } }))).resolves.toBe(true);
+    // A duplicate delivery stores nothing and moves nothing.
+    prisma.telegramChannel.updateMany.mockClear();
+    await svc.handle(msg({ tgMessageId: 42, raw: { id: 42 } }));
+    expect(prisma.telegramChannel.updateMany).not.toHaveBeenCalled();
   });
 
   it('dedups duplicate deliveries and re-emits only edits that change the text', async () => {

@@ -24,6 +24,12 @@ export interface InferredExpiry {
    * matches and the call stays unresolved instead of trading a different expiry.
    */
   mismatch?: string;
+  /**
+   * A named weekday that is not listed, taken as the one listed expiry of the same month 1–2 calendar days earlier
+   * (an exchange holiday moves an expiry earlier; ruling 2026-11-28). Two such candidates, a wider gap, another month
+   * or a named weekend day stay a mismatch.
+   */
+  expiryShifted?: { named: string; listed: string };
 }
 
 const IST_OFFSET_MS = 330 * 60_000;
@@ -69,6 +75,8 @@ export function inferExpiry(
       const want = ymdOf(year, hint.month, hint.day);
       if (list.length === 0) return { expiry: want, source: 'message' };
       if (list.includes(want)) return { expiry: want, source: 'message' };
+      const shifted = holidayShift(want, list, from);
+      if (shifted) return { expiry: shifted, source: 'message', expiryShifted: { named: want, listed: shifted } };
       const why = want < from ? 'has already expired' : 'is not listed';
       return { expiry: want, source: 'message', mismatch: `named expiry ${want} ${why} for ${underlying} ${kind} (live: ${shown()})` };
     }
@@ -130,6 +138,22 @@ function relativeExpiry(
     return { expiry: m, source: m ? 'rule' : 'none' };
   }
   return { expiry: near, source: 'rule' };
+}
+
+/**
+ * The one listed (and still usable) expiry 1–2 calendar days before a named weekday, in the same month; else null.
+ * A Saturday / Sunday is never a nominal expiry, so it never shifts ("26 DEC" 2026 is a Saturday).
+ */
+function holidayShift(want: string, list: readonly string[], from: string): string | null {
+  const dow = new Date(`${want}T00:00:00Z`).getUTCDay();
+  if (dow === 0 || dow === 6) return null;
+  const back = (n: number) => {
+    const d = new Date(`${want}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() - n);
+    return d.toISOString().slice(0, 10);
+  };
+  const hits = [back(1), back(2)].filter((e) => e.slice(0, 7) === want.slice(0, 7) && e >= from && list.includes(e));
+  return hits.length === 1 ? hits[0] : null;
 }
 
 function dayAfter(ymd: string): string {

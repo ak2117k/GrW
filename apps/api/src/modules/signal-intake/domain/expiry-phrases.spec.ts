@@ -89,10 +89,39 @@ describe('expiry inference from a named expiry', () => {
     expect(inferExpiry('NIFTY', 'PE', { day: 29, month: 12, year: null }, at, niftyListed)).toEqual({ expiry: '2026-12-29', source: 'message' });
   });
   it('a named day that is not listed is a mismatch, never the next listed one', () => {
-    const r = inferExpiry('NIFTY', 'PE', { day: 30, month: 12, year: null }, at, niftyListed);
-    expect(r.expiry).toBe('2026-12-30');
+    // Fri 04-Dec: 01-Dec is 3 days earlier, 08-Dec is later.
+    const r = inferExpiry('NIFTY', 'PE', { day: 4, month: 12, year: null }, at, niftyListed);
+    expect(r.expiry).toBe('2026-12-04');
     expect(r.source).toBe('message');
-    expect(r.mismatch).toMatch(/2026-12-30.*not listed/);
+    expect(r.mismatch).toMatch(/2026-12-04.*not listed/);
+    expect(r.expiryShifted).toBeUndefined();
+  });
+  it('holiday shift: a named Tuesday with the one listed expiry on the Monday before is that expiry', () => {
+    const listed = ['2026-12-01', '2026-12-08', '2026-12-14', '2026-12-22'];
+    expect(inferExpiry('NIFTY', 'PE', { day: 15, month: 12, year: null }, at, listed)).toEqual({
+      expiry: '2026-12-14', source: 'message', expiryShifted: { named: '2026-12-15', listed: '2026-12-14' },
+    });
+  });
+  it('holiday shift: a 3-day gap is rejected', () => {
+    const r = inferExpiry('NIFTY', 'PE', { day: 18, month: 12, year: null }, at, ['2026-12-15', '2026-12-22']);
+    expect(r).toMatchObject({ expiry: '2026-12-18', mismatch: expect.stringMatching(/not listed/) });
+    expect(r.expiryShifted).toBeUndefined();
+  });
+  it('holiday shift: two candidates are rejected', () => {
+    const r = inferExpiry('NIFTY', 'PE', { day: 17, month: 12, year: null }, at, ['2026-12-15', '2026-12-16', '2026-12-22']);
+    expect(r).toMatchObject({ expiry: '2026-12-17', mismatch: expect.stringMatching(/not listed/) });
+    expect(r.expiryShifted).toBeUndefined();
+  });
+  it('holiday shift: never across a month', () => {
+    const r = inferExpiry('NIFTY', 'PE', { day: 1, month: 1, year: 2027 }, at, ['2026-12-31', '2027-01-05']);
+    expect(r.mismatch).toMatch(/2027-01-01/);
+  });
+  it('SENSEX "26 DEC" (a Saturday) stays unresolved although 24-Dec is listed (real master 2026-11-28)', () => {
+    const sensex = ['2026-11-26', '2026-12-03', '2026-12-10', '2026-12-17', '2026-12-24', '2026-12-31'];
+    const nov26 = new Date('2026-11-26T03:58:32Z');
+    const r = inferExpiry('SENSEX', 'PE', { day: 26, month: 12, year: null }, nov26, sensex);
+    expect(r).toMatchObject({ expiry: '2026-12-26', mismatch: expect.stringMatching(/not listed/) });
+    expect(r.expiryShifted).toBeUndefined();
   });
   it('a named day already expired (gone from the master) is a mismatch', () => {
     const r = inferExpiry('NIFTY', 'PE', { day: 24, month: 11, year: null }, at, niftyListed);

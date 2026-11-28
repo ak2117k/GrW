@@ -1307,10 +1307,19 @@ describe('named expiry (audit 2026-11-28, Mr P "December 29" traded on the weekl
 
   it('a named expiry that is not listed stays unresolved (no token) and records why — never the nearest weekly', async () => {
     const { svc, mem, msg } = make({ master });
-    await svc.handle(msg('m1', 'A', 'BUY NIFTY 24000 CE 25 Nov ABOVE 120 SL 100 TGT 140'));
-    expect(mem.signals[0]).toMatchObject({ expiry: '2026-11-25', expirySource: 'message', token: null, tradingsymbol: null });
+    // Fri 27-Nov: nothing listed on 25/26-Nov (24-Nov is 3 days earlier) — no holiday shift either.
+    await svc.handle(msg('m1', 'A', 'BUY NIFTY 24000 CE 27 Nov ABOVE 120 SL 100 TGT 140'));
+    expect(mem.signals[0]).toMatchObject({ expiry: '2026-11-27', expirySource: 'message', token: null, tradingsymbol: null });
     expect(mem.signals[0].tags).toContain('EXPIRY_UNLISTED');
-    expect(mem.classes.get('m1')?.reason).toMatch(/named expiry 2026-11-25 is not listed/);
+    expect(mem.classes.get('m1')?.reason).toMatch(/named expiry 2026-11-27 is not listed/);
+  });
+
+  it('a named day 1 day after the one listed expiry (holiday shift) takes it and records expiryShifted', async () => {
+    const { svc, mem, msg } = make({ master });
+    await svc.handle(msg('m1', 'A', 'BUY NIFTY 24000 CE 25 Nov ABOVE 120 SL 100 TGT 140'));
+    expect(mem.signals[0]).toMatchObject({ expiry: '2026-11-24', expirySource: 'message', token: '333', tradingsymbol: 'NIFTY24NOV2624000CE' });
+    expect(mem.signals[0].tags).toContain('EXPIRY_SHIFTED');
+    expect(mem.classes.get('m1')?.reason).toBe('expiryShifted {"named":"2026-11-25","listed":"2026-11-24"}');
   });
 
   it('no expiry named → nearest listed, unchanged', async () => {

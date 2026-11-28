@@ -796,6 +796,7 @@ export class SignalIntakeService {
     const ex = inferExpiry(p.underlying, p.instrumentKind, p.expiryHint, postedAt, listed && listed.length ? listed : null);
     const contract = rows ? findContract(rows, { underlying: p.underlying, instrumentKind: p.instrumentKind, strike: p.strike, expiry: ex.expiry }, seg) : null;
     if (ex.mismatch) this.logger.warn(`[signal-intake] ${p.underlying} ${p.strike ?? ''} ${p.instrumentKind}: ${ex.mismatch} — left unresolved`);
+    if (ex.expiryShifted) this.logger.log(`[signal-intake] ${p.underlying} ${p.strike ?? ''} ${p.instrumentKind}: named expiry ${ex.expiryShifted.named} not listed — holiday-shifted to ${ex.expiryShifted.listed}`);
     return { ...ex, contract };
   }
 
@@ -888,7 +889,7 @@ export class SignalIntakeService {
       targets: p.targets,
       qty: p.qty,
       horizon: p.horizon,
-      tags: ex.mismatch ? [...p.tags, 'EXPIRY_UNLISTED'] : p.tags,
+      tags: ex.mismatch ? [...p.tags, 'EXPIRY_UNLISTED'] : ex.expiryShifted ? [...p.tags, 'EXPIRY_SHIFTED'] : p.tags,
       confidence: Math.round(Math.max(0, confidence) * 100) / 100,
       rawText: String(evt.text ?? ''),
       dedupKey: key,
@@ -912,7 +913,8 @@ export class SignalIntakeService {
     }
     await this.repo.flagConflict(plan.conflictClusterIds.filter((id) => id !== clusterId));
     await this.repo.setSignalCluster(signalId, clusterId);
-    const why = [reMatched, ex.mismatch ? `expiry unresolved: ${ex.mismatch}` : null].filter(Boolean).join('; ');
+    const shiftedWhy = ex.expiryShifted ? `expiryShifted ${JSON.stringify(ex.expiryShifted)}` : null;
+    const why = [reMatched, ex.mismatch ? `expiry unresolved: ${ex.mismatch}` : null, shiftedWhy].filter(Boolean).join('; ');
     await this.repo.saveClass({ ...base, status: 'SIGNAL', parser, signalId, llmResult, ...(why ? { reason: why.slice(0, 500) } : {}) });
 
     if (this.now().getTime() - postedAt.getTime() > this.config.readyMaxAgeMs) return; // history: stored, not traded

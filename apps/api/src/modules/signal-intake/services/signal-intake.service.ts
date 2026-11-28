@@ -10,6 +10,7 @@ import { CALL_AT_TAG, clockOrNull, readImageDescription, validateInfoItems, vali
 import { prefilter, type PrefilterResult } from '../domain/prefilter';
 import { hasNewCall, resultPostReason } from '../domain/result-post';
 import { parseSignal } from '../domain/rule-parser';
+import { normalise } from '../domain/text';
 import { rematchStrike } from '../domain/strike-sanity';
 import {
   directionOf,
@@ -727,14 +728,10 @@ export class SignalIntakeService {
 
   /**
    * The same channel's earlier signal this call re-posts: same underlying, strike, instrument kind and side, received
-   * in the last 2 sessions (today's IST day and the previous weekday's), before this post. Null when none.
+   * in the CURRENT session (since IST midnight of the post's day), before this post. Null when none.
    */
   private async channelRepostOf(channelId: string, p: ParsedSignal, postedAt: Date): Promise<{ id: string; receivedAt: Date } | null> {
-    const today = istYmd(postedAt);
-    let prev = new Date(`${today}T00:00:00Z`);
-    do prev = new Date(prev.getTime() - 86_400_000);
-    while (prev.getUTCDay() === 0 || prev.getUTCDay() === 6);
-    const since = new Date(`${prev.toISOString().slice(0, 10)}T00:00:00+05:30`);
+    const since = new Date(`${istYmd(postedAt)}T00:00:00+05:30`);
     const rows = await this.repo.latestInChannel(channelId, since, 50);
     const hit = rows.find(
       (s) =>
@@ -766,13 +763,16 @@ export class SignalIntakeService {
       await this.repo.saveClass({ ...base, status: 'DUPLICATE', parser, signalId: dup, llmResult, reason: reMatched ? `same idea re-posted in this channel; ${reMatched}` : 'same idea re-posted in this channel' });
       return;
     }
-    // REPOST OF THE CHANNEL'S OWN CALL (final review 2026-11-28, item 9): a call matching one of the SAME channel's
-    // signals from the last 2 sessions (same underlying, strike, option type, side) is that call re-posted — a recap
-    // ("TARGET ACHIEVED 🎯 BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140"), never a new signal. RECAP is inert.
-    const repost = await this.channelRepostOf(evt.channelId, p, postedAt);
-    if (repost) {
-      const why = `repost of this channel's call ${repost.id} (${istYmd(repost.receivedAt)}: same underlying, strike, type and side)`;
-      await this.repo.saveClass({ ...base, status: 'RECAP', parser, llmResult, reason: why });
+    // REPOST OF THE CHANNEL'S OWN CALL WITH ITS OUTCOME (final review 2026-11-28, item 9, narrowed by the controller):
+    // RECAP only when BOTH the post carries an outcome phrase (the result-post matcher, anywhere in the text) AND it
+    // matches one of the SAME channel's signals from the CURRENT IST session (same underlying, strike, option type,
+    // side) — "TARGET ACHIEVED 🎯 BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140". A matching call without an outcome,
+    // or one matching only an earlier session's call (a deliberate re-issue), stays a SIGNAL. RECAP is inert.
+    const outcome = resultPostReason(normalise(String(evt.text ?? ''), await this.vocab.get()));
+    const repost = outcome ? await this.channelRepostOf(evt.channelId, p, postedAt) : null;
+    if (outcome && repost) {
+      const why = `${outcome}; repost of this channel's call ${repost.id} (same session: same underlying, strike, type and side)`;
+      await this.repo.saveClass({ ...base, status: 'RECAP', parser, llmResult, reason: why.slice(0, 500) });
       return;
     }
     const ex = await this.expiryAndContract(p, postedAt);

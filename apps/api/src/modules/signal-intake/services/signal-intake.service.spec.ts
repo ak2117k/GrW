@@ -959,32 +959,51 @@ describe('SignalIntakeService — supreme fixes W3 (audit 2026-11-27)', () => {
     });
 
     it('final review item 9: a repost of one of the SAME channel\'s calls from the last 2 sessions is RECAP, not a new signal', async () => {
+      // Controller ruling: outcome phrase AND a match from the CURRENT session ⇒ RECAP.
       const m = make();
       await m.svc.handle(m.msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
       expect(m.mem.signals).toHaveLength(1);
-      // Monday (Fri → Mon: the previous session), the call reposted with its outcome.
-      const MON = 3 * 24 * 60;
-      m.setNow(new Date(T0.getTime() + (MON + 1) * 60_000));
-      await m.svc.handle(m.msg('m2', 'A', 'TARGET ACHIEVED 🎯 BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', MON));
+      // Same session, 2 h later (outside the 30-min cluster window, so not the DUPLICATE path): outcome-first repost.
+      m.setNow(new Date(T0.getTime() + 121 * 60_000));
+      await m.svc.handle(m.msg('m2', 'A', 'TARGET ACHIEVED 🎯 BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', 120));
       expect(m.mem.signals).toHaveLength(1);
-      expect(m.mem.classes.get('m2')).toMatchObject({ status: 'RECAP', reason: expect.stringMatching(/repost of this channel's call sig1/) });
+      expect(m.mem.classes.get('m2')).toMatchObject({ status: 'RECAP', reason: expect.stringMatching(/^result: .*repost of this channel's call sig1/) });
       // A genuinely new strike is a new signal.
-      await m.svc.handle(m.msg('m3', 'A', 'TARGET ACHIEVED 🎯 BUY NIFTY 24100 CE ABOVE 120 SL 100 TGT 140', MON));
+      await m.svc.handle(m.msg('m3', 'A', 'TARGET ACHIEVED 🎯 BUY NIFTY 24100 CE ABOVE 120 SL 100 TGT 140', 120));
       expect(m.mem.classes.get('m3')).toMatchObject({ status: 'SIGNAL' });
-      // The same call in ANOTHER channel is its own signal.
-      await m.svc.handle(m.msg('m4', 'B', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', MON));
+      // The same call with its outcome in ANOTHER channel is its own signal.
+      await m.svc.handle(m.msg('m4', 'B', 'TARGET ACHIEVED 🎯 BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', 120));
       expect(m.mem.classes.get('m4')).toMatchObject({ status: 'SIGNAL' });
       expect(m.mem.signals.map((s) => [s.channelId, s.strike])).toEqual([['A', 24000], ['A', 24100], ['B', 24000]]);
     });
 
-    it('final review item 9: a call older than the last 2 sessions does not make a repost RECAP', async () => {
+    it('final review item 9 (narrowed): the same call re-issued NEXT session, with or without an outcome, stays a SIGNAL', async () => {
       const m = make();
       await m.svc.handle(m.msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
-      // Fri → Tue: two sessions later (Mon, Tue): Friday's call is out of the window.
-      const TUE = 4 * 24 * 60;
-      m.setNow(new Date(T0.getTime() + (TUE + 1) * 60_000));
-      await m.svc.handle(m.msg('m2', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', TUE));
+      // Fri → Mon: a deliberate re-issue.
+      const MON = 3 * 24 * 60;
+      m.setNow(new Date(T0.getTime() + (MON + 1) * 60_000));
+      await m.svc.handle(m.msg('m2', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', MON));
       expect(m.mem.classes.get('m2')).toMatchObject({ status: 'SIGNAL' });
+      // A match only from an earlier session does not make an outcome post RECAP either (m2 is today's now, so use
+      // a fresh channel with Friday's call only).
+      const n = make();
+      await n.svc.handle(n.msg('f1', 'C', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+      n.setNow(new Date(T0.getTime() + (MON + 1) * 60_000));
+      await n.svc.handle(n.msg('f2', 'C', 'TARGET ACHIEVED 🎯 BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', MON));
+      expect(n.mem.classes.get('f2')).toMatchObject({ status: 'SIGNAL' });
+    });
+
+    it('final review item 9 (narrowed): a same-session repeat WITHOUT an outcome keeps the existing dedup behaviour', async () => {
+      const m = make();
+      await m.svc.handle(m.msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+      // Inside the cluster window: DUPLICATE (unchanged).
+      await m.svc.handle(m.msg('m2', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', 5));
+      expect(m.mem.classes.get('m2')).toMatchObject({ status: 'DUPLICATE', signalId: 'sig1' });
+      // Outside the window, no outcome: a SIGNAL as before (never RECAP).
+      m.setNow(new Date(T0.getTime() + 121 * 60_000));
+      await m.svc.handle(m.msg('m3', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140', 120));
+      expect(m.mem.classes.get('m3')).toMatchObject({ status: 'SIGNAL' });
     });
 
     it('a pure result post that the rule parser could read as a bare entry is RECAP', async () => {

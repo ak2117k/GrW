@@ -227,6 +227,23 @@ describe('ExitOutcomeService', () => {
     expect(prisma.sentinelVerdict.findUnique).not.toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'man_t1_1' } }));
   });
 
+  it('E5 backfill: latency is never negative — a whole-second broker fill time counts from the order send (prod CRUDEOIL 2026-11-27: −226 ms)', async () => {
+    const { svc, execRepo } = make();
+    // Angel's exchange time has 1 s resolution: 10:52:02 for a fill whose order left at 10:52:02.492.
+    const row = {
+      ...EXEC, verdictId: 'trg_cmwyuujdq06o6ob013sf8pg3r', createdAt: new Date('2026-11-27T05:22:02.226Z'),
+      orderSentAt: new Date('2026-11-27T05:22:02.492Z'), fillAt: new Date('2026-11-27T05:22:02.000Z'), orderLtp: 215.2, fillPrice: 213.3,
+    };
+    execRepo.qualityBackfillCandidates.mockResolvedValueOnce([row]);
+    await svc.runOnce(NOW);
+    expect(execRepo.update).toHaveBeenCalledWith('e1', expect.objectContaining({ decisionAt: row.createdAt, latencyMs: 266 }));
+    // No send time either: clamped at 0, never below.
+    execRepo.update.mockClear();
+    execRepo.qualityBackfillCandidates.mockResolvedValueOnce([{ ...row, orderSentAt: null }]);
+    await svc.runOnce(NOW);
+    expect(execRepo.update).toHaveBeenCalledWith('e1', expect.objectContaining({ latencyMs: 0 }));
+  });
+
   it('one scorecard line per user per IST day after 00:05 IST', async () => {
     const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     const { svc, outRepo } = make();

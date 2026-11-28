@@ -52,6 +52,17 @@ const toBar = (c: Pick<HubCandle, 'ts' | 'open' | 'high' | 'low' | 'close'>): Mi
 const posNum = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) && x > 0 ? x : null);
 
 /**
+ * E5 decision → fill latency, never negative. Angel's fill time (exchorderupdatetime / exchtime) has 1-second
+ * resolution, so a fill in the same second as the decision reads EARLIER than it (prod 2026-11-27 CRUDEOIL16DEC268350CE:
+ * decision 10:52:02.226, order sent .492, fill "10:52:02" → −226 ms). A fill cannot precede its order: it is counted
+ * from no earlier than the order send (else the decision), so that row is 266 ms.
+ */
+export function fillLatencyMs(decisionAt: Date, orderSentAt: Date | null, fillAt: Date): number {
+  const floor = orderSentAt && orderSentAt.getTime() > decisionAt.getTime() ? orderSentAt.getTime() : decisionAt.getTime();
+  return Math.max(fillAt.getTime(), floor) - decisionAt.getTime();
+}
+
+/**
  * Exit discipline §8 / E4 / E5 / E7 (plan Task 15): what the price did after each
  * AI exit decision, executed or skipped. One pass, every 60 s from the poller,
  * single-flight, never throws, and never touches the broker: bars come from
@@ -169,7 +180,7 @@ export class ExitOutcomeService {
       await this.execRepo.update(r.id, {
         decisionLtp, decisionAt,
         slippage: r.fillPrice - decisionLtp,
-        latencyMs: r.fillAt ? r.fillAt.getTime() - decisionAt.getTime() : null,
+        latencyMs: r.fillAt ? fillLatencyMs(decisionAt, r.orderSentAt ?? null, r.fillAt) : null,
       });
     }
   }

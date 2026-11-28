@@ -914,6 +914,17 @@ describe('SignalIntakeService — supreme fixes W3 (audit 2026-11-27)', () => {
       expect(m.mem.signals.map((s) => [s.underlying, s.strike])).toEqual([['NIFTY', 24000], ['BANKNIFTY', 52000]]);
     });
 
+    it('a REPOSTED call with its outcome is RECAP — the old call own SL / TGT is not a new call (review 2026-11-28)', async () => {
+      const m = make();
+      await m.svc.handle(m.msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140 🎯 done'));
+      await m.svc.handle(m.msg('m2', 'B', 'target 1 done, now buy NIFTY 24000 CE above 120', 1)); // no stop / target after the outcome
+      await m.svc.handle(m.msg('m3', 'C', 'T1 done ✅ BUY BANKNIFTY 52000 PE ABOVE 300 SL 250', 2));
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'RECAP' });
+      expect(m.mem.classes.get('m2')).toMatchObject({ status: 'RECAP' });
+      expect(m.mem.classes.get('m3')).toMatchObject({ status: 'SIGNAL' });
+      expect(m.mem.signals.map((s) => [s.underlying, s.strike, s.sl])).toEqual([['BANKNIFTY', 52000, 250]]);
+    });
+
     it('a pure result post that the rule parser could read as a bare entry is RECAP', async () => {
       const m = make();
       await m.svc.handle(m.msg('m1', 'A', 'Silver buy 40 to 44++ gains done'));
@@ -945,8 +956,8 @@ describe('SignalIntakeService — supreme fixes W3 (audit 2026-11-27)', () => {
       expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', reason: expect.stringContaining('reMatched') });
     });
 
-    /** ASSUMED 2026-11-27 closes (NIFTY ~25 690 per the controller; the others rounded late-Nov levels). */
-    const NOV27: Array<[string, number]> = [['NIFTY', 25_690], ['BANKNIFTY', 58_900], ['SENSEX', 84_500], ['FINNIFTY', 27_300], ['MIDCPNIFTY', 13_400], ['BANKEX', 65_800]];
+    /** The REAL 2026-11-27 closes (controller, candles_1d). BANKEX has no data. */
+    const NOV27: Array<[string, number]> = [['NIFTY', 25_607.2], ['BANKNIFTY', 63_040.9], ['FINNIFTY', 28_337.15], ['SENSEX', 83_339.26]];
 
     it('prod 2026-11-27 SHRI RAM "SENSEX 25850 PE": NIFTY and FINNIFTY fit → NIFTY (closest); reMatched {from, to, candidates}', async () => {
       const m = make();
@@ -955,14 +966,27 @@ describe('SignalIntakeService — supreme fixes W3 (audit 2026-11-27)', () => {
       expect(m.mem.signals[0]).toMatchObject({ underlying: 'NIFTY', strike: 25_850, tags: expect.arrayContaining(['REMATCHED_FROM:SENSEX']) });
       const reason = String(m.mem.classes.get('m1')?.reason);
       expect(JSON.parse(reason.replace(/^reMatched /, ''))).toEqual({ from: 'SENSEX', to: 'NIFTY', candidates: ['NIFTY', 'FINNIFTY'] });
+      // Machine-readable too: llm_result.reMatched.
+      expect(m.mem.classes.get('m1')?.llmResult).toEqual({ reMatched: { from: 'SENSEX', to: 'NIFTY', candidates: ['NIFTY', 'FINNIFTY'] } });
     });
 
-    it('prod 2026-11-27 Stock Gainers "SENSEX 62500 PE": BANKNIFTY and BANKEX fit → BANKEX (5.0% vs 6.1%)', async () => {
+    it('prod 2026-11-27 Stock Gainers "SENSEX 62500 PE" → BANKNIFTY (0.9% from 63 040.9)', async () => {
       const m = make();
       setRefs(m, NOV27);
       await m.svc.handle(m.msg('m1', 'A', 'BUY SENSEX 62500 PE ABOVE 300 SL 250 TGT 400'));
-      expect(m.mem.signals[0]).toMatchObject({ underlying: 'BANKEX', strike: 62_500 });
-      expect(m.mem.classes.get('m1')?.reason).toBe('reMatched {"from":"SENSEX","to":"BANKEX","candidates":["BANKEX","BANKNIFTY"]}');
+      expect(m.mem.signals[0]).toMatchObject({ underlying: 'BANKNIFTY', strike: 62_500 });
+      expect(m.mem.classes.get('m1')?.reason).toBe('reMatched {"from":"SENSEX","to":"BANKNIFTY","candidates":["BANKNIFTY"]}');
+    });
+
+    it('an edit of a re-matched call keeps the re-matched contract (review 2026-11-28)', async () => {
+      const master = [{ exch_seg: 'NFO', name: 'NIFTY', instrumenttype: 'OPTIDX', symbol: 'NIFTY27OCT2625850PE', expiry: '27OCT2026', strike: '2585000.000000', token: '777' }];
+      const m = make({ master });
+      setRefs(m, NOV27);
+      await m.svc.handle(m.msg('m1', 'A', 'BUY SENSEX 25850 PE ABOVE 120 SL 100 TGT 140'));
+      expect(m.mem.signals[0]).toMatchObject({ underlying: 'NIFTY', token: '777' });
+      await m.svc.handle({ ...m.msg('m1', 'A', 'BUY SENSEX 25850 PE ABOVE 125 SL 100 TGT 140'), edited: true });
+      expect(m.mem.signals).toHaveLength(1);
+      expect(m.mem.signals[0]).toMatchObject({ underlying: 'NIFTY', entryLow: 125, token: '777', tradingsymbol: 'NIFTY27OCT2625850PE', exchange: 'NFO' });
     });
 
     it('a strike near its index is untouched; no reference close → no check', async () => {

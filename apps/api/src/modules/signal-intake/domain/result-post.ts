@@ -18,19 +18,31 @@ const CALL_VERBS = /\b(BUY|SELL|LONG|SHORT|BTST|STBT|ACCUMULATE)\b/;
 /** A stop or a target WITH a price ("SL 100", "TGT 140", "TGT2 180") — "TGT DONE" / "TGT HIT" are not. */
 const RISK_LEVEL = /\b(SL|TGT\d?)\s+\d+(\.\d+)?\b/;
 
+/** The earliest outcome in the text: which pattern, and where it ends. */
+function firstOutcome(text: string): { what: string; end: number } | null {
+  let best: { what: string; index: number; end: number } | null = null;
+  for (const [what, re] of PATTERNS) {
+    const m = re.exec(text);
+    if (m && (!best || m.index < best.index)) best = { what, index: m.index, end: m.index + m[0].length };
+  }
+  return best;
+}
+
 /**
- * The post also gives a NEW call: a call verb with a stop or a target price (ruling 2026-11-28: a result + a new
- * call with entry and stop, or entry and target, stays a SIGNAL for the new call; only a pure result is RECAP).
+ * The post also gives a NEW call AFTER its outcome: a call verb and a stop / target price, both after the first
+ * outcome match (ruling 2026-11-28; review 2026-11-28: a reposted call with its outcome — "BUY … SL 100 TGT 140 🎯
+ * done" — carries the OLD call's own SL / TGT before the outcome, which is not a new call). No outcome → false.
  */
 export function hasNewCall(norm: Pick<Normalised, 'text'>): boolean {
   const text = norm.text ?? '';
-  return CALL_VERBS.test(text) && RISK_LEVEL.test(text);
+  const hit = firstOutcome(text);
+  if (!hit) return false;
+  const after = text.slice(hit.end);
+  return CALL_VERBS.test(after) && RISK_LEVEL.test(after);
 }
 
 /** `result: <what>` when the post reports a completed outcome, else null. */
 export function resultPostReason(norm: Pick<Normalised, 'text'>): string | null {
-  const text = norm.text ?? '';
-  if (!text) return null;
-  for (const [what, re] of PATTERNS) if (re.test(text)) return `result: ${what} (a completed outcome, never a new signal)`;
-  return null;
+  const hit = firstOutcome(norm.text ?? '');
+  return hit ? `result: ${hit.what} (a completed outcome, never a new signal)` : null;
 }

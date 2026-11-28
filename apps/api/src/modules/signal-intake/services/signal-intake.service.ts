@@ -67,6 +67,15 @@ const LLM_MAX_ATTEMPTS = 3;
 const RECLASS_MAX_ROWS = 20_000;
 const RECLASS_PAGE = 200;
 
+/** A strike-sanity re-match, kept machine-readable in signal_message_classes.llm_result.reMatched. */
+type ReMatched = { from: string; to: string; candidates: string[] };
+/** llm_result with `reMatched` added: merged into an object reply, or `{ reMatched }` alone when there is none. */
+function withReMatched(llmResult: unknown, reMatched: ReMatched | null): unknown {
+  if (!reMatched) return llmResult;
+  if (llmResult && typeof llmResult === 'object' && !Array.isArray(llmResult)) return { ...(llmResult as Record<string, unknown>), reMatched };
+  return { reMatched };
+}
+
 export const textHash = (text: string) => createHash('sha256').update(String(text ?? '').trim()).digest('hex');
 
 /**
@@ -186,9 +195,9 @@ export class SignalIntakeService {
     const parsed = pf.pass ? parseSignal(text, vocab, pf.norm) : null;
 
     // "gains done" / "target hit" / "x to y++ done": a completed outcome is never a new signal (audit 2026-11-27).
-    // A result that ALSO gives a new call (entry + stop, or entry + target) is that call (ruling 2026-11-28).
-    const newCall = hasNewCall(pf.norm) || (parsed !== null && (parsed.sl !== null || parsed.targets.length > 0));
-    const result = newCall ? null : resultPostReason(pf.norm);
+    // A result that ALSO gives a new call AFTER its outcome (verb + stop / target price) is that call (ruling and
+    // review 2026-11-28); a reposted call with its outcome carries only the old call's levels: still a result.
+    const result = hasNewCall(pf.norm) ? null : resultPostReason(pf.norm);
     if (prior) {
       await this.reclassifyEdit(evt, prior, result ? null : parsed, base);
       return null;
@@ -646,13 +655,20 @@ export class SignalIntakeService {
         await this.repo.saveClass({ ...base, status: 'SIGNAL', parser: 'rule', signalId: prior.signalId, reason: 'edited: new text unparsed, levels kept' });
         return;
       }
-      const ex = await this.expiryAndContract(parsed, base.postedAt);
+      // The stored call may have been re-matched (SENSEX 25850 PE → NIFTY): the edit resolves the same way.
+      const sane = await this.strikeSane(parsed, base.postedAt);
+      const p = sane.p;
+      const ex = await this.expiryAndContract(p, base.postedAt);
       await this.repo.updateSignal(prior.signalId, {
-        entryLow: parsed.entryLow, entryHigh: parsed.entryHigh, entryType: parsed.entryType, sl: parsed.sl, targets: parsed.targets,
-        qty: parsed.qty, strike: parsed.strike, expiry: ex.expiry, expirySource: ex.source, exchange: ex.contract?.exchange ?? null,
-        token: ex.contract?.token ?? null, tradingsymbol: ex.contract?.tradingsymbol ?? null, rawText: evt.text, confidence: parsed.confidence,
+        entryLow: p.entryLow, entryHigh: p.entryHigh, entryType: p.entryType, sl: p.sl, targets: p.targets,
+        qty: p.qty, strike: p.strike, expiry: ex.expiry, expirySource: ex.source, exchange: ex.contract?.exchange ?? null,
+        token: ex.contract?.token ?? null, tradingsymbol: ex.contract?.tradingsymbol ?? null, rawText: evt.text, confidence: p.confidence,
       });
-      await this.repo.saveClass({ ...base, status: 'SIGNAL', parser: 'rule', signalId: prior.signalId, reason: 'edited' });
+      await this.repo.saveClass({
+        ...base, status: 'SIGNAL', parser: 'rule', signalId: prior.signalId,
+        reason: sane.reMatched ? `edited; reMatched ${JSON.stringify(sane.reMatched)}` : 'edited',
+        ...(sane.reMatched ? { llmResult: withReMatched(null, sane.reMatched) } : {}),
+      });
       return;
     }
     if (prior.status === 'NOISE' && parsed) {
@@ -679,6 +695,19 @@ export class SignalIntakeService {
     return { ...ex, contract };
   }
 
+  /**
+   * Strike sanity (audit 2026-11-27): "SENSEX 25850 PE" — a strike > 15% from its index — goes to the index it fits
+   * (rematchStrike). The new call and the edit of a stored call both run it, so an edit keeps the re-matched contract.
+   */
+  private async strikeSane(p: ParsedSignal, postedAt: Date): Promise<{ p: ParsedSignal; reMatched: ReMatched | null }> {
+    const check = rematchStrike(p, await this.spots(postedAt));
+    if (check.action !== 'rematch') return { p, reMatched: null };
+    return {
+      p: { ...p, underlying: check.underlying, tags: [...p.tags, `REMATCHED_FROM:${check.from}`] },
+      reMatched: { from: check.from, to: check.underlying, candidates: check.candidates },
+    };
+  }
+
   private async createFromParsed(
     evt: TelegramMessageEvent,
     postedAt: Date,
@@ -687,13 +716,10 @@ export class SignalIntakeService {
     base: Omit<ClassRow, 'status'>,
     llmResult: unknown,
   ): Promise<void> {
-    // Strike sanity (audit 2026-11-27): "SENSEX 25850 PE" — a strike > 15% from its index — goes to the one index it fits.
-    const check = rematchStrike(p, await this.spots(postedAt));
-    let reMatched: string | null = null;
-    if (check.action === 'rematch') {
-      reMatched = `reMatched ${JSON.stringify({ from: check.from, to: check.underlying, candidates: check.candidates })}`;
-      p = { ...p, underlying: check.underlying, tags: [...p.tags, `REMATCHED_FROM:${check.from}`] };
-    }
+    const sane = await this.strikeSane(p, postedAt);
+    p = sane.p;
+    const reMatched = sane.reMatched ? `reMatched ${JSON.stringify(sane.reMatched)}` : null;
+    llmResult = withReMatched(llmResult, sane.reMatched);
     const W = this.config.clusterWindowMs;
     const key = dedupKey({ channelId: evt.channelId, underlying: p.underlying, instrumentKind: p.instrumentKind, strike: p.strike, side: p.side, entryLow: p.entryLow, entryHigh: p.entryHigh });
     const dup = await this.repo.duplicateOf(key, new Date(postedAt.getTime() - W));

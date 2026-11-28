@@ -661,6 +661,50 @@ describe('SignalIntakeService — image posts (vision)', () => {
         expect(doneOf(m)).toHaveLength(2);
       });
 
+      /** The store's next LLM_PENDING save for `id` throws once (a DB blip). */
+      const failPendingOnce = (m: ReturnType<typeof make>, id: string) => {
+        const save = m.mem.store.saveClass.bind(m.mem.store);
+        let armed = true;
+        m.mem.store.saveClass = (async (row: Parameters<typeof save>[0]) => {
+          if (armed && row.messageId === id && row.status === 'LLM_PENDING') {
+            armed = false;
+            throw new Error('db down');
+          }
+          return save(row);
+        }) as typeof save;
+      };
+
+      it('the LLM_PENDING save throws on the shared re-read path: the message is not stuck; a later delivery is processed', async () => {
+        let release!: (r: VisionReply) => void;
+        const { v, classify } = fakeVision(() => new Promise<VisionReply>((r) => (release = r)));
+        const m = make({ vision: v });
+        await seedOld(m);
+        await m.svc.handle(img(m, 'm1', 'A'));
+        failPendingOnce(m, 'm2');
+        await expect(m.svc.handle(img(m, 'm2', 'B', '', 1))).rejects.toThrow('db down');
+        await m.svc.handle(img(m, 'm2', 'B', '', 1));
+        await flush();
+        expect(m.mem.classes.get('m2')).toMatchObject({ status: 'LLM_PENDING' });
+        release({ kind: 'NOISE', isSignal: false, signals: [], ...DESC });
+        await drain(m);
+        await flush();
+        expect(classify).toHaveBeenCalledTimes(1);
+        expect(m.mem.classes.get('m2')).toMatchObject({ status: 'NOISE', reason: 'vision (re-read): image is noise' });
+      });
+
+      it('the LLM_PENDING save throws before a re-read is sent: the message, the spend and the sha are released; a later delivery re-reads', async () => {
+        const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [], ...DESC });
+        const m = make({ vision: v, env: { SIGNAL_VISION_DAILY_CAP: '1' } });
+        await seedOld(m);
+        failPendingOnce(m, 'm1');
+        await expect(m.svc.handle(img(m, 'm1', 'A'))).rejects.toThrow('db down');
+        expect(classify).not.toHaveBeenCalled();
+        await m.svc.handle(img(m, 'm1', 'A'));
+        await drain(m);
+        expect(classify).toHaveBeenCalledTimes(1);
+        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', reason: 'vision (re-read): image is noise', llmResult: expect.objectContaining({ description: DESC.description }) });
+      });
+
       it.each([
         ['too old for a live read', { now: new Date(T0.getTime() + 61 * 60_000) }, undefined],
         ['the daily cap is reached', {}, 120],

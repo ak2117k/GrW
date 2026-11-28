@@ -363,7 +363,12 @@ export class SignalIntakeService {
       // The same stale image is being re-read for another post: wait for that one reply (outside the serial chain).
       if (this.inflight.has(evt.messageId)) return;
       this.inflight.add(evt.messageId);
-      if (!describeOnly) await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
+      try {
+        if (!describeOnly) await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
+      } catch (e) {
+        this.inflight.delete(evt.messageId); // never stuck in flight: a later delivery is processed
+        throw e;
+      }
       void sharedRead
         .then((fresh) => this.serial(() => this.applyVision(evt, postedAt, media, fresh ? this.redescribed(cached, fresh) : cached, base, fresh ? 're-read' : 'cache', describeOnly)))
         .catch((e) => this.logger.warn(`[signal-intake] vision read of ${evt.messageId} failed: ${errText(e)}`))
@@ -413,7 +418,18 @@ export class SignalIntakeService {
     if (this.visionReadShas.size >= 20_000) this.visionReadShas.clear();
     this.visionReadShas.add(media.sha256);
     // LLM_PENDING also during a re-describe: a duplicate delivery is then deduped (a failure still applies the old reply over it).
-    if (!describeOnly) await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
+    try {
+      if (!describeOnly) await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
+    } catch (e) {
+      // Nothing was sent: release the message (a later delivery is processed), the spend and the sha.
+      this.inflight.delete(evt.messageId);
+      this.visionReadShas.delete(media.sha256);
+      if (!opts.backfill) {
+        this.visionInflight = Math.max(0, this.visionInflight - 1);
+        this.visionUsed = Math.max(0, this.visionUsed - 1);
+      }
+      throw e;
+    }
     // Outside the serial chain, like the text fallback.
     const read = (this.vision as SignalVision)
       .classify(String(evt.text ?? ''), media, { channelId: evt.channelId })

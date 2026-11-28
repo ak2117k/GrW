@@ -64,6 +64,8 @@ export class AuthorityStateService implements AuthorityStatePort, OnModuleInit {
       await this.telegram.sendMessage(
         'GrW exit authority: TRADE_AGENT_AUTHORITY=live boot check. Trade agents now decide every live exit; ' +
           'unanswered alarms come here with Exit / Hold buttons.',
+        undefined,
+        'authority-boot-check',
       );
     } catch (err) {
       return this.refuse(`Telegram test message failed (${(err as Error)?.message ?? 'error'})`);

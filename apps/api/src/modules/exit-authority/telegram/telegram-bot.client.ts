@@ -1,4 +1,5 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
+import { recordTelegramSend } from '../../../common/utils/telegram-outbox';
 
 /**
  * Telegram Bot API client for the exit authority's owner escalation (design §4.5 B, §4.5b).
@@ -87,21 +88,30 @@ export class TelegramBotClient {
     return this.token() !== '' && this.chatId() !== '';
   }
 
-  /** Sends to the configured chat; resolves the new message_id. */
-  async sendMessage(text: string, buttons?: InlineButton[][]): Promise<number> {
-    const result = (await this.call('sendMessage', {
-      chat_id: this.chatId(),
-      text: text.slice(0, MAX_TEXT),
-      disable_web_page_preview: true,
-      ...(buttons?.length ? { reply_markup: keyboard(buttons) } : {}),
-    })) as { message_id?: unknown };
-    const id = Number(result?.message_id);
-    if (!Number.isFinite(id)) throw new TelegramApiError('sendMessage', 'Telegram returned no message_id');
-    return id;
+  /**
+   * Sends to the configured chat; resolves the new message_id. `source` names the caller in the
+   * telegram_outbox audit row (every attempt is recorded, fire-and-forget).
+   */
+  async sendMessage(text: string, buttons?: InlineButton[][], source = 'exit-authority'): Promise<number> {
+    try {
+      const result = (await this.call('sendMessage', {
+        chat_id: this.chatId(),
+        text: text.slice(0, MAX_TEXT),
+        disable_web_page_preview: true,
+        ...(buttons?.length ? { reply_markup: keyboard(buttons) } : {}),
+      })) as { message_id?: unknown };
+      const id = Number(result?.message_id);
+      if (!Number.isFinite(id)) throw new TelegramApiError('sendMessage', 'Telegram returned no message_id');
+      this.record('sendMessage', source, text, true, null, id);
+      return id;
+    } catch (err) {
+      this.record('sendMessage', source, text, false, err, null);
+      throw err;
+    }
   }
 
   /** Replaces a message's text (and buttons: omitted ⇒ buttons removed). "Not modified" counts as success. */
-  async editMessage(messageId: number, text: string, buttons?: InlineButton[][]): Promise<void> {
+  async editMessage(messageId: number, text: string, buttons?: InlineButton[][], source = 'exit-authority'): Promise<void> {
     try {
       await this.call('editMessageText', {
         chat_id: this.chatId(),
@@ -111,9 +121,20 @@ export class TelegramBotClient {
         reply_markup: keyboard(buttons ?? []),
       });
     } catch (err) {
-      if (err instanceof TelegramApiError && /message is not modified/i.test(err.message)) return;
+      if (err instanceof TelegramApiError && /message is not modified/i.test(err.message)) {
+        this.record('editMessageText', source, text, true, null, messageId);
+        return;
+      }
+      this.record('editMessageText', source, text, false, err, messageId);
       throw err;
     }
+    this.record('editMessageText', source, text, true, null, messageId);
+  }
+
+  /** Outbox row for one owner-facing attempt. Never throws; the token is stripped from text and error. */
+  private record(method: string, source: string, text: string, ok: boolean, err: unknown, messageId: number | null): void {
+    const error = ok ? null : err instanceof Error ? err.message : String(err ?? 'error');
+    recordTelegramSend({ kind: 'exit-authority', source, method, chatId: this.chatId(), text, ok, error, messageId }, [this.token()]);
   }
 
   async deleteMessage(messageId: number): Promise<void> {

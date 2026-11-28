@@ -188,7 +188,7 @@ export class OwnerButtonsService implements OwnerEscalationPort, OnApplicationBo
     if (old == null) old = this.messages.get(input.trackerId);
     let sent: number;
     try {
-      sent = await this.telegram.sendMessage(text, blockedButtons(input.trackerId));
+      sent = await this.telegram.sendMessage(text, blockedButtons(input.trackerId), 'blocked-exit');
     } catch (err) {
       this.log.error(`${LOG} blocked-exit alert for ${input.symbol} (${input.trackerId}) NOT SENT: ${(err as Error)?.message}`);
       return;
@@ -296,7 +296,7 @@ export class OwnerButtonsService implements OwnerEscalationPort, OnApplicationBo
 
   private async edit(messageId: number, text: string, buttons?: InlineButton[][]): Promise<void> {
     try {
-      await this.telegram.editMessage(messageId, text, buttons);
+      await this.telegram.editMessage(messageId, text, buttons, 'owner-buttons');
     } catch (err) {
       this.log.warn(`${LOG} Telegram edit of ${messageId} failed: ${(err as Error)?.message}`);
     }
@@ -304,7 +304,7 @@ export class OwnerButtonsService implements OwnerEscalationPort, OnApplicationBo
 
   private async notify(text: string): Promise<void> {
     try {
-      await this.telegram.sendMessage(text);
+      await this.telegram.sendMessage(text, undefined, 'owner-buttons');
     } catch (err) {
       this.log.error(`${LOG} Telegram send failed: ${(err as Error)?.message}. Message was: ${text.slice(0, 300)}`);
     }

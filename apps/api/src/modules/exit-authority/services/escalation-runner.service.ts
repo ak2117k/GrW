@@ -648,7 +648,7 @@ export class EscalationRunner {
 
   private async send(text: string, buttons?: InlineButton[][]): Promise<number | null> {
     try {
-      return await this.telegram.sendMessage(text, buttons);
+      return await this.telegram.sendMessage(text, buttons, 'escalation');
     } catch (err) {
       this.log.error(`${LOG} Telegram send failed: ${(err as Error)?.message}. Message was: ${text.slice(0, 300)}`);
       return null;
@@ -657,7 +657,7 @@ export class EscalationRunner {
 
   private async edit(messageId: number, text: string, buttons?: InlineButton[][]): Promise<boolean> {
     try {
-      await this.telegram.editMessage(messageId, text, buttons);
+      await this.telegram.editMessage(messageId, text, buttons, 'escalation');
       return true;
     } catch (err) {
       this.log.warn(`${LOG} Telegram edit of ${messageId} failed: ${(err as Error)?.message}`);

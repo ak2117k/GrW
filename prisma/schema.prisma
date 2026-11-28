@@ -4291,3 +4291,21 @@ model TradeBrief {
 
   @@map("trade_briefs")
 }
+
+/// Every message the API tried to send to the owner over the alert bot (ops alerts + exit-authority escalation/buttons).
+/// Append-only audit: logs are wiped on each deploy. Written fire-and-forget by common/utils/telegram-outbox.ts; never holds the token.
+model TelegramOutbox {
+  id        String   @id @default(cuid())
+  sentAt    DateTime @default(now()) @map("sent_at") @db.Timestamptz(6)
+  kind      String // ops | exit-authority
+  source    String // ops-alert key, or escalation | blocked-exit | owner-buttons | authority-boot-check
+  method    String // sendMessage | editMessageText
+  chatId    String   @map("chat_id")
+  text      String // first 500 chars
+  ok        Boolean
+  error     String?
+  messageId Int?     @map("telegram_message_id")
+
+  @@index([sentAt])
+  @@map("telegram_outbox")
+}

@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { __resetOpsAlerts, OPS_ALERT_COOLDOWN_MS, sendOpsAlert } from './ops-alert';
+import { setTelegramOutboxRecorder, type TelegramOutboxRow } from './telegram-outbox';
 
 describe('sendOpsAlert', () => {
   const env = { TELEGRAM_ALERT_BOT_TOKEN: 'secret-token', TELEGRAM_ALERT_CHAT_ID: '42' };
@@ -31,6 +32,57 @@ describe('sendOpsAlert', () => {
     await expect(sendOpsAlert('k', 'hi', { env, fetch })).resolves.toBe(false);
     expect(warn.mock.calls.flat().join(' ')).not.toContain('secret-token');
     warn.mockRestore();
+  });
+});
+
+describe('sendOpsAlert records every send attempt in the outbox', () => {
+  const env = { TELEGRAM_ALERT_BOT_TOKEN: 'secret-token', TELEGRAM_ALERT_CHAT_ID: '42' };
+  let rows: TelegramOutboxRow[];
+  beforeEach(() => {
+    __resetOpsAlerts();
+    rows = [];
+    setTelegramOutboxRecorder((r) => { rows.push(r); });
+  });
+  afterEach(() => setTelegramOutboxRecorder(null));
+
+  it('a delivered alert: ok, key as source, chat, short text and the message_id', async () => {
+    const fetch = jest.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 913 } }) }));
+    await expect(sendOpsAlert('DESK_RUN_FAILED', `desk down ${'y'.repeat(800)}`, { env, fetch })).resolves.toBe(true);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: 'ops', source: 'DESK_RUN_FAILED', method: 'sendMessage', chatId: '42', ok: true, error: null, messageId: 913 });
+    expect(rows[0].text.startsWith('desk down')).toBe(true);
+    expect(rows[0].text.length).toBe(500);
+    expect(JSON.stringify(rows)).not.toContain('secret-token');
+  });
+
+  it('an HTTP error and a network error are recorded as failures, without the token', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const http = jest.fn(async () => ({ ok: false, status: 400, json: async () => ({ ok: false, description: 'Bad Request: chat not found' }) }));
+    await sendOpsAlert('a', 'one', { env, fetch: http });
+    const net = jest.fn(async () => { throw new Error('getaddrinfo ENOTFOUND botsecret-token'); });
+    await sendOpsAlert('b', 'two', { env, fetch: net });
+    expect(rows.map((r) => [r.source, r.ok, r.messageId])).toEqual([['a', false, null], ['b', false, null]]);
+    expect(rows[0].error).toMatch(/HTTP 400.*chat not found/);
+    expect(rows[1].error).toMatch(/Error/);
+    expect(JSON.stringify(rows)).not.toContain('secret-token');
+    warn.mockRestore();
+  });
+
+  it('an unconfigured bot is recorded as NOT SENT; a cooldown repeat is not an attempt', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    await sendOpsAlert('c', 'lost', { env: {}, fetch: jest.fn() as never, now: () => 1 });
+    await sendOpsAlert('c', 'lost', { env: {}, fetch: jest.fn() as never, now: () => 2 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ source: 'c', ok: false, chatId: '', error: 'not configured' });
+    warn.mockRestore();
+  });
+
+  it('a failing outbox write never fails or delays the send', async () => {
+    setTelegramOutboxRecorder(() => new Promise(() => undefined)); // never settles
+    const fetch = jest.fn(async () => ({ ok: true, status: 200 }));
+    await expect(sendOpsAlert('d', 'x', { env, fetch })).resolves.toBe(true);
+    setTelegramOutboxRecorder(() => { throw new Error('db down'); });
+    await expect(sendOpsAlert('e', 'x', { env, fetch })).resolves.toBe(true);
   });
 });
 

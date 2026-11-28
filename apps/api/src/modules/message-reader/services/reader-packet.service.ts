@@ -6,7 +6,8 @@ import { SIGNAL_TRADER_CONFIG } from '../../signal-trader/services/signal-trader
 import type { SignalTraderConfig } from '../../signal-trader/domain/signal-trader.config';
 import { segmentFor } from '../../signal-trader/domain/contract-resolver';
 import { atmStrike, istYmd } from '../../mbm/domain/chain-snapshot';
-import type { QuoteResponse } from '../../market-data/utils/tick-to-quote';
+import { tickToQuote, type QuoteResponse } from '../../market-data/utils/tick-to-quote';
+import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import { segmentOf } from '../../signal-intake/domain/contract';
 import type { DailyBar } from '../../signal-intake/domain/info-outcome';
 import type { Vocabulary } from '../../signal-intake/domain/vocabulary';
@@ -53,18 +54,12 @@ const QUOTE_15M_DAYS = 5;
 const DAY_MS = 86_400_000;
 /** Reader quote fetches in flight at once, process-wide (each uses the owner's single historical lane). */
 const MAX_QUOTE_FETCHES = 2;
-/** NEW (uncached) underlyings the reader may quote in any rolling minute; more → `reader quote budget`. */
+/** NEW (uncached) quotes — underlyings + named options — the reader may fetch in any rolling minute; more → `reader quote budget`. */
 const QUOTE_BUDGET_PER_MIN = 6;
 const QUOTE_BUDGET_WINDOW_MS = 60_000;
 const MAX_ROWS = 10;
-/** A named option's block is shared for this long (UNAVAILABLE_CACHE_MS when unavailable). */
+/** A named option's block (and its leg → contract resolution) is shared for this long (UNAVAILABLE_CACHE_MS when unavailable). */
 const OPTION_CACHE_MS = 60_000;
-/**
- * A broker FULL quote is stamped when it arrives; the resolver's daily-candle fallback carries the candle's
- * day. A contract quote older than this did not come from the live quote, so the slice is not asked for
- * (every token the live quote misses would cost one candle call on the owner's historical lane).
- */
-const LIVE_QUOTE_MS = 2 * 60_000;
 
 /** Index quotes for the pulse (tokens as in market-context's UNDERLYING_TOKEN_MAP). */
 const PULSE_INDICES = [
@@ -157,6 +152,7 @@ export class ReaderPacketService {
   private readonly buildWaiters: Array<() => void> = [];
   private readonly quoteCache = new Map<string, CacheEntry<PacketBlock>>();
   private readonly optionCache = new Map<string, CacheEntry<PacketBlock>>();
+  private readonly legCache = new Map<string, CacheEntry<ResolvedOptionLeg | { ok: false; reason: string }>>();
   /** Daily bars per EXCHANGE:token for one IST session day (the previous-session stats do not move intraday). */
   private readonly dailyCache = new Map<string, { day: string; promise: Promise<DailyBar[]> }>();
   private readonly quotePermits = new DeadlinePermits(MAX_QUOTE_FETCHES);
@@ -173,6 +169,8 @@ export class ReaderPacketService {
     @Optional() @Inject(SIGNAL_INFO_BARS) private readonly bars?: InfoBars,
     @Optional() @Inject(SIGNAL_INFO_MASTER) private readonly master?: { rows(): Promise<readonly unknown[] | null> },
     @Optional() @Inject(SignalVocabularyService) private readonly vocab?: { get(): Promise<Vocabulary> },
+    /** Live-only FULL quotes (no daily-candle fallback) for the option block; without it the block is unavailable. */
+    @Optional() @Inject(UserFeedManager) private readonly feeds?: Pick<UserFeedManager, 'fetchQuotes'>,
   ) {}
 
   async build(i: { text: string; channelId: string; underlyings: string[]; now: Date }): Promise<{ packet: ReaderPacket; ms: number }> {
@@ -222,51 +220,73 @@ export class ReaderPacketService {
     return [u, { ...ctx, quote, ...opt }] as const;
   }
 
-  /** The post's option legs (vocabulary match; without it a local regex over `names`); never throws. */
+  /** The post's option legs on the instruments this packet carries (cap applied after that filter); never throws. */
   private async optionLegs(text: string, names: readonly string[]): Promise<OptionLeg[]> {
     try {
       const vocab = this.vocab ? await this.vocab.get().catch(() => null) : null;
-      const have = new Set(names);
-      return optionLegsOf(text, vocab, names).filter((l) => have.has(l.underlying));
+      return optionLegsOf(text, vocab, names, new Set(names));
     } catch {
       return [];
     }
   }
 
   /**
-   * One named option: the contract (the post's expiry, else the nearest listed) with its LTP, previous
-   * close, change and OI, plus an ATM +-3 chain slice (CE / PE LTP + OI) around the underlying's spot (its
-   * own quote block, or the pulse index; the named strike when neither arrives in half the box). Cached per
-   * contract like the quote block (60 s; 10 s when unavailable). Broker cost: one probe quote for the
-   * contract, then ONE batch for the slice only when the probe came from the live broker quote; it takes a
-   * slot of the same per-minute quote budget and a permit of the same quote limit as the quote block.
+   * One named option: the contract (the post's expiry for the underlying it was written next to, else the
+   * nearest listed) with its LTP, previous close, change and OI, plus an ATM +-3 chain slice (CE / PE LTP +
+   * OI) around the underlying's spot (the pulse index, or its own quote block; the named strike when neither
+   * arrives in half the box). The leg is resolved once (cached 60 s per leg) and the block is cached per
+   * resolved contract (60 s; 10 s when unavailable). Broker cost: one live-only probe quote for the contract,
+   * then ONE live-only batch for the slice; never the resolver's daily-candle fallback. It takes a slot of the
+   * same per-minute quote budget and a permit of the same quote limit as the quote block.
    */
-  private option(leg: OptionLeg, owner: string | null, now: Date, packetStartedAt: number): Promise<PacketBlock> {
-    const key = `${leg.underlying}|${leg.strike}|${leg.kind}|${JSON.stringify(leg.expiryHint)}`;
+  private async option(leg: OptionLeg, owner: string | null, now: Date, packetStartedAt: number): Promise<PacketBlock> {
+    const r = await this.resolveLeg(leg, now);
+    if (!r.ok) return { status: 'unavailable', source: SRC.option, reason: r.reason };
+    const key = `${r.contract.exchange}:${r.contract.token}`;
     const at = Date.now();
     const hit = this.optionCache.get(key);
     if (hit && at - hit.at < hit.ttl) return hit.promise;
     for (const [k, v] of this.optionCache) if (at - v.at >= v.ttl) this.optionCache.delete(k);
-    const promise = this.block(SRC.option, () => this.fetchOption(leg, owner, now, packetStartedAt), this.cfg.packetMs + SAFETY_MARGIN_MS);
+    const promise = this.block(SRC.option, () => this.fetchOption(leg, r, owner, now, packetStartedAt), this.cfg.packetMs + SAFETY_MARGIN_MS);
     const entry: CacheEntry<PacketBlock> = { at, ttl: OPTION_CACHE_MS, promise };
     this.optionCache.set(key, entry);
-    void promise.then((r) => {
-      if (r.status === 'unavailable') entry.ttl = UNAVAILABLE_CACHE_MS;
+    void promise.then((b) => {
+      if (b.status === 'unavailable') entry.ttl = UNAVAILABLE_CACHE_MS;
     });
     return promise;
   }
 
-  private async fetchOption(leg: OptionLeg, owner: string | null, now: Date, packetStartedAt: number): Promise<unknown> {
+  /** The leg → its contract + strike ladder (two master scans), once per leg per minute; never throws. */
+  private resolveLeg(leg: OptionLeg, now: Date): Promise<ResolvedOptionLeg | { ok: false; reason: string }> {
+    const key = `${leg.underlying}|${leg.strike}|${leg.kind}|${JSON.stringify(leg.expiryHint)}`;
+    const at = Date.now();
+    const hit = this.legCache.get(key);
+    if (hit && at - hit.at < hit.ttl) return hit.promise;
+    for (const [k, v] of this.legCache) if (at - v.at >= v.ttl) this.legCache.delete(k);
+    const promise = (async (): Promise<ResolvedOptionLeg | { ok: false; reason: string }> => {
+      const got = await this.block('instrument master', async () => {
+        const [rows, vocab] = await Promise.all([
+          this.master ? this.master.rows().catch(() => null) : Promise.resolve(null),
+          this.vocab ? this.vocab.get().catch(() => null) : Promise.resolve(null),
+        ]);
+        if (!rows?.length) throw new Error('no instrument master to resolve the option contract');
+        const cls = vocab?.classOf.get(leg.underlying);
+        const seg = cls ? segmentOf(leg.underlying, leg.kind, cls) : segmentFor({ underlying: leg.underlying, instrumentKind: 'FUT' });
+        return resolveOptionLeg(rows, leg, seg, now);
+      });
+      return got.status === 'present' ? (got.value as ResolvedOptionLeg | { ok: false; reason: string }) : { ok: false, reason: got.reason };
+    })();
+    const entry: CacheEntry<ResolvedOptionLeg | { ok: false; reason: string }> = { at, ttl: OPTION_CACHE_MS, promise };
+    this.legCache.set(key, entry);
+    void promise.then((r) => {
+      if (!r.ok) entry.ttl = UNAVAILABLE_CACHE_MS;
+    });
+    return promise;
+  }
+
+  private async fetchOption(leg: OptionLeg, r: ResolvedOptionLeg, owner: string | null, now: Date, packetStartedAt: number): Promise<unknown> {
     if (!owner) throw new Error('no owner user id (HUB_OWNER_USER_ID) to quote with');
-    const [rows, vocab] = await Promise.all([
-      this.master ? this.master.rows().catch(() => null) : Promise.resolve(null),
-      this.vocab ? this.vocab.get().catch(() => null) : Promise.resolve(null),
-    ]);
-    if (!rows?.length) throw new Error('no instrument master to resolve the option contract');
-    const cls = vocab?.classOf.get(leg.underlying);
-    const seg = cls ? segmentOf(leg.underlying, leg.kind, cls) : segmentFor({ underlying: leg.underlying, instrumentKind: 'FUT' });
-    const r = resolveOptionLeg(rows, leg, seg, now);
-    if (!r.ok) throw new Error(r.reason);
+    if (!this.feeds) throw new Error('no live-only quote path (UserFeedManager) for option quotes');
     const spot = await this.optionSpot(leg.underlying, owner, now, packetStartedAt);
     const deadlineAt = packetStartedAt + this.cfg.packetMs;
     const release = await this.admitQuote(deadlineAt);
@@ -275,6 +295,20 @@ export class ReaderPacketService {
     } finally {
       release();
     }
+  }
+
+  /**
+   * FULL quotes for `refs` straight from the owner's own session, with no daily-candle fallback: a throttled
+   * answer throws (throwOnThrottle), and a token the broker did not quote is simply absent. One REST call.
+   */
+  private async liveQuotes(owner: string, refs: Array<{ token: string; exchange: string; symbol: string }>): Promise<Map<string, QuoteResponse>> {
+    const ticks = await this.feeds!.fetchQuotes(owner, refs.map(({ token, exchange }) => ({ token, exchange })), { throwOnThrottle: true });
+    const out = new Map<string, QuoteResponse>();
+    for (const ref of refs) {
+      const t = ticks.get(ref.token);
+      if (t) out.set(ref.token, tickToQuote(t, { exchange: ref.exchange, symbol: ref.symbol }));
+    }
+    return out;
   }
 
   /** The underlying's spot for the ATM: the pulse for its indices, else its own quote block; null after half the box. */
@@ -311,10 +345,10 @@ export class ReaderPacketService {
     const probe = await this.block(
       SRC.option,
       async () => {
-        const q = (await this.quotes.resolveQuotes(owner, [{ token: c.token, exchange: c.exchange, symbol: c.tradingsymbol }])).get(c.token);
+        const q = (await this.liveQuotes(owner, [{ token: c.token, exchange: c.exchange, symbol: c.tradingsymbol }])).get(c.token);
         if (!q || !(q.ltp > 0)) throw new Error(`no live quote for ${c.exchange}:${c.tradingsymbol}`);
         if (quoteIsStale(c.exchange, new Date(q.timestamp), now)) {
-          throw new Error(`stale quote: last update ${new Date(q.timestamp).toISOString()} is over 5 min old during the session (daily-candle fallback or no ticks)`);
+          throw new Error(`stale quote: last update ${new Date(q.timestamp).toISOString()} is over 5 min old during the session`);
         }
         return q;
       },
@@ -327,17 +361,18 @@ export class ReaderPacketService {
     const atm = spot ? atmStrike(ladder, spot.value) : null;
     const slice = chainSliceStrikes(ladder, atm ?? leg.strike);
     let chain: Array<{ strike: number; ce: { ltp: number; oi: number | null } | null; pe: { ltp: number; oi: number | null } | null }> | null = null;
-    if (Date.now() - new Date(q.timestamp).getTime() > LIVE_QUOTE_MS) {
-      missing.push('chain: not fetched - the contract quote came from the daily-candle fallback, not the live broker quote');
-    } else {
-      const refs = slice.flatMap((k) => {
-        const s = r.strikes.get(k);
-        return [s?.ce, s?.pe].filter((x): x is { token: string; tradingsymbol: string } => !!x && x.token !== c.token).map((x) => ({ token: x.token, exchange: c.exchange, symbol: x.tradingsymbol }));
-      });
-      const b = await this.block('chain slice', () => this.quotes.resolveQuotes(owner, refs), left());
-      if (b.status !== 'present') missing.push(`chain: ${b.reason}`);
+    const refs = slice.flatMap((k) => {
+      const s = r.strikes.get(k);
+      return [s?.ce, s?.pe].filter((x): x is { token: string; tradingsymbol: string } => !!x && x.token !== c.token).map((x) => ({ token: x.token, exchange: c.exchange, symbol: x.tradingsymbol }));
+    });
+    const b = refs.length ? await this.block('chain slice', () => this.liveQuotes(owner, refs), left()) : ({ status: 'present', source: 'chain slice', value: new Map() } as PacketBlock);
+    if (b.status !== 'present') missing.push(`chain: not available (${b.reason})`);
+    else {
+      const got = b.value as Map<string, QuoteResponse>;
+      const quoted = refs.filter((x) => (got.get(x.token)?.ltp ?? 0) > 0).length;
+      if (refs.length > 0 && quoted === 0) missing.push(`chain: the live quote returned none of the ${refs.length} slice contracts`);
       else {
-        const got = b.value as Map<string, QuoteResponse>;
+        if (quoted < refs.length) missing.push(`chain: ${refs.length - quoted} of ${refs.length} slice contracts not quoted (shown as null)`);
         const side = (x: { token: string } | null | undefined) => {
           const v = x ? (x.token === c.token ? q : got.get(x.token)) : undefined;
           return v && v.ltp > 0 ? { ltp: v.ltp, oi: typeof v.oi === 'number' ? v.oi : null } : null;
@@ -424,7 +459,7 @@ export class ReaderPacketService {
    * posts; daily bars are fetched once per instrument per IST session day. Every broker read is raced
    * against the packet deadline. Present only when a fresh live quote arrived (a quote over 5 min old in
    * the session is `stale quote`); missing bars leave nulls and a `missing` reason. Broker load is capped
-   * process-wide: 6 new underlyings per rolling minute (`reader quote budget`) and 2 fetches in flight
+   * process-wide: 6 new quotes (underlyings + options) per rolling minute (`reader quote budget`) and 2 fetches in flight
    * (`reader quote limit`); a refused underlying makes no broker call at all.
    */
   private quote(underlying: string, owner: string | null, now: Date, packetStartedAt: number): Promise<PacketBlock> {
@@ -464,7 +499,7 @@ export class ReaderPacketService {
     const t = Date.now();
     this.quoteFetchTimes = this.quoteFetchTimes.filter((x) => t - x < QUOTE_BUDGET_WINDOW_MS);
     if (this.quoteFetchTimes.length >= QUOTE_BUDGET_PER_MIN) {
-      throw new Error(`reader quote budget: ${QUOTE_BUDGET_PER_MIN} new underlyings already quoted in the last minute`);
+      throw new Error(`reader quote budget: ${QUOTE_BUDGET_PER_MIN} quotes (underlyings + options) already fetched in the last minute`);
     }
     this.quoteFetchTimes.push(t);
     const release = await this.quotePermits.acquire(deadlineAt);

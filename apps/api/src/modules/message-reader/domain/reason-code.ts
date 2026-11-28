@@ -37,7 +37,8 @@ function failedReasonFor(subject: string, packet: unknown, isInstrument: (s: str
 
 /**
  * Every NOT_CHECKABLE claim gets a reasonCode: the failed packet block's reason when it maps to a code,
- * else the model's own code, else OTHER. Other verdicts carry none.
+ * else the model's own code, else OTHER. The model's FORWARD_LOOKING is kept as is: a claim about the future is
+ * not checkable whatever block failed (e.g. a refused option block on the same subject). Other verdicts carry none.
  */
 export function fillReasonCodes(claims: readonly Claim[], packet: unknown, isInstrument: (s: string) => boolean = () => false): Claim[] {
   // Validation guarantees an array of claims; anything else passes through untouched (never throws).
@@ -46,6 +47,7 @@ export function fillReasonCodes(claims: readonly Claim[], packet: unknown, isIns
     if (!c || typeof c !== 'object') return c;
     const { reasonCode: own, ...rest } = c;
     if (c.verdict !== 'NOT_CHECKABLE') return rest;
+    if (own === 'FORWARD_LOOKING') return { ...rest, reasonCode: own };
     const reason = failedReasonFor(c.subject, packet, isInstrument);
     const fromBlock = reason === null ? null : reasonCodeOf(reason);
     const code: ReasonCode = fromBlock && fromBlock !== 'OTHER' ? fromBlock : (own ?? fromBlock ?? 'OTHER');

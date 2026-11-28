@@ -601,7 +601,8 @@ describe('MessageReaderService', () => {
       });
       const m = make({ packet });
       const claims = [
-        claim('RELIANCE', { reasonCode: 'FORWARD_LOOKING' }),
+        claim('RELIANCE', { reasonCode: 'FORWARD_LOOKING' }), // the model's FORWARD_LOOKING is never overridden
+        claim('RELIANCE'),
         claim('NIFTY'),
         claim('BANKNIFTY'),
         claim('SENSEX'), // an instrument with no block in the packet
@@ -613,8 +614,8 @@ describe('MessageReaderService', () => {
       m.svc.onTelegramMessage(m.post('m1', 'everything up'));
       await m.svc.whenIdle();
       const stored = m.rows.get('m1')!.claims;
-      expect(stored.map((c) => c.reasonCode)).toEqual(['QUOTE_BUDGET', 'STALE', 'TIMEOUT', 'NO_INSTRUMENT', 'FORWARD_LOOKING', 'OTHER', undefined]);
-      expect(stored[6]).not.toHaveProperty('reasonCode');
+      expect(stored.map((c) => c.reasonCode)).toEqual(['FORWARD_LOOKING', 'QUOTE_BUDGET', 'STALE', 'TIMEOUT', 'NO_INSTRUMENT', 'FORWARD_LOOKING', 'OTHER', undefined]);
+      expect(stored[7]).not.toHaveProperty('reasonCode');
     });
   });
 });

@@ -2,6 +2,7 @@ import { ReaderPacketService } from './reader-packet.service';
 import { SignalContextService } from '../../signal-trader/services/signal-context.service';
 import type { ReaderPacketSources } from './reader-packet.sources';
 import { parseMessageReaderConfig, type MessageReaderConfig } from '../message-reader.config';
+import { buildVocabulary } from '../../signal-intake/domain/vocabulary';
 
 const NOW = new Date('2026-11-25T05:00:00Z'); // 10:30 IST
 
@@ -15,6 +16,7 @@ function setup(
     context?: unknown;
     cfg?: Partial<MessageReaderConfig>;
     resolveQuotes?: jest.Mock;
+    fetchQuotes?: jest.Mock;
     bars?: { daily: jest.Mock; intraday15m?: jest.Mock };
     master?: unknown[] | null;
     vocab?: unknown;
@@ -39,8 +41,9 @@ function setup(
     todayMarketNotes: jest.fn().mockResolvedValue([{ claim: 'market bearish', verdict: 'CONFIRMED' }]),
   };
   const readerCfg = { packetMs: 3_000, ...over.cfg } as MessageReaderConfig;
-  const svc = new ReaderPacketService(breadth as never, quotes, (over.context ?? context) as never, sources, readerCfg, { ownerUserId: 'owner-1' } as never, bars as never, master, vocab as never);
-  return { svc, breadth, quotes, context, sources, bars, master };
+  const feeds = { fetchQuotes: over.fetchQuotes ?? jest.fn().mockImplementation(async (_u: string, refs: { token: string }[]) => new Map(refs.map((r) => [r.token, quote(r.token, 100)]))) };
+  const svc = new ReaderPacketService(breadth as never, quotes, (over.context ?? context) as never, sources, readerCfg, { ownerUserId: 'owner-1' } as never, bars as never, master, vocab as never, feeds as never);
+  return { svc, breadth, quotes, context, sources, bars, master, feeds };
 }
 
 const MASTER = [{ exch_seg: 'NSE', symbol: 'DABUR-EQ', token: '772', name: 'DABUR' }];
@@ -510,36 +513,49 @@ describe('ReaderPacketService', () => {
     });
   });
   describe('option block (a post naming an option contract)', () => {
-    const optRow = (expiry: string, strike: number, type: 'CE' | 'PE', token: string) => ({
-      exch_seg: 'NFO', name: 'NIFTY', instrumenttype: 'OPTIDX', symbol: `NIFTY${expiry.slice(0, 5)}${expiry.slice(7)}${strike}${type}`, token, expiry, strike: String(strike * 100),
+    const optRow = (name: string, seg: string, expiry: string, strike: number, type: 'CE' | 'PE', token: string) => ({
+      exch_seg: seg, name, instrumenttype: 'OPTIDX', symbol: `${name}${expiry.slice(0, 5)}${expiry.slice(7)}${strike}${type}`, token, expiry, strike: String(strike * 100),
     });
     /** NIFTY 25300..26100 every 50, CE token 5<strike>, PE token 6<strike>; two weekly series. */
     const niftyOptions = () => {
       const rows: unknown[] = [];
       for (const [exp, pre] of [['02DEC2026', ''], ['09DEC2026', '9']] as const) {
-        for (let k = 25300; k <= 26100; k += 50) rows.push(optRow(exp, k, 'CE', `${pre}5${k}`), optRow(exp, k, 'PE', `${pre}6${k}`));
+        for (let k = 25300; k <= 26100; k += 50) rows.push(optRow('NIFTY', 'NFO', exp, k, 'CE', `${pre}5${k}`), optRow('NIFTY', 'NFO', exp, k, 'PE', `${pre}6${k}`));
       }
       return rows;
     };
+    /** SENSEX 83500..84500 every 100 on BFO, tokens 7<strike> / 8<strike>. */
+    const sensexOptions = () => {
+      const rows: unknown[] = [];
+      for (const [exp, pre] of [['03DEC2026', ''], ['10DEC2026', '1']] as const) {
+        for (let k = 83500; k <= 84500; k += 100) rows.push(optRow('SENSEX', 'BFO', exp, k, 'CE', `${pre}7${k}`), optRow('SENSEX', 'BFO', exp, k, 'PE', `${pre}8${k}`));
+      }
+      return rows;
+    };
+    const OPT_TOKEN = /^[19]?[5678]\d{5}$/;
     const live = (token: string, ltp: number, over: Record<string, unknown> = {}) => ({ ...quote(token, ltp), exchange: 'NFO', close: ltp - 10, change: 10, changePercent: (10 / (ltp - 10)) * 100, oi: 1_000 + Number(token.slice(-5)), timestamp: NOW, ...over });
-    /** NIFTY index at 25540; every option quoted live at 330. `over` returning null drops a token. */
+    /** NIFTY index at 25540, SENSEX at 84020; every option quoted live at 330. `over` returning null drops a token. */
     const resolver = (over: (token: string) => unknown = () => undefined) =>
       jest.fn().mockImplementation(async (_u: string, refs: { token: string }[]) => {
         const m = new Map<string, unknown>();
         for (const r of refs) {
           const o = over(r.token);
           if (o === null) continue;
-          m.set(r.token, o ?? (r.token === '99926000' ? { ...quote(r.token, 25_540), timestamp: NOW } : /^9?[56]\d{5}$/.test(r.token) ? live(r.token, 330) : quote(r.token, 100)));
+          const idx = r.token === '99926000' ? 25_540 : r.token === '99919000' ? 84_020 : null;
+          m.set(r.token, o ?? (idx ? { ...quote(r.token, idx), timestamp: NOW } : OPT_TOKEN.test(r.token) ? live(r.token, 330) : quote(r.token, 100)));
         }
         return m;
       });
     const post = (text: string, underlyings = ['NIFTY']) => ({ text, channelId: 'ch-1', underlyings, now: NOW });
-    const optionCalls = (m: jest.Mock) => m.mock.calls.filter(([, refs]: [string, { token: string }[]]) => refs.some((r) => /^9?[56]\d{5}$/.test(r.token)));
+    const optionCalls = (m: jest.Mock) => m.mock.calls.filter(([, refs]: [string, { token: string }[]]) => refs.some((r) => OPT_TOKEN.test(r.token)));
     const reasonOfBlock = (b: unknown) => (b as { reason?: string }).reason ?? '';
+    const opts = (fetchQuotes: jest.Mock = resolver(), extra: Record<string, unknown> = {}) => {
+      const resolveQuotes = resolver();
+      return { ...setup({ resolveQuotes, fetchQuotes, master: [...MASTER, ...niftyOptions(), ...sensexOptions()], ...extra }), resolveQuotes, fetchQuotes };
+    };
 
     it('"NIFTY 25700 PE above 330": the contract (nearest expiry), its LTP / prev close / change / OI and an ATM +-3 slice', async () => {
-      const resolveQuotes = resolver();
-      const { svc } = setup({ resolveQuotes, master: [...MASTER, ...niftyOptions()] });
+      const { svc, resolveQuotes, fetchQuotes } = opts();
       const { packet } = await svc.build(post('NIFTY 25700 PE above 330 sl 300'));
       const block = packet.instruments.NIFTY.option as { status: string; source: string; value: Record<string, unknown> };
       expect(block.status).toBe('present');
@@ -558,75 +574,132 @@ describe('ReaderPacketService', () => {
       expect(chain.map((r) => r.strike)).toEqual([25400, 25450, 25500, 25550, 25600, 25650, 25700]);
       expect(chain[3]).toEqual({ strike: 25550, ce: { ltp: 330, oi: 1_000 + 25_550 }, pe: { ltp: 330, oi: 1_000 + 25_550 } });
       expect(block.value.missing).toEqual([expect.stringContaining('oiChange')]);
-      // One probe for the named contract, then ONE batch for the slice (the named contract not asked twice).
-      const calls = optionCalls(resolveQuotes);
+      // Live-only path: one probe for the named contract, then ONE batch for the slice, both with throwOnThrottle;
+      // nothing option-related goes through the resolver (whose misses become daily-candle calls).
+      const calls = optionCalls(fetchQuotes);
       expect(calls).toHaveLength(2);
-      expect(calls[0][1]).toEqual([{ token: '625700', exchange: 'NFO', symbol: 'NIFTY02DEC2625700PE' }]);
+      expect(calls[0][1]).toEqual([{ token: '625700', exchange: 'NFO' }]);
+      expect(calls[0][2]).toEqual({ throwOnThrottle: true });
       expect(calls[1][1]).toHaveLength(13);
+      expect(calls[1][2]).toEqual({ throwOnThrottle: true });
       expect(calls[1][1].map((r: { token: string }) => r.token)).not.toContain('625700');
+      expect(optionCalls(resolveQuotes)).toHaveLength(0);
+    });
+
+    it('a throttled slice is "chain: not available" and makes zero resolver / candle / historical calls', async () => {
+      const throttled = Object.assign(new Error('marketData (13 token(s)): throttled'), { name: 'AngelThrottleError' });
+      const base = resolver();
+      const fetchQuotes = jest.fn().mockImplementation(async (u: string, refs: { token: string }[], o: unknown) => {
+        if (refs.length > 1) throw throttled;
+        return base(u, refs, o);
+      });
+      const { svc, resolveQuotes, bars } = opts(fetchQuotes);
+      const { packet } = await svc.build(post('NIFTY 25700 PE above 330'));
+      const v = (packet.instruments.NIFTY.option as { status: string; value: Record<string, unknown> }).value;
+      expect(v).toMatchObject({ ltp: 330, chain: null });
+      expect(v.missing).toEqual(expect.arrayContaining([expect.stringMatching(/^chain: not available \(.*throttled/)]));
+      expect(optionCalls(resolveQuotes)).toHaveLength(0);
+      // The only daily-bar read is the underlying's own quote block (index token), never an option token.
+      for (const [, token] of bars.daily.mock.calls) expect(OPT_TOKEN.test(String(token))).toBe(false);
+      // A throttled probe: the block is unavailable and the slice is never asked for.
+      const probeThrottled = opts(jest.fn().mockRejectedValue(throttled));
+      const b = (await probeThrottled.svc.build(post('NIFTY 25700 PE above 330'))).packet.instruments.NIFTY.option;
+      expect(reasonOfBlock(b)).toContain('throttled');
+      expect(probeThrottled.fetchQuotes.mock.calls.filter(([, refs]: [string, unknown[]]) => refs.length > 1)).toHaveLength(0);
+      expect(optionCalls(probeThrottled.resolveQuotes)).toHaveLength(0);
+    });
+
+    it('an empty or partial slice answer says so in missing', async () => {
+      const empty = opts(resolver((t) => (t !== '625700' && OPT_TOKEN.test(t) ? null : undefined)));
+      const v = ((await empty.svc.build(post('NIFTY 25700 PE above 330'))).packet.instruments.NIFTY.option as { value: Record<string, unknown> }).value;
+      expect(v).toMatchObject({ chain: null });
+      expect(v.missing).toEqual(expect.arrayContaining(['chain: the live quote returned none of the 13 slice contracts']));
+      const partial = opts(resolver((t) => (t === '525400' || t === '625400' ? null : undefined)));
+      const p = ((await partial.svc.build(post('NIFTY 25700 PE above 330'))).packet.instruments.NIFTY.option as { value: Record<string, unknown> }).value;
+      expect((p.chain as Array<{ strike: number; ce: unknown }>)[0]).toEqual({ strike: 25400, ce: null, pe: null });
+      expect(p.missing).toEqual(expect.arrayContaining(['chain: 2 of 13 slice contracts not quoted (shown as null)']));
     });
 
     it('a stated expiry picks that series; a second leg on the same underlying gets its own key', async () => {
-      const { svc } = setup({ resolveQuotes: resolver(), master: [...MASTER, ...niftyOptions()] });
+      const { svc } = opts();
       const { packet } = await svc.build(post('NIFTY 9 DEC 25700 PE above 330, 25900 CE below 120'));
       expect((packet.instruments.NIFTY.option as { value: { contract: { symbol: string } } }).value.contract.symbol).toBe('NIFTY09DEC2625700PE');
       expect((packet.instruments.NIFTY.option_25900CE as { value: { contract: { symbol: string } } }).value.contract.symbol).toBe('NIFTY09DEC2625900CE');
     });
 
-    it('an unlisted strike is unavailable with the listed range, and makes no broker call', async () => {
-      const resolveQuotes = resolver();
-      const { svc } = setup({ resolveQuotes, master: [...MASTER, ...niftyOptions()] });
-      const { packet } = await svc.build(post('NIFTY 25710 PE above 330'));
-      expect(packet.instruments.NIFTY.option).toEqual({ status: 'unavailable', source: expect.any(String), reason: expect.stringContaining('NIFTY 25710 PE is not listed for expiry 2026-12-02 (listed strikes 25300 to 26100)') });
-      expect(optionCalls(resolveQuotes)).toHaveLength(0);
+    it('multi-underlying post: the written expiry only binds the leg it sits next to; the other takes its nearest', async () => {
+      const { svc } = opts(resolver(), { vocab: buildVocabulary([]) });
+      const { packet } = await svc.build(post('NIFTY 25700 PE 9 DEC above 330 | SENSEX 84000 CE above 260', ['NIFTY', 'SENSEX']));
+      expect((packet.instruments.NIFTY.option as { value: { contract: { symbol: string } } }).value.contract.symbol).toBe('NIFTY09DEC2625700PE');
+      const sensex = packet.instruments.SENSEX.option as { status: string; value: { contract: { symbol: string; exchange: string; expirySource: string } } };
+      expect(sensex.status).toBe('present');
+      expect(sensex.value.contract).toMatchObject({ symbol: 'SENSEX03DEC2684000CE', exchange: 'BFO', expirySource: 'master' });
     });
 
-    it('a candle-fallback contract quote keeps its numbers but fetches no slice (no candle calls for 13 more tokens)', async () => {
-      const after = new Date('2026-11-25T12:30:00Z'); // 18:00 IST: an old timestamp is not "stale"
-      jest.setSystemTime(after);
-      const resolveQuotes = resolver((t) => (t === '625700' ? live(t, 330, { timestamp: new Date('2026-11-24T18:30:00Z') }) : undefined));
-      const { svc } = setup({ resolveQuotes, master: [...MASTER, ...niftyOptions()] });
-      const { packet } = await svc.build({ ...post('NIFTY 25700 PE above 330'), now: after });
-      const block = packet.instruments.NIFTY.option as { status: string; value: Record<string, unknown> };
-      expect(block.status).toBe('present');
-      expect(block.value).toMatchObject({ ltp: 330, chain: null });
-      expect(block.value.missing).toEqual(expect.arrayContaining([expect.stringContaining('daily-candle fallback')]));
-      expect(optionCalls(resolveQuotes)).toHaveLength(1);
+    it('an unlisted strike is unavailable with the listed range, and makes no broker call', async () => {
+      const { svc, fetchQuotes } = opts();
+      const { packet } = await svc.build(post('NIFTY 25710 PE above 330'));
+      expect(packet.instruments.NIFTY.option).toEqual({ status: 'unavailable', source: expect.any(String), reason: expect.stringContaining('NIFTY 25710 PE is not listed for expiry 2026-12-02 (listed strikes 25300 to 26100)') });
+      expect(optionCalls(fetchQuotes)).toHaveLength(0);
     });
 
     it('in session a stale contract quote is unavailable; no quote at all is unavailable', async () => {
-      const stale = setup({ resolveQuotes: resolver((t) => (t === '625700' ? live(t, 330, { timestamp: new Date(NOW.getTime() - 6 * 60_000) }) : undefined)), master: [...MASTER, ...niftyOptions()] });
+      const stale = opts(resolver((t) => (t === '625700' ? live(t, 330, { timestamp: new Date(NOW.getTime() - 6 * 60_000) }) : undefined)));
       expect(reasonOfBlock((await stale.svc.build(post('NIFTY 25700 PE above 330'))).packet.instruments.NIFTY.option)).toContain('stale quote');
-      const none = setup({ resolveQuotes: resolver((t) => (t === '625700' ? null : undefined)), master: [...MASTER, ...niftyOptions()] });
+      const none = opts(resolver((t) => (t === '625700' ? null : undefined)));
       expect(reasonOfBlock((await none.svc.build(post('NIFTY 25700 PE above 330'))).packet.instruments.NIFTY.option)).toContain('no live quote');
     });
 
     it('no spot: the slice is centred on the named strike and says so', async () => {
+      const fetchQuotes = resolver();
       const resolveQuotes = resolver((t) => (t === '99926000' ? null : undefined));
-      const { svc } = setup({ resolveQuotes, master: [...MASTER, ...niftyOptions()] });
+      const { svc } = setup({ resolveQuotes, fetchQuotes, master: [...MASTER, ...niftyOptions()] });
       const { packet } = await svc.build(post('NIFTY 25700 PE above 330'));
       const v = (packet.instruments.NIFTY.option as { value: Record<string, unknown> }).value;
       expect(v).toMatchObject({ spot: null, atmStrike: null, sliceCentre: 'named strike' });
       expect((v.chain as Array<{ strike: number }>).map((r) => r.strike)).toEqual([25550, 25600, 25650, 25700, 25750, 25800, 25850]);
     });
 
-    it('the option block is cached 60 s (a repeat post makes no new option call)', async () => {
-      const resolveQuotes = resolver();
-      const { svc } = setup({ resolveQuotes, master: [...MASTER, ...niftyOptions()] });
+    it('the option block is cached 60 s per resolved contract (another wording of the same contract makes no call)', async () => {
+      const { svc, fetchQuotes, master } = opts();
       await svc.build(post('NIFTY 25700 PE above 330'));
+      await svc.build(post('NIFTY 2 DEC 25700 PE above 330')); // same contract, other hint: same cache entry
+      expect(optionCalls(fetchQuotes)).toHaveLength(2);
+      const scans = master.rows.mock.calls.length;
       await svc.build(post('NIFTY 25700 PE above 330'));
-      expect(optionCalls(resolveQuotes)).toHaveLength(2);
+      expect(master.rows.mock.calls.length).toBe(scans); // the leg resolution is cached too
       await jest.advanceTimersByTimeAsync(61_000);
       await svc.build({ ...post('NIFTY 25700 PE above 330'), now: new Date(NOW.getTime() + 61_000) });
-      expect(optionCalls(resolveQuotes)).toHaveLength(4);
+      expect(optionCalls(fetchQuotes)).toHaveLength(4);
+    });
+
+    it('options spend the shared quote budget; a refused one makes no call, a permit refusal refunds its slot', async () => {
+      const { svc, fetchQuotes } = opts();
+      // 1 NIFTY quote + 5 distinct options = 6 slots.
+      for (const k of [25500, 25550, 25600, 25650, 25700]) await svc.build(post(`NIFTY ${k} PE above 330`));
+      const before = optionCalls(fetchQuotes).length;
+      const { packet } = await svc.build(post('NIFTY 25750 PE above 330'));
+      expect(reasonOfBlock(packet.instruments.NIFTY.option)).toBe('reader quote budget: 6 quotes (underlyings + options) already fetched in the last minute');
+      expect(optionCalls(fetchQuotes).length).toBe(before);
+
+      // Permit refusal: two hung option fetches hold both permits; the third waits out the box and is refunded.
+      const hung = opts(jest.fn(() => new Promise(() => undefined)));
+      const slots = () => (hung.svc as unknown as { quoteFetchTimes: number[] }).quoteFetchTimes.length;
+      const a = hung.svc.build(post('NIFTY 25500 PE above 330'));
+      const b = hung.svc.build(post('NIFTY 25550 PE above 330'));
+      await jest.advanceTimersByTimeAsync(0);
+      const c = hung.svc.build(post('NIFTY 25600 PE above 330'));
+      await jest.advanceTimersByTimeAsync(4_000);
+      const [, , pc] = await Promise.all([a, b, c]);
+      expect(reasonOfBlock(pc.packet.instruments.NIFTY.option)).toContain('reader quote limit');
+      expect(slots()).toBe(3); // NIFTY quote + the two hung options; the refused third gave its slot back
     });
 
     it('a post with no option contract adds no option block and no option call', async () => {
-      const resolveQuotes = resolver();
-      const { svc } = setup({ resolveQuotes, master: [...MASTER, ...niftyOptions()] });
+      const { svc, fetchQuotes } = opts();
       const { packet } = await svc.build(post('nifty looks weak below 25500'));
       expect(packet.instruments.NIFTY).not.toHaveProperty('option');
-      expect(optionCalls(resolveQuotes)).toHaveLength(0);
+      expect(optionCalls(fetchQuotes)).toHaveLength(0);
     });
   });
 });

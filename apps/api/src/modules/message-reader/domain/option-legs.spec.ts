@@ -41,6 +41,30 @@ describe('optionLegsOf', () => {
     expect(legs.map((l) => `${l.underlying} ${l.strike} ${l.kind}`)).toEqual(['NIFTY 25700 PE', 'NIFTY 25900 CE', 'RELIANCE 1500 CE']);
   });
 
+  it('the written expiry goes only to the legs on the underlying it sits next to; others take the nearest', () => {
+    const legs = optionLegsOf('NIFTY 25700 PE 2 DEC above 330. SENSEX 84000 CE above 260', VOCAB, ['NIFTY', 'SENSEX']);
+    expect(legs).toEqual([
+      { underlying: 'NIFTY', strike: 25700, kind: 'PE', expiryHint: { day: 2, month: 12, year: null } },
+      { underlying: 'SENSEX', strike: 84000, kind: 'CE', expiryHint: null },
+    ]);
+    const later = optionLegsOf('NIFTY 25700 PE above 330. SENSEX 4 DEC 84000 CE above 260', VOCAB, ['NIFTY', 'SENSEX']);
+    expect(later.map((l) => [l.underlying, l.expiryHint?.day ?? null])).toEqual([['NIFTY', null], ['SENSEX', 4]]);
+    // Written on a header line before any instrument: the first instrument after it.
+    const header = optionLegsOf('Btst / Positional (29 DEC)\nNifty 25700 pe\nAbove 330', VOCAB, ['NIFTY']);
+    expect(header[0].expiryHint).toMatchObject({ day: 29, month: 12 });
+  });
+
+  it('"25700 CE & PE" is both legs', () => {
+    expect(optionLegsOf('NIFTY 25700 CE & PE straddle', VOCAB, ['NIFTY']).map((l) => l.kind)).toEqual(['CE', 'PE']);
+    expect(optionLegsOf('NIFTY 25700 CE and PE', VOCAB, ['NIFTY']).map((l) => l.kind)).toEqual(['CE', 'PE']);
+  });
+
+  it('the 3-leg cap counts only legs on the allowed underlyings', () => {
+    const text = 'RELIANCE 1500 CE, SUNPHARMA 1800 PE, BANKNIFTY 59000 CE, NIFTY 25700 PE, NIFTY 25900 CE, NIFTY 26000 CE';
+    const legs = optionLegsOf(text, VOCAB, ['RELIANCE', 'SUNPHARMA', 'BANKNIFTY', 'NIFTY'], new Set(['NIFTY']));
+    expect(legs.map((l) => l.strike)).toEqual([25700, 25900, 26000]);
+  });
+
   it('a bare strike with one named underlying belongs to it; with none it is dropped', () => {
     expect(optionLegsOf('buy 25700 PE above 330', VOCAB, ['NIFTY'])).toEqual([{ underlying: 'NIFTY', strike: 25700, kind: 'PE', expiryHint: null }]);
     expect(optionLegsOf('buy 25700 PE above 330', VOCAB, [])).toEqual([]);

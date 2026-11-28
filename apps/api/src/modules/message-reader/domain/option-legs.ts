@@ -41,9 +41,12 @@ function looseTokens(text: string): string[] {
  * Every "<strike> CE|PE" pair in the post, each given to the nearest instrument named before it (the
  * signal-intake vocabulary's own instrument match on its normalised tokens; without a vocabulary, the
  * nearest preceding token that is one of `underlyings`). A pair with no preceding instrument belongs to
- * the post's only named underlying, else it is dropped. Unique, in post order, at most MAX_OPTION_LEGS.
+ * the post's only named underlying, else it is dropped. "25700 CE & PE" is both legs. The post's written
+ * expiry (normalise lifts one per post) applies only to the legs on the underlying it was written next to
+ * (see {@link expiryOwner}); every other leg takes the nearest listed expiry. Legs on an underlying outside
+ * `only` (when given) are skipped BEFORE the cap. Unique, in post order, at most MAX_OPTION_LEGS.
  */
-export function optionLegsOf(text: string, vocab: Vocabulary | null, underlyings: readonly string[]): OptionLeg[] {
+export function optionLegsOf(text: string, vocab: Vocabulary | null, underlyings: readonly string[], only?: ReadonlySet<string>): OptionLeg[] {
   const named = [...new Set(underlyings.map((u) => u.trim().toUpperCase()).filter(Boolean))];
   let tokens: string[];
   let expiryHint: ExpiryHint | null = null;
@@ -58,23 +61,48 @@ export function optionLegsOf(text: string, vocab: Vocabulary | null, underlyings
     const set = new Set(named);
     hits = tokens.flatMap((t, i) => (set.has(t) ? [{ i, name: t }] : []));
   }
-  const out: OptionLeg[] = [];
-  const seen = new Set<string>();
-  for (let i = 1; i < tokens.length && out.length < MAX_OPTION_LEGS; i++) {
+  const pairs: Array<{ at: number; strike: number; kind: 'CE' | 'PE' }> = [];
+  for (let i = 1; i < tokens.length; i++) {
     if ((tokens[i] !== 'CE' && tokens[i] !== 'PE') || !isNumber(tokens[i - 1])) continue;
     const strike = Number(tokens[i - 1]);
     if (!(strike > 0)) continue;
+    pairs.push({ at: i - 1, strike, kind: tokens[i] as 'CE' | 'PE' });
+    // "25700 CE & PE" / "25700 CE AND PE" / "25700 CE / PE": the same strike's other side too.
+    const other = tokens[i] === 'CE' ? 'PE' : 'CE';
+    if (['&', 'AND', '/', '+'].includes(tokens[i + 1] ?? '') && tokens[i + 2] === other) pairs.push({ at: i - 1, strike, kind: other });
+  }
+  const owner = vocab && expiryHint ? expiryOwner(text, vocab, hits, named) : null;
+  const out: OptionLeg[] = [];
+  const seen = new Set<string>();
+  for (const p of pairs) {
+    if (out.length >= MAX_OPTION_LEGS) break;
     let underlying: string | null = null;
-    for (const h of hits) if (h.i < i - 1) underlying = h.name;
+    for (const h of hits) if (h.i < p.at) underlying = h.name;
     if (!underlying && named.length === 1) underlying = named[0];
-    if (!underlying) continue;
-    const kind = tokens[i] as 'CE' | 'PE';
-    const key = `${underlying}|${strike}|${kind}`;
+    if (!underlying || (only && !only.has(underlying))) continue;
+    const key = `${underlying}|${p.strike}|${p.kind}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ underlying, strike, kind, expiryHint });
+    out.push({ underlying, strike: p.strike, kind: p.kind, expiryHint: owner === underlying ? expiryHint : null });
   }
   return out;
+}
+
+/**
+ * The underlying the post's expiry was written next to: the last instrument named before the expiry text
+ * (the shortest prefix whose normalised form already carries the expiry), else the first one named after it,
+ * else the post's only named underlying.
+ */
+function expiryOwner(text: string, vocab: Vocabulary, hits: ReadonlyArray<{ i: number; name: string }>, named: readonly string[]): string | null {
+  let lo = 1;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (normalise(text.slice(0, mid), vocab).expiry) hi = mid;
+    else lo = mid + 1;
+  }
+  const prefix = instrumentHits(normalise(text.slice(0, lo), vocab).tokens, vocab);
+  return prefix.length ? prefix[prefix.length - 1].name : (hits[0]?.name ?? (named.length === 1 ? named[0] : null));
 }
 
 type Row = Record<string, unknown>;

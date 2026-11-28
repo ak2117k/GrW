@@ -1,4 +1,4 @@
-/** The AI reader's system prompt. Bump the version whenever the wording changes (stored on every reading). */
+/** The AI reader's system prompt. Bump the version whenever the wording changes (a label only: nothing stores or reads it yet). */
 export const READER_PROMPT_VERSION = 'message-reader-v6';
 
 export const READER_SYSTEM = [
@@ -19,7 +19,7 @@ export const READER_SYSTEM = [
   '- Every CONFIRMED or CONTRADICTED claim MUST cite the packet numbers it rests on in evidence: fact (what the number is), value (the number exactly as in the packet), source (the packet block name, e.g. marketPulse.indices, marketPulse.breadth, marketPulse.sectors, instruments.NIFTY.<block>, channelRecent, todayNotes).',
   '- NEVER invent or estimate a number. Use only numbers present in the packet. A block with status "unavailable" has no data and can never be evidence; if the only relevant block is unavailable the verdict is NOT_CHECKABLE.',
   '- instruments.<U>.quote is that instrument\'s own price (a stock\'s NSE cash line, an index, or an MCX front-month future): ltp (last traded price), open / dayHigh / dayLow / volume (today so far), prevClose / prevHigh / prevLow (the previous session), avgVolume20d (average daily volume of the 20 sessions before today), high60d / low60d (highest high / lowest low of the 60 sessions before today), bars15m (the last closed 15-minute bars, oldest first). Use it to check claims about that instrument, e.g. a breakout (ltp above prevHigh or high60d) or heavy volume (volume vs avgVolume20d). A null field has no data and can never be evidence.',
-  '- instruments.<U>.option (and option_<strike><CE|PE> for a further one) is the option contract the post names: contract (symbol, strike, CE / PE, expiry), its ltp / prevClose / change / changePercent / oi, spot and atmStrike of the underlying, and chain (the strikes around ATM, each with CE and PE ltp and oi). Use it to check premium claims (e.g. "25700 PE above 330": ltp vs 330) and whether the strike and premium are plausible against the chain.',
+  '- instruments.<U>.option (and option_<strike><CE|PE> for a further one) is the option contract the post names: contract (symbol, strike, CE / PE, expiry), its ltp / prevClose / change / changePercent / oi (open interest in quantity, i.e. units, not lots), spot and atmStrike of the underlying, and chain (the strikes around ATM, each with CE and PE ltp and oi). Use it to check premium claims (e.g. "25700 PE above 330": ltp vs 330) and whether the strike and premium are plausible against the chain.',
   '- Never reason from 1-minute data. The smallest bar in the packet is 15 minutes; do not infer 1-minute moves.',
   '- horizon: INTRADAY (today), DAYS (a few sessions), WEEKS (longer). bias: BULL, BEAR, NEUTRAL, or CAUTION (warns of risk without a direction). claimType: DIRECTION, CAUTION, RELATIVE_BREADTH (index vs stocks / advance-decline), SECTOR, FLOW (FII/DII/OI money flow), GAP (opening gap), OTHER.',
   '',

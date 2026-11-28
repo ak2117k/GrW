@@ -228,8 +228,35 @@ describe('review round 1 (2026-11-28): drill looks only when the drill alarm is 
     t.evaluate.mockReturnValue({ fires: [{ name: 'level-break', detail: 'broke 7950' }], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' });
     await t.pass('15:45:30');
     const row = t.record.mock.calls[0][0];
-    expect(row.triggeredBy).toEqual(expect.arrayContaining([ALARM_FIRE, 'level-break']));
+    // Final wave item 1: the drill alarm is left OUT of a look that can sell — out of its fires and its packet.
+    expect(row.triggeredBy).toEqual(['level-break']);
     expect(row).toMatchObject({ verdict: 'EXIT_NOW', reason: 'the 15m broke the low' });
+  });
+
+  it('final wave item 1: real fire + drill alarm in one pass — the packet carries no drill text, EXIT_NOW is real', async () => {
+    const t = makeSvc({ open: [drillAlarmRow()], recent: [agentRow('15:25:00')], verdict: EXIT, gate: parseJudgeGateConfig({ SENTINEL_LIVE_MAX_GAP_MIN: '0' }) });
+    t.evaluate.mockReturnValue({ fires: [{ name: 'level-break', detail: 'broke 7950' }], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' });
+    const buildPacket = (t.svc as unknown as { packets: { build: jest.Mock } }).packets.build;
+    await t.pass('15:45:30');
+    expect(buildPacket).toHaveBeenCalledTimes(1);
+    const [, , , fires, review] = buildPacket.mock.calls[0];
+    expect(fires.map((f: { name: string }) => f.name)).toEqual(['level-break']);
+    expect(JSON.stringify({ fires, review })).not.toMatch(/DRILL|nothing is sold|drill/i);
+    expect(review?.authority?.alarm ?? null).toBeNull();
+    expect(t.record.mock.calls[0][0]).toMatchObject({ verdict: 'EXIT_NOW', reason: 'the 15m broke the low' });
+  });
+
+  it('final wave item 1: a heartbeat look while the drill alarm is open (already answered) shows no drill alarm', async () => {
+    // The drill look answered at 15:45:10 (tagged row) — a later heartbeat look must not carry the drill text.
+    const drillRow = agentRow('15:45:10', { reason: '[advisory: authority drill] still inside the 15m range' });
+    const t = makeSvc({ open: [drillAlarmRow()], recent: [drillRow], verdict: EXIT });
+    t.evaluate.mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'HEARTBEAT' });
+    const buildPacket = (t.svc as unknown as { packets: { build: jest.Mock } }).packets.build;
+    await t.pass('16:01:00'); // past the 900 s rate cap from the 15:45:10 look
+    expect(buildPacket).toHaveBeenCalledTimes(1);
+    const [, , , , review] = buildPacket.mock.calls[0];
+    expect(review?.authority?.alarm ?? null).toBeNull();
+    expect(t.record.mock.calls[0][0].verdict).toBe('EXIT_NOW');
   });
 
   it('a drill-only look tags every verdict\'s reason (a HOLD too), so it can never answer a real alarm', async () => {

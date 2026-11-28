@@ -1568,8 +1568,22 @@ export class SentinelCycleService {
       return null;
     }
 
+    // DRILL TEXT NEVER REACHES A LOOK THAT CAN SELL (final review 2026-11-28, item 1): when the lead alarm is a drill
+    // alarm and this pass is NOT drill-only (a real fire, a due heartbeat, the live gap), the drill alarm is left OUT of
+    // the fires and of the packet — the agent never reads "nothing is sold" on a look whose EXIT_NOW is real. The drill
+    // alarm waits for a drill-only pass, or is answered (observe-only, by the escalation runner) from this real look.
+    let packetAlarmRow = alarmRow;
+    if (alarmRow && isDrillAlarm(alarmRow)) {
+      const isThisDrill = (f: TripwireResult['fires'][number]) =>
+        f.name === ALARM_FIRE && (f as Partial<AlarmFire>).alarmId === alarmRow.id;
+      const drillOnly = !decision.heartbeat && decision.fires.length > 0 && decision.fires.every(isThisDrill);
+      if (!drillOnly) {
+        packetAlarmRow = null;
+        if (decision.fires.some(isThisDrill)) decision = { ...decision, fires: decision.fires.filter((f) => !isThisDrill(f)) };
+      }
+    }
     const authorityReview: Pick<PacketReview, 'authority'> | null = this.authorityLive(entry)
-      ? { authority: { alarm: alarmRow ? packetAlarm(alarmRow) : null, brief: null } }
+      ? { authority: { alarm: packetAlarmRow ? packetAlarm(packetAlarmRow) : null, brief: null } }
       : null;
     return {
       index,

@@ -531,7 +531,7 @@ describe('SignalIntakeService — image posts (vision)', () => {
         await m.svc.handle(img(m, 'm1', 'A'));
         await drain(m);
         expect(classify).toHaveBeenCalledTimes(1);
-        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', reason: 'vision (llm): image is noise', llmResult: expect.objectContaining({ description: DESC.description }) });
+        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', reason: 'vision (cache): image is noise', llmResult: expect.objectContaining({ description: DESC.description, descriptionSource: 'model' }) });
         expect(doneOf(m)[0].reading).toMatchObject({ description: DESC.description });
         await m.svc.handle(img(m, 'm2', 'B', '', 2));
         await drain(m, 6);
@@ -559,15 +559,106 @@ describe('SignalIntakeService — image posts (vision)', () => {
         expect(m.mem.classes.get('m1')).toMatchObject({ llmResult: expect.objectContaining({ description: DESC.description }) });
       });
 
-      it('the model still gives no description: one re-read per process, then the old reply is used (no loop)', async () => {
-        const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] });
+      it('the model still gives no description: a marked stand-in is stored, one re-read per process (no loop)', async () => {
+        const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [], instruments: ['SENSEX'] });
         const m = make({ vision: v });
         await seedOld(m);
         await m.svc.handle(img(m, 'm1', 'A'));
         await drain(m);
+        expect(m.mem.classes.get('m1')).toMatchObject({ llmResult: expect.objectContaining({ description: 'image showing SENSEX; the model gave no description', descriptionSource: 'stand-in' }) });
         await m.svc.handle(img(m, 'm2', 'B', '', 2));
         await drain(m, 6);
         expect(classify).toHaveBeenCalledTimes(1);
+      });
+
+      it('a stored stand-in does not block a later re-describe (a new process re-reads it)', async () => {
+        const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [], ...DESC });
+        const m = make({ vision: v });
+        await seedOld(m, { ...OLD, description: 'image; the model gave no description', descriptionSource: 'stand-in' });
+        await m.svc.handle(img(m, 'm1', 'A'));
+        await drain(m);
+        expect(classify).toHaveBeenCalledTimes(1);
+        expect(m.mem.classes.get('m1')).toMatchObject({ llmResult: expect.objectContaining({ description: DESC.description, descriptionSource: 'model' }) });
+      });
+
+      it('a fresh (uncached) read with no description also stores the marked stand-in; describe off stores none', async () => {
+        const { v } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] });
+        const m = make({ vision: v });
+        await m.svc.handle(img(m, 'm1', 'A'));
+        await drain(m);
+        expect(m.mem.classes.get('m1')).toMatchObject({ llmResult: expect.objectContaining({ description: 'image; the model gave no description', descriptionSource: 'stand-in' }) });
+        const off = make({ vision: fakeVision({ kind: 'NOISE', isSignal: false, signals: [] }).v, env: { SIGNAL_VISION_DESCRIBE: 'off' } });
+        await off.svc.handle(img(off, 'm1', 'A'));
+        await drain(off);
+        expect(off.mem.classes.get('m1')?.llmResult).not.toHaveProperty('description');
+      });
+
+      it('ruling: a re-read never changes the class — cached NOISE re-read as SIGNAL stays NOISE, no signal, no signal.ready', async () => {
+        const { v, classify } = fakeVision({ kind: 'SIGNAL', isSignal: true, signals: [call], shownTime: '14:34', ...DESC });
+        const m = make({ vision: v });
+        await seedOld(m);
+        await m.svc.handle(img(m, 'm1', 'A'));
+        await drain(m);
+        expect(classify).toHaveBeenCalledTimes(1);
+        expect(m.mem.signals).toHaveLength(0);
+        expect(signalEvents(m)).toEqual([]);
+        const row = m.mem.classes.get('m1');
+        expect(row).toMatchObject({ status: 'NOISE', llmResult: expect.objectContaining({ kind: 'NOISE', isSignal: false, signals: [], description: DESC.description, levels: DESC.levels }) });
+        expect(row?.llmResult).not.toHaveProperty('shownTime');
+        expect(doneOf(m)[0].reading).toMatchObject({ kind: 'NOISE', isSignal: false, signals: [], description: DESC.description });
+      });
+
+      it('a duplicate delivery while the re-read is in flight is deduped (LLM_PENDING): one call, one vision.done', async () => {
+        let release!: (r: VisionReply) => void;
+        const { v, classify } = fakeVision(() => new Promise<VisionReply>((r) => (release = r)));
+        const m = make({ vision: v });
+        await seedOld(m);
+        const post = img(m, 'm1', 'A');
+        await m.svc.handle(post);
+        await flush();
+        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'LLM_PENDING' });
+        await m.svc.handle(post);
+        await flush();
+        release({ kind: 'NOISE', isSignal: false, signals: [], ...DESC });
+        await drain(m);
+        expect(classify).toHaveBeenCalledTimes(1);
+        expect(doneOf(m)).toHaveLength(1);
+        expect(doneOf(m)[0].reading).toMatchObject({ description: DESC.description });
+        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE' });
+      });
+
+      it('two back-to-back posts of the same stale image share one re-read; both get the description', async () => {
+        let release!: (r: VisionReply) => void;
+        const { v, classify } = fakeVision(() => new Promise<VisionReply>((r) => (release = r)));
+        const m = make({ vision: v });
+        await seedOld(m);
+        await m.svc.handle(img(m, 'm1', 'A'));
+        await m.svc.handle(img(m, 'm2', 'B', '', 1));
+        await flush();
+        expect(m.mem.classes.get('m2')).toMatchObject({ status: 'LLM_PENDING' });
+        release({ kind: 'NOISE', isSignal: false, signals: [], ...DESC });
+        await drain(m);
+        await flush();
+        expect(classify).toHaveBeenCalledTimes(1);
+        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', llmResult: expect.objectContaining({ description: DESC.description }) });
+        expect(m.mem.classes.get('m2')).toMatchObject({ status: 'NOISE', llmResult: expect.objectContaining({ description: DESC.description }) });
+        expect(doneOf(m).map((d) => d.reading?.description)).toEqual([DESC.description, DESC.description]);
+      });
+
+      it('a shared re-read that fails: the second post gets the old cached reply', async () => {
+        let fail!: (e: Error) => void;
+        const { v } = fakeVision(() => new Promise<VisionReply>((_r, j) => (fail = j)));
+        const m = make({ vision: v });
+        await seedOld(m);
+        await m.svc.handle(img(m, 'm1', 'A'));
+        await m.svc.handle(img(m, 'm2', 'B', '', 1));
+        await flush();
+        fail(new Error('claude CLI: timed out'));
+        await drain(m);
+        await flush();
+        expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', reason: 'vision (cache): image is noise' });
+        expect(m.mem.classes.get('m2')).toMatchObject({ status: 'NOISE', reason: 'vision (cache): image is noise' });
+        expect(doneOf(m)).toHaveLength(2);
       });
 
       it.each([

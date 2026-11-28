@@ -8,7 +8,7 @@ import type { MessagesTransport, TransportImage, TransportRequest } from '../../
 import { runInSharedSlot } from '../../ai-assist/assist-slot';
 import { judgeTransportFrom, vertexModelId, vertexModelMapFrom } from '../../trade-sentinel/services/llm-transport';
 import { SentinelCycleService } from '../../trade-sentinel/services/sentinel-cycle.service';
-import { readVisionReply, withDescription, SIGNAL_VISION_SCHEMA, SIGNAL_VISION_SCHEMA_LEGACY, SIGNAL_VISION_SYSTEM, SIGNAL_VISION_SYSTEM_LEGACY, type VisionReply } from '../domain/llm-schema';
+import { readVisionReply, SIGNAL_VISION_SCHEMA, SIGNAL_VISION_SCHEMA_LEGACY, SIGNAL_VISION_SYSTEM, SIGNAL_VISION_SYSTEM_LEGACY, type VisionReply } from '../domain/llm-schema';
 import type { TelegramMediaRef } from '../domain/types';
 import { SignalIntakeRepository } from '../repositories/signal-intake.repository';
 import { SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig } from '../signal-intake.config';
@@ -158,16 +158,15 @@ export class SignalVisionService implements SignalVision, OnApplicationBootstrap
     const t = this.transportOf();
     const send = (describe: boolean) =>
       runInSharedSlot(this.cycle, () => t.messages.create(requestOf(describe)), { maxWaitMs: this.cfg.llmMaxWaitMs, lane: 'signals', job: SIGNAL_VISION_JOB });
-    let described = this.describes();
+    const describe = this.describes();
     let message: Awaited<ReturnType<typeof send>>;
     try {
-      message = await send(described);
+      message = await send(describe);
     } catch (e) {
-      if (!described || !isRequestRejected(e)) throw e;
+      if (!describe || !isRequestRejected(e)) throw e;
       // The provider refused the describe schema: never let that stop image reads — the old schema, for the rest of the process.
       if (!this.describeRejected) this.logger.error(`[signal-intake] vision describe schema rejected — falling back to the pre-2026-11-27 schema for this process: ${errText(e)}`);
       this.describeRejected = true;
-      described = false;
       message = await send(false);
     }
     if (message.stop_reason === 'refusal') throw new Error('the model declined');
@@ -178,8 +177,8 @@ export class SignalVisionService implements SignalVision, OnApplicationBootstrap
       .join('');
     const reply = readVisionReply(out);
     if (!reply) throw new Error('reply is not the vision schema JSON');
-    // A describe read always stores a description (NOISE too), so the sha256 cache can tell it from a pre-describe reply.
-    return described ? withDescription(reply) : reply;
+    // An empty description is left empty here: the intake marks a stand-in where it applies the reply.
+    return reply;
   }
 
   /** The trusted model for a trusted channel; the default model when the title is unknown or its lookup fails. */

@@ -308,6 +308,8 @@ const MAX_IMAGE_LEVELS = 12;
  */
 export interface ImageDescription {
   description?: string;
+  /** Who wrote `description`: the model, or the intake's stand-in when the model gave none (absent on old rows). */
+  descriptionSource?: 'model' | 'stand-in';
   /** Upper-cased exchange names the image shows (unvalidated against the vocabulary). */
   instruments?: string[];
   bias?: 'BULL' | 'BEAR' | 'NEUTRAL';
@@ -329,7 +331,10 @@ export interface VisionReply extends LlmParseReply, ImageDescription {
 export function readImageDescription(o: Record<string, unknown> | null | undefined): ImageDescription {
   const out: ImageDescription = {};
   if (!o || typeof o !== 'object') return out;
-  if (typeof o.description === 'string' && o.description.trim()) out.description = o.description.trim().slice(0, MAX_DESCRIPTION_CHARS);
+  if (typeof o.description === 'string' && o.description.trim()) {
+    out.description = o.description.trim().slice(0, MAX_DESCRIPTION_CHARS);
+    out.descriptionSource = o.descriptionSource === 'stand-in' ? 'stand-in' : 'model';
+  }
   if (Array.isArray(o.instruments)) {
     const names = [...new Set(o.instruments.filter((x): x is string => typeof x === 'string').map((x) => x.trim().toUpperCase()).filter(Boolean))].slice(0, MAX_IMAGE_INSTRUMENTS);
     if (names.length) out.instruments = names;
@@ -348,10 +353,11 @@ export function readImageDescription(o: Record<string, unknown> | null | undefin
   return out;
 }
 
-/** The reply (a stored or a fresh one) says, in words, what its image shows. */
+/** The reply (a stored or a fresh one) says, in the model's words, what its image shows (a stand-in does not count). */
 export function hasImageDescription(reply: unknown): boolean {
-  const d = reply && typeof reply === 'object' ? (reply as { description?: unknown }).description : undefined;
-  return typeof d === 'string' && !!d.trim();
+  if (!reply || typeof reply !== 'object') return false;
+  const o = reply as { description?: unknown; descriptionSource?: unknown };
+  return typeof o.description === 'string' && !!o.description.trim() && o.descriptionSource !== 'stand-in';
 }
 
 /**
@@ -368,13 +374,14 @@ export function cachedVisionReply(raw: unknown): VisionReply | null {
 }
 
 /**
- * A describe-schema reply with no usable description gets a plain stand-in (kind + named instruments), so every
- * described read stores a description: the reader is told the model gave none, and the sha256 cache never re-reads it.
+ * A describe-schema reply with no usable description gets a plain, marked stand-in (the named instruments only), so
+ * every described read stores a description and the reader is told the model gave none. `descriptionSource:
+ * 'stand-in'` keeps it from counting as a description: a later process may re-describe that image.
  */
 export function withDescription(reply: VisionReply): VisionReply {
   if (hasImageDescription(reply)) return reply;
   const names = reply.instruments?.length ? ` showing ${reply.instruments.join(', ')}` : '';
-  return { ...reply, description: `${reply.kind} image${names}; the model gave no description` };
+  return { ...reply, description: `image${names}; the model gave no description`, descriptionSource: 'stand-in' };
 }
 
 /** A trade_signals tag carrying the screenshot's own call time: `CALL_AT:HH:MM` (IST clock). */

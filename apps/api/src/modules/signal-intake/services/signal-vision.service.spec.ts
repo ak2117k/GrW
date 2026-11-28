@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Logger } from '@nestjs/common';
-import { cachedVisionReply, hasImageDescription, readVisionReply, SIGNAL_VISION_SCHEMA, SIGNAL_VISION_SCHEMA_LEGACY, SIGNAL_VISION_SYSTEM, SIGNAL_VISION_SYSTEM_LEGACY } from '../domain/llm-schema';
+import { cachedVisionReply, hasImageDescription, readVisionReply, withDescription, SIGNAL_VISION_SCHEMA, SIGNAL_VISION_SCHEMA_LEGACY, SIGNAL_VISION_SYSTEM, SIGNAL_VISION_SYSTEM_LEGACY } from '../domain/llm-schema';
 import { parseSignalIntakeConfig } from '../signal-intake.config';
 import { isRequestRejected, servedVisionModel, SIGNAL_VISION_JOB, SignalVisionService, visionModelFor, visionTransportState } from './signal-vision.service';
 
@@ -214,12 +214,21 @@ describe('SignalVisionService.classify', () => {
       expect(SIGNAL_VISION_SYSTEM_LEGACY).not.toMatch(/position screenshot/);
     });
 
-    it('a NOISE describe reply with no description gets a plain stand-in (kind + instruments), so the cache never re-reads it', async () => {
+    it('classify does not invent a description (the intake adds the marked stand-in where it applies the reply)', async () => {
       const { svc } = make({ SENTINEL_JUDGE: 'cli' }, JSON.stringify({ kind: 'NOISE', isSignal: false, signals: [], items: [], shownTime: null, description: ' ', instruments: ['sensex'], bias: 'NONE', levels: [] }));
       const r = await svc.classify('A small short side trade is active!', image);
-      expect(r.kind).toBe('NOISE');
-      expect(r.description).toMatch(/^NOISE image showing SENSEX/);
-      expect(r.description).toMatch(/no description/);
+      expect(r).toEqual({ kind: 'NOISE', isSignal: false, signals: [], instruments: ['SENSEX'] });
+    });
+
+    it('withDescription: a marked stand-in without the kind word; a model description is kept and marked model', () => {
+      const r = withDescription({ kind: 'NOISE', isSignal: false, signals: [], instruments: ['SENSEX'] });
+      expect(r).toMatchObject({ description: 'image showing SENSEX; the model gave no description', descriptionSource: 'stand-in' });
+      expect(withDescription({ kind: 'SIGNAL', isSignal: false, signals: [] }).description).toBe('image; the model gave no description');
+      // A stand-in is not a description for the cache: a later process may re-describe the image.
+      expect(hasImageDescription(r)).toBe(false);
+      const m = readVisionReply(JSON.stringify({ kind: 'NOISE', isSignal: false, signals: [], description: 'broker P&L screenshot' }));
+      expect(m).toMatchObject({ description: 'broker P&L screenshot', descriptionSource: 'model' });
+      expect(withDescription(m!)).toBe(m);
     });
 
     it('a described reply is kept as given', async () => {

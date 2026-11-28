@@ -6,7 +6,7 @@ import { dedupKey, planCluster } from '../domain/cluster';
 import { findContract, listedExpiries, segmentOf } from '../domain/contract';
 import { inferExpiry } from '../domain/expiry';
 import { classifyCommentary, hasBias, recapReason, type CommentaryClass, type InfoItem, type RefPrices } from '../domain/info';
-import { cachedVisionReply, CALL_AT_TAG, clockOrNull, hasImageDescription, readImageDescription, validateInfoItems, validateLlmSignal, type InfoLlmReply, type LlmParseReply, type VisionReply } from '../domain/llm-schema';
+import { cachedVisionReply, CALL_AT_TAG, clockOrNull, hasImageDescription, readImageDescription, validateInfoItems, validateLlmSignal, withDescription, type InfoLlmReply, type LlmParseReply, type VisionReply } from '../domain/llm-schema';
 import { prefilter, type PrefilterResult } from '../domain/prefilter';
 import { hasNewCall, resultPostReason } from '../domain/result-post';
 import { parseSignal } from '../domain/rule-parser';
@@ -104,6 +104,8 @@ export class SignalIntakeService {
   private visionReserveLoggedDay = '';
   /** Image sha256s sent to vision by this process: a cached reply without a description is re-read at most once. */
   private readonly visionReadShas = new Set<string>();
+  /** In-flight re-describes by image sha256 (null: that read failed): back-to-back posts of one stale image share it. */
+  private readonly visionShaReads = new Map<string, Promise<VisionReply | null>>();
   /** In-process count of INFO extractions today (a floor under the ai_calls count). */
   private infoDay = '';
   private infoUsed = 0;
@@ -284,6 +286,29 @@ export class SignalIntakeService {
     return null;
   }
 
+  /**
+   * A stale cached reply with a re-read's description: the class (kind / isSignal / signals / items / shownTime) is
+   * the cached one — a re-read never makes a new call — and only the descriptive fields come from the re-read.
+   */
+  private redescribed(cached: VisionReply, fresh: VisionReply): VisionReply {
+    return {
+      kind: cached.kind,
+      isSignal: cached.isSignal,
+      signals: cached.signals,
+      ...(cached.items ? { items: cached.items } : {}),
+      ...(cached.shownTime ? { shownTime: cached.shownTime } : {}),
+      ...readImageDescription(fresh as unknown as Record<string, unknown>),
+    };
+  }
+
+  /**
+   * A describe read always stores a description: an empty one gets a marked stand-in (descriptionSource 'stand-in',
+   * which the cache treats as missing). A read under the legacy schema (describe off / rejected) is left as it is.
+   */
+  private standIn(reply: VisionReply): VisionReply {
+    return this.visionDescribes() ? withDescription(reply) : reply;
+  }
+
   /** The next vision read carries a description (the describe schema is on and the provider has not rejected it). */
   private visionDescribes(): boolean {
     return this.config.visionDescribe && (this.vision?.describes?.() ?? true);
@@ -327,9 +352,24 @@ export class SignalIntakeService {
   ): Promise<void> {
     const describeOnly = !!opts.describeOnly;
     const cached = cachedVisionReply(await this.repo.cachedVision(media.sha256));
-    // Fix 4 (prod 2026-11-28 14:55 UTC): a reply cached before the describe schema has no description — a miss for a
-    // describe read, re-read once per process. Whatever stops that re-read (age, cap, reserve, a failure) uses the old reply.
-    const stale = !!cached && !hasImageDescription(cached) && this.visionDescribes() && !this.visionReadShas.has(media.sha256);
+    // Fix 4 (prod 2026-11-28 14:55 UTC): a reply cached before the describe schema (or with only a stand-in) has no
+    // description — a miss for a describe read, re-read once per process. The re-read only adds the description: the
+    // class (kind / signals / items / shownTime) stays the cached one. Whatever stops it (age, cap, reserve, a failure)
+    // uses the old reply.
+    const needsDescription = !!cached && !hasImageDescription(cached) && this.visionDescribes();
+    const sharedRead = needsDescription ? this.visionShaReads.get(media.sha256) : undefined;
+    if (cached && sharedRead) {
+      // The same stale image is being re-read for another post: wait for that one reply (outside the serial chain).
+      if (this.inflight.has(evt.messageId)) return;
+      this.inflight.add(evt.messageId);
+      if (!describeOnly) await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
+      void sharedRead
+        .then((fresh) => this.serial(() => this.applyVision(evt, postedAt, media, fresh ? this.redescribed(cached, fresh) : cached, base, 'cache', describeOnly)))
+        .catch((e) => this.logger.warn(`[signal-intake] vision read of ${evt.messageId} failed: ${errText(e)}`))
+        .finally(() => this.inflight.delete(evt.messageId));
+      return;
+    }
+    const stale = needsDescription && !this.visionReadShas.has(media.sha256);
     if (cached && !stale) {
       await this.applyVision(evt, postedAt, media, cached, base, 'cache', describeOnly);
       return;
@@ -371,12 +411,32 @@ export class SignalIntakeService {
     this.inflight.add(evt.messageId);
     if (this.visionReadShas.size >= 20_000) this.visionReadShas.clear();
     this.visionReadShas.add(media.sha256);
-    if (!describeOnly && !useCached) await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
+    // LLM_PENDING also during a re-describe: a duplicate delivery is then deduped (a failure still applies the old reply over it).
+    if (!describeOnly) await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
     // Outside the serial chain, like the text fallback.
-    void (this.vision as SignalVision)
+    const read = (this.vision as SignalVision)
       .classify(String(evt.text ?? ''), media, { channelId: evt.channelId })
+      .then((reply) => this.standIn(reply));
+    if (useCached) {
+      // Other posts of this image while it is re-read share the one reply (null: the re-read failed).
+      const sha = media.sha256;
+      const shared = read.then(
+        (r) => r as VisionReply | null,
+        () => null,
+      );
+      this.visionShaReads.set(sha, shared);
+      void shared.finally(() => {
+        if (this.visionShaReads.get(sha) === shared) this.visionShaReads.delete(sha);
+      });
+    }
+    void read
       .then(
-        (reply) => this.serial(() => this.applyVision(evt, postedAt, media, reply, base, 'llm', describeOnly)),
+        (reply) =>
+          this.serial(() =>
+            cached && useCached
+              ? this.applyVision(evt, postedAt, media, this.redescribed(cached, reply), base, 'cache', describeOnly)
+              : this.applyVision(evt, postedAt, media, reply, base, 'llm', describeOnly),
+          ),
         (e) =>
           this.serial(async () => {
             if (e instanceof AssistBusyError && !opts.backfill) this.visionUsed = Math.max(0, this.visionUsed - 1); // never started: no spend
